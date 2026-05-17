@@ -1,12 +1,7 @@
 import io
 import os
-import tempfile
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-import numpy as np
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm, cm
@@ -15,7 +10,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    Image, PageBreak, KeepTogether
+    PageBreak, KeepTogether
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -302,60 +297,6 @@ class PdfReportGenerator:
         elements.append(range_row)
         elements.append(Spacer(1, 0.8 * cm))
         return elements
-
-    def _radar_chart(self, a: AssessmentResponse) -> Image:
-        if self.FONT_NAME == "Helvetica":
-            return Spacer(1, 0)
-
-        plt.rcParams["font.family"] = "sans-serif"
-        plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "PingFang SC", "WenQuanYi Micro Hei", "Noto Sans CJK SC"]
-        plt.rcParams["axes.unicode_minus"] = False
-
-        categories = [d.name for d in a.dimensions]
-        values = [d.score for d in a.dimensions]
-        max_vals = [d.max_score for d in a.dimensions]
-
-        N = len(categories)
-        angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
-        angles += angles[:1]
-        values_full = values + values[:1]
-        max_full = max_vals + max_vals[:1]
-
-        # 缩小图表尺寸，更精致的比例
-        fig, ax = plt.subplots(figsize=(4.2, 4.2), subplot_kw=dict(polar=True))
-        ax.set_theta_offset(np.pi / 2)
-        ax.set_theta_direction(-1)
-
-        max_val = max(max_vals) + 3
-        ax.set_ylim(0, max_val)
-
-        # 填充区域
-        ax.fill(angles, max_full, alpha=0.06, color="#d1d5db")
-        ax.fill(angles, values_full, alpha=0.18, color="#d97706")
-        ax.plot(angles, values_full, "o-", linewidth=2.5, color="#d97706", markersize=5,
-                markerfacecolor="#ffffff", markeredgewidth=2, markeredgecolor="#d97706")
-
-        # 数据标注：偏移量按比例计算，避免遮挡
-        for angle, val, max_val_item in zip(angles, values_full, max_full):
-            offset = 2.5  # 固定小偏移
-            ax.text(angle, val + offset, f"{val:.0f}", ha="center", va="bottom",
-                    fontsize=12, fontweight="bold", color="#d97706")
-
-        ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(categories, fontsize=14, fontweight="medium", color="#1e293b")
-        ax.set_ylim(0, max_val)
-        ax.set_yticks(np.linspace(0, max_val, 4))
-        ax.set_yticklabels([f"{x:.0f}" for x in np.linspace(0, max_val, 4)], fontsize=8, color="#cbd5e1")
-        ax.grid(True, color="#e2e8f0", linewidth=0.6)
-
-        # 去掉外围边框
-        ax.spines["polar"].set_visible(False)
-
-        img_buf = io.BytesIO()
-        plt.savefig(img_buf, dpi=180, bbox_inches="tight", transparent=True, format="png")
-        plt.close()
-        img_buf.seek(0)
-        return Image(img_buf, width=10.5 * cm, height=10.5 * cm)
 
     def _dimension_detail(self, a: AssessmentResponse) -> list:
         elements = [Paragraph("二、分维度得分明细", self.styles["SectionTitle"]), Spacer(1, 0.3 * cm)]

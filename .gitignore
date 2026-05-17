@@ -9,6 +9,10 @@ __pycache__/
 # Build output
 backend/static/
 frontend/dist/
+.vite/
+
+# Temp files
+*.pdf
 
 # Data
 data/
