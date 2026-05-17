@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+__pycache__
+**/__pycache__
+*.pyc
+.git
+*.db
+data/
+backend/static/
+.env
+.DS_Store
+Thumbs.db
