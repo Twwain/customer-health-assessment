@@ -12,7 +12,7 @@ Or double-click `start.bat` on Windows.
 
 ## Project Overview
 
-Customer health assessment system (客情健康度评估系统) — internal training project. Import customer data, view/edit records, generate health score (0-100 across 4 dimensions), and export PDF reports with radar charts.
+Customer health assessment system (客情健康度评估系统) — internal training project. Import customer data, view/edit records, generate health score (0-100 across 4 dimensions), and export PDF reports.
 
 - **Backend**: Python FastAPI + SQLite + ReportLab PDF + matplotlib
 - **Frontend**: React 19 + TypeScript + Vite 8 + TailwindCSS v4 + React Router v7 + Recharts
@@ -24,7 +24,7 @@ backend/          → FastAPI on port 8000
   routers/        → REST endpoints
   services/       → Business logic (scoring, PDF)
 frontend/         → Vite dev server on port 5173, proxies /api → backend
-  components/     → Shared UI (Layout, CustomerForm, HealthRadar, ScoreGauge)
+  components/     → Shared UI (Layout, CustomerForm, ScoreGauge)
   pages/          → Route pages (Dashboard, CustomerList, CustomerDetail, ImportData, Assessment)
 ```
 
@@ -46,7 +46,7 @@ Levels: 优秀 ≥85 · 良好 70-84 · 一般 55-69 · 风险 <55
 
 ## PDF Generation
 
-`backend/services/pdf_report.py` uses ReportLab. Radar chart rendered via matplotlib saved to BytesIO buffer. Chinese font auto-detected from Windows/macOS/Linux paths — if fonts are missing, the radar chart is skipped (fallback to spacer). Font registration order: Microsoft YaHei → SimHei → PingFang → Noto Sans CJK.
+`backend/services/pdf_report.py` uses ReportLab. Chinese font auto-detected from Windows/macOS/Linux paths (TrueType-only, PostScript outlines are not supported). Docker uses WenQuanYi Micro Hei. Font registration order: Microsoft YaHei → SimHei → PingFang → WenQuanYi Micro Hei.
 
 Content-Disposition header uses RFC 5987 encoding (`filename*=UTF-8''...`) because Chinese characters can't appear raw in HTTP headers.
 
@@ -65,3 +65,15 @@ TailwindCSS v4 configured via `@import "tailwindcss"` in `index.css` + `@tailwin
 - Git Bash: browser auto-open uses `start` directly, not `cmd.exe /c start` (which opens a cmd window).
 - matplotlib on Windows Python 3.14 requires `--only-binary :all:` flag (`pip install matplotlib --only-binary :all:`).
 - `frontend/tsconfig.app.json` has `verbatimModuleSyntax: false` and `erasableSyntaxOnly: false` — Vite 8's rolldown bundler doesn't handle type-only interface exports from `.ts` files otherwise.
+
+## 测试
+
+```bash
+cd backend && python -m pytest tests/ -v
+```
+
+## 协作建议
+
+- **开始前先对齐边界**：想清楚要什么，更重要的是**不要什么**——用一句话说清楚范围
+- **完成后在浏览器里验证**：别只看代码，打开页面确认交互和状态都符合预期
+- **交代任务时加一句 "为什么"**：帮助对方理解意图，而不是盲从指令

@@ -7,15 +7,35 @@ export default function AssessmentView() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<Assessment | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchData = () => {
+    setLoading(true);
+    setError(null);
     getAssessment(Number(id))
       .then((r) => setData(r.data))
+      .catch((e) => setError(e instanceof Error ? e.message : "评估数据获取失败"))
       .finally(() => setLoading(false));
-  }, [id]);
+  };
+
+  useEffect(() => { fetchData(); }, [id]);
 
   if (loading) {
     return <div className="text-slate-400 py-20 text-center">评估计算中...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="py-20 text-center">
+        <div className="text-4xl mb-4">⚠️</div>
+        <div className="text-red-600 font-medium mb-2">评估数据获取失败</div>
+        <div className="text-slate-400 text-sm mb-4">{error}</div>
+        <div className="flex justify-center gap-3">
+          <button onClick={fetchData} className="px-4 py-2 bg-amber-600 text-white rounded-xl text-sm hover:bg-amber-700 transition">重试</button>
+          <Link to="/customers" className="px-4 py-2 border border-slate-300 text-slate-600 rounded-xl text-sm hover:bg-slate-50 transition">返回列表</Link>
+        </div>
+      </div>
+    );
   }
 
   if (!data) {

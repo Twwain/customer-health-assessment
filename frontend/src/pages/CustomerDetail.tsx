@@ -12,18 +12,22 @@ export default function CustomerDetail() {
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(isNew);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchData = () => {
     if (isNew) return;
     setLoading(true);
+    setError(null);
     getCustomer(Number(id))
       .then((r) => {
         setCustomer(r.data);
         setOriginal(r.data);
       })
-      .catch(() => navigate("/customers"))
+      .catch((e) => setError(e instanceof Error ? e.message : "加载失败"))
       .finally(() => setLoading(false));
-  }, [id, isNew, navigate]);
+  };
+
+  useEffect(() => { fetchData(); }, [id, isNew]);
 
   const handleSave = async () => {
     if (!customer.customer_name) {
@@ -53,6 +57,20 @@ export default function CustomerDetail() {
 
   if (loading) {
     return <div className="text-slate-400 py-20 text-center">加载中...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="py-20 text-center">
+        <div className="text-4xl mb-4">⚠️</div>
+        <div className="text-red-600 font-medium mb-2">客户数据加载失败</div>
+        <div className="text-slate-400 text-sm mb-4">{error}</div>
+        <div className="flex justify-center gap-3">
+          <button onClick={fetchData} className="px-4 py-2 bg-amber-600 text-white rounded-xl text-sm hover:bg-amber-700 transition">重试</button>
+          <Link to="/customers" className="px-4 py-2 border border-slate-300 text-slate-600 rounded-xl text-sm hover:bg-slate-50 transition">返回列表</Link>
+        </div>
+      </div>
+    );
   }
 
   return (

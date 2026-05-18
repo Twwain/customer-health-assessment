@@ -7,6 +7,7 @@ export default function CustomerList() {
   const [data, setData] = useState<CustomerListResponse | null>(null);
   const [industries, setIndustries] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const search = searchParams.get("search") ?? "";
   const industry = searchParams.get("industry") ?? "";
@@ -17,12 +18,16 @@ export default function CustomerList() {
     listIndustries().then((r) => setIndustries(r.data)).catch(() => {});
   }, []);
 
-  useEffect(() => {
+  const fetchData = () => {
     setLoading(true);
+    setError(null);
     listCustomers({ search, industry, level, page })
       .then((r) => setData(r.data))
+      .catch((e) => setError(e instanceof Error ? e.message : "加载失败"))
       .finally(() => setLoading(false));
-  }, [search, industry, level, page]);
+  };
+
+  useEffect(() => { fetchData(); }, [search, industry, level, page]);
 
   const handleDelete = async (id: number, name: string) => {
     if (!confirm(`确定删除「${name}」吗？`)) return;
@@ -78,6 +83,13 @@ export default function CustomerList() {
 
       {loading ? (
         <div className="text-slate-400 py-20 text-center">加载中...</div>
+      ) : error ? (
+        <div className="py-20 text-center">
+          <div className="text-4xl mb-4">⚠️</div>
+          <div className="text-red-600 font-medium mb-2">数据加载失败</div>
+          <div className="text-slate-400 text-sm mb-4">{error}</div>
+          <button onClick={fetchData} className="px-4 py-2 bg-amber-600 text-white rounded-xl text-sm hover:bg-amber-700 transition">重试</button>
+        </div>
       ) : !data || data.items.length === 0 ? (
         <div className="py-20 text-center text-slate-400">
           {search || industry ? "没有匹配的客户" : "暂无客户数据"}

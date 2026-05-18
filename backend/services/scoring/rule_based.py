@@ -146,7 +146,7 @@ class RuleBasedStrategy(ScoringStrategy):
         score += growth_bonus
         details.append(f"增长潜力「{c.growth_potential}」：+{growth_bonus}分")
 
-        score = max(2.5, min(25, score))
+        score = max(0, min(25, score))
         return DimensionScore(name="风险等级", score=score, max_score=25, details=details)
 
     def _level(self, total: float) -> tuple[str, str]:
