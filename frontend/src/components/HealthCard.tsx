@@ -13,7 +13,7 @@ interface HealthCardProps {
 }
 
 function dimColor(pct: number): string {
-  return pct >= 70 ? "#10B981" : pct >= 40 ? "#F59E0B" : "#EF4444";
+  return pct >= 70 ? "#1AAE39" : pct >= 40 ? "#DD5B00" : "#E03131";
 }
 
 export default function HealthCard({ assessment, trend, compact, onAlertAI, onEditFactors }: HealthCardProps) {
@@ -23,7 +23,7 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
   const t = trend ? trendMeta(trend.latest_score, trend.previous_score) : null;
 
   return (
-    <div className="rounded-2xl border border-border bg-surface p-4">
+    <div className="rounded-xl border border-border bg-surface p-4">
       <div className="flex items-start gap-3">
         <Ring score={assessment.total_score} color={color} size={compact ? 62 : 76} />
         <div className="min-w-0 flex-1">
@@ -57,7 +57,7 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
           return (
             <div key={d.key} className="flex items-center gap-2">
               <span className="w-[68px] shrink-0 text-[12px] text-ink-2">{d.name}</span>
-              <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-[#EDF0F4]">
+              <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-[#F0F0F0]">
                 <div className="h-full rounded-full" style={{ width: `${pct}%`, background: dc }} />
               </div>
               <span className="w-[44px] shrink-0 text-right text-[12px] font-medium text-ink">
@@ -93,7 +93,7 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
         </button>
         {onAlertAI && (
           <button
-            className="rounded-lg bg-accent px-2.5 py-1.5 text-[12.5px] font-medium text-white shadow-[0_2px_8px_rgba(0,102,255,.25)] transition hover:bg-accent-hover"
+            className="rounded-lg bg-accent px-2.5 py-1.5 text-[12.5px] font-medium text-white transition hover:bg-accent-hover"
             onClick={onAlertAI}
           >
             ✨ AI 一键解读预警
@@ -111,14 +111,14 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
 
       {radarOpen && (
         <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
-          <div className="mb-1 text-[13px] font-semibold text-brand">📐 维度雷达图</div>
+          <div className="mb-1 text-[13px] font-semibold text-ink">📐 维度雷达图</div>
           <div className="flex flex-col items-center gap-2 sm:flex-row sm:items-center">
             <RadarChart dimensions={assessment.dimensions} color={color} size={compact ? 168 : 190} />
             <div className="flex-1 space-y-2">
               {assessment.dimensions.map((d) => (
                 <div key={d.key} className="flex items-center gap-2 text-[12px]">
                   <span className="w-[64px] text-muted">{d.name}</span>
-                  <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-[#EDF0F4]">
+                  <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-[#F0F0F0]">
                     <div
                       className="h-full rounded-full"
                       style={{ width: `${d.max_score ? (d.score / d.max_score) * 100 : 0}%`, background: color }}
@@ -136,7 +136,7 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
 
       {trendOpen && trend && (
         <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
-          <div className="mb-1 text-[13px] font-semibold text-brand">📈 健康分历史趋势</div>
+          <div className="mb-1 text-[13px] font-semibold text-ink">📈 健康分历史趋势</div>
           <div className="overflow-x-auto">
             <TrendChart trend={trend} color={color} width={compact ? 360 : 470} height={168} />
           </div>

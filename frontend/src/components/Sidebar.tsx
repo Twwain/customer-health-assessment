@@ -62,7 +62,7 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
     <div className="flex h-full flex-col bg-sidebar">
       <button
         onClick={newChat}
-        className="mx-3.5 mt-3.5 mb-2.5 flex h-9.5 items-center justify-center gap-1.5 rounded-[10px] bg-accent text-[13.5px] font-medium text-white shadow-[0_2px_8px_rgba(0,102,255,.28)] transition hover:bg-accent-hover"
+        className="mx-3.5 mt-3.5 mb-2.5 flex h-9.5 items-center justify-center gap-1.5 rounded-lg bg-accent text-[13.5px] font-medium text-white transition hover:bg-accent-hover"
       >
         ＋ 新建对话
       </button>
@@ -78,10 +78,10 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
             className={`mb-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition ${
               s.id === activeSessionId
                 ? "bg-accent-soft font-medium text-accent"
-                : "text-ink-2 hover:bg-[#ECF0F5]"
+                : "text-ink-2 hover:bg-[#EBEBEB]"
             }`}
           >
-            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.id === activeSessionId ? "bg-accent" : "bg-[#C3CBD6]"}`} />
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.id === activeSessionId ? "bg-accent" : "bg-[#C4C4C4]"}`} />
             <span className="flex-1 truncate">{s.title}</span>
           </button>
         ))}
@@ -113,9 +113,6 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
         />
       </div>
 
-      <div className="px-4 py-2.5 text-[10.5px] text-muted">
-        客情评估智能体
-      </div>
     </div>
   );
 }
@@ -138,10 +135,11 @@ function NavItem({
   return (
     <button
       onClick={onClick}
-      className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] transition ${
-        on ? "bg-surface font-semibold text-brand shadow-sm" : "text-ink-2 hover:bg-[#ECF0F5]"
+      className={`relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] transition ${
+        on ? "bg-surface font-semibold text-ink" : "text-ink-2 hover:bg-[#EBEBEB] hover:text-accent"
       }`}
     >
+      {on && <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-accent" />}
       <span>{icon}</span>
       <span>{label}</span>
       {badge !== undefined && (

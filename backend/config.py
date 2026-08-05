@@ -74,15 +74,30 @@ LLM_RETRY_BACKOFF = _env_float("LLM_RETRY_BACKOFF", 0.6)
 LLM_ENABLED = _env_bool("LLM_ENABLED", True)
 # 流式请求是否附带 usage 统计（部分网关不支持，握手失败会自动关闭）
 LLM_STREAM_USAGE = _env_bool("LLM_STREAM_USAGE", True)
+# 是否启用函数调用工具（customer_compare / knowledge_search）。
+# 关闭后对话仍可正常生成，只是不再主动检索与对比；不兼容 function calling
+# 的供应商会在适配器层收到 400 后自动去掉 tools 重试，无需改这里。
+LLM_TOOLS_ENABLED = _env_bool("LLM_TOOLS_ENABLED", True)
 
 
 # ══════════════════════════ Embedding（SOW §3.3.2）═══════════════════════════
 # 本期固定智谱 GLM embedding-3，同样走 OpenAI 兼容 /embeddings。
 
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "zhipu")
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY") or os.getenv("ZHIPU_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
+# 优先读 .env.example / README 约定的 LLM_EMBEDDING_*，兼容旧的 EMBEDDING_* 与 ZHIPU_API_KEY
+EMBEDDING_BASE_URL = (
+    os.getenv("LLM_EMBEDDING_BASE_URL")
+    or os.getenv("EMBEDDING_BASE_URL")
+    or "https://open.bigmodel.cn/api/paas/v4"
+)
+EMBEDDING_API_KEY = (
+    os.getenv("LLM_EMBEDDING_API_KEY")
+    or os.getenv("EMBEDDING_API_KEY")
+    or os.getenv("ZHIPU_API_KEY", "")
+)
+EMBEDDING_MODEL = (
+    os.getenv("LLM_EMBEDDING_MODEL") or os.getenv("EMBEDDING_MODEL") or "embedding-3"
+)
 EMBEDDING_DIM = _env_int("EMBEDDING_DIM", 1024)
 EMBEDDING_BATCH_SIZE = _env_int("EMBEDDING_BATCH_SIZE", 16)
 
@@ -119,6 +134,8 @@ CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 60)
 # 检索：先召回 RAG_RECALL_K 候选，再 Rerank 到 RAG_TOP_K（SOW §3.3.2 Top-K=5）
 RAG_TOP_K = _env_int("RAG_TOP_K", 5)
 RAG_RECALL_K = _env_int("RAG_RECALL_K", 20)
+# 命中切片窗口扩展：把相邻切片一起拼进上下文，缓解跨切片信息截断（0=关闭）
+RAG_WINDOW = _env_int("RAG_WINDOW", 1)
 RERANKER = os.getenv("RERANKER", "metadata")  # metadata（默认，无依赖）/ bge（本地 CrossEncoder）
 BGE_MODEL = os.getenv("BGE_MODEL", "BAAI/bge-reranker-v2-m3")
 # 检索时优先提升的分类权重（内部规范 / 指标 > 外部趋势，SOW §3.3.2 分类权重）

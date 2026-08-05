@@ -14,7 +14,7 @@ export function LevelBadge({ grade, size = "md" }: { grade: string; size?: "sm" 
   const font = size === "sm" ? 11 : 12;
   return (
     <span
-      className="inline-flex items-center rounded-full font-semibold"
+      className="inline-flex items-center rounded-full font-semibold leading-none whitespace-nowrap"
       style={{
         padding: pad,
         fontSize: font,
@@ -30,20 +30,20 @@ export function LevelBadge({ grade, size = "md" }: { grade: string; size?: "sm" 
 
 export function AlertBadge({ level, message }: { level: string; message: string }) {
   const color =
-    level === "high" ? "#EF4444" : level === "medium" ? "#F59E0B" : "#0066FF";
+    level === "high" ? "#E03131" : level === "medium" ? "#DD5B00" : "#0075DE";
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full px-2 py-[2px] text-[11.5px] font-medium"
+      className="inline-flex max-w-full min-w-0 items-center gap-1 overflow-hidden rounded-full px-2 py-[2px] text-[11.5px] font-medium"
       style={{ color, background: hexToRgba(color, 0.1), border: `1px solid ${hexToRgba(color, 0.25)}` }}
     >
-      ⚠ {message}
+      <span className="truncate">⚠ {message}</span>
     </span>
   );
 }
 
 export function UrgencyBadge({ urgency, label }: { urgency: string; label: string }) {
   const color =
-    urgency === "high" ? "#EF4444" : urgency === "medium" ? "#F59E0B" : "#0066FF";
+    urgency === "high" ? "#E03131" : urgency === "medium" ? "#DD5B00" : "#0075DE";
   return (
     <span
       className="rounded px-1.5 py-[1px] text-[11px] font-semibold"

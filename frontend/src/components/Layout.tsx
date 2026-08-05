@@ -10,22 +10,24 @@ function Topbar({ onMenu }: { onMenu?: () => void }) {
   const { status } = useLLMStatus();
   const degraded = status?.degraded ?? false;
   return (
-    <div className="flex h-[52px] shrink-0 items-center gap-2.5 bg-brand px-[18px] text-white">
+    <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border bg-surface px-5">
       <button
         onClick={onMenu}
-        className="mr-1 flex h-7 w-7 items-center justify-center rounded-lg text-[16px] text-[#CFE0F2] md:hidden"
+        className="mr-1 flex h-7 w-7 items-center justify-center rounded-lg text-[16px] text-ink-2 md:hidden"
       >
         ☰
       </button>
-      <div className="flex items-center gap-2 text-[15px] font-semibold tracking-wide">
-        <span className="h-4 w-4 rounded-full border-[3px] border-[#4D9AFF]" />
+      <div className="flex items-center gap-2 text-[14.5px] font-semibold tracking-tight text-ink">
+        <span className="h-[18px] w-[18px] rounded-[5px] bg-accent" />
         客情评估智能体
       </div>
       <div className="flex-1" />
       {status && (
         <div
-          className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] ${
-            degraded ? "bg-[rgba(245,158,11,.2)] text-[#FFD79A]" : "bg-[rgba(255,255,255,.1)] text-[#CFE0F2]"
+          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] ${
+            degraded
+              ? "border-warning/25 bg-warning-soft text-warning"
+              : "border-border bg-surface-2 text-ink-2"
           }`}
         >
           <span className={`h-[7px] w-[7px] rounded-full ${degraded ? "bg-warning" : "bg-success"}`} />
@@ -77,7 +79,7 @@ function Shell() {
         {drawerOpen && (
           <>
             <div className="overlay-mask" onClick={() => setDrawerOpen(false)} />
-            <div className="fixed inset-y-0 left-0 z-[700] w-[268px] bg-sidebar shadow-[6px_0_24px_rgba(0,0,0,.2)]">
+            <div className="fixed inset-y-0 left-0 z-[700] w-[268px] bg-sidebar shadow-[6px_0_24px_rgba(15,15,15,.16)]">
               <Sidebar onNavigate={() => setDrawerOpen(false)} />
             </div>
           </>
@@ -93,7 +95,7 @@ function Shell() {
         <aside className="w-[260px] shrink-0 border-r border-border bg-sidebar">
           <Sidebar />
         </aside>
-        <main className="min-w-0 flex-1">
+        <main className="min-w-0 flex-1 overflow-y-auto">
           <Outlet />
         </main>
       </div>

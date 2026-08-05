@@ -676,3 +676,50 @@ def test_list_items_tag_search(app_client):
     assert app_client.get("/api/knowledge/items", params={"q": "回款"}).json()["total"] == 1
     assert app_client.get("/api/knowledge/items", params={"q": "政务"}).json()["total"] == 1
     assert app_client.get("/api/knowledge/items", params={"q": "不存在的标签"}).json()["total"] == 0
+
+
+def test_retrieve_window_expands_neighbors(db, memory_store, fake_embed):
+    """窗口扩展：命中切片正文应包含相邻切片，缓解跨切片信息截断。"""
+    from models import KnowledgeChunk
+
+    svc = _kb(db, memory_store, fake_embed)
+    long_text = "\n".join(
+        f"第{i}段：客户满意度评估规则说明，用于制造足够长的切片以便测试窗口扩展。"
+        for i in range(60)
+    )
+    doc = svc.create_from_upload(
+        title="窗口扩展测试", category="内部规范", filename="w.md", raw=long_text.encode("utf-8")
+    )
+    assert doc.chunk_count >= 3
+
+    results = retrieve_knowledge(
+        "客户满意度评估规则",
+        embed_func=fake_embed,
+        store=memory_store,
+        db=db,
+        top_k=1,
+        status=None,
+    )
+    assert results
+    hit = results[0]
+    single = (
+        db.query(KnowledgeChunk)
+        .filter(
+            KnowledgeChunk.document_id == hit.document_id,
+            KnowledgeChunk.chunk_index == hit.chunk_index,
+        )
+        .first()
+    )
+    assert single is not None
+    assert len(hit.content) > len(single.content)
+
+    plain = retrieve_knowledge(
+        "客户满意度评估规则",
+        embed_func=fake_embed,
+        store=memory_store,
+        db=db,
+        top_k=1,
+        window=0,
+        status=None,
+    )
+    assert len(plain[0].content) <= len(single.content)

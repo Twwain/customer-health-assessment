@@ -103,7 +103,7 @@ bash deploy.sh
 | `backend/prompt_templates.yaml` | 场景化 Prompt 模板（free_qa / assessment / strategy / alert_analysis / session_title）+ 安全护栏 |
 | `backend/data/knowledge/` | 预置知识（如 `customer_health_methodology.md` 评估方法论） |
 
-关键环境变量：`LLM_ENABLED` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` / `LLM_EMBEDDING_*` / `KNOWLEDGE_VECTOR_STORE`（chroma|memory）/ `RERANKER`（metadata|bge）/ `RAG_TOP_K` / `CHAT_TREND_POINTS` / `DB_PATH`。
+关键环境变量：`LLM_ENABLED` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` / `LLM_EMBEDDING_*` / `LLM_TOOLS_ENABLED`（函数调用工具开关，默认开）/ `KNOWLEDGE_VECTOR_STORE`（chroma|memory）/ `RERANKER`（metadata|bge）/ `RAG_TOP_K` / `RAG_WINDOW`（命中切片窗口扩展，默认 1）/ `CHAT_TREND_POINTS` / `DB_PATH`。
 
 ## 评分模型
 
@@ -115,8 +115,8 @@ bash deploy.sh
 ## AI 对话与知识库
 
 - 对话流式输出（SSE），场景化 Prompt 注入量化评估 + 趋势 + 知识上下文；策略以 ```` ```json ```` 结构化块输出，前端 `StrategyItem` 直接渲染。
-- Agent Loop 自批判/精炼，输出含知识溯源（📎 可定位原文切片）；采纳策略自动入库（proposed → 经审核转 canonical 后参与 grounding 检索）。
-- 知识检索链路：metadata 过滤 + 分类权重 → dense（智谱 embedding-3）向量召回 → Rerank 重排；结构化指标（行业基准等精确数值）走 SQLite 精确查询，评估时按客户行业注入。
+- Agent Loop 自批判/精炼；模型可主动调用工具补充信息：客户横向对比（`customer_compare`）与知识库补充检索（`knowledge_search`），输出含知识溯源（📎 可定位原文切片）。工具由 `LLM_TOOLS_ENABLED` 控制，不支持的网关会自动去掉 tools 重试。策略消息支持 ⭐ 采纳标记（当前为前端本地标记，入库沉淀待实现）。
+- 知识检索链路：metadata 过滤 + 分类权重 → dense（智谱 embedding-3）向量召回 → Rerank 重排；命中切片默认扩展相邻 ±1 切片（`RAG_WINDOW`，可关）缓解跨切片截断；结构化指标（行业基准等精确数值）走 SQLite 精确查询，评估时按客户行业注入。
 
 ## 报告与预警
 
@@ -188,7 +188,7 @@ Dockerfile / docker-compose.yml / deploy.sh / start.sh / start.bat / .env.exampl
 | GET | `/api/chat/sessions/{id}` | 会话详情 |
 | DELETE | `/api/chat/sessions/{id}` | 删除会话 |
 | POST | `/api/chat/sessions/{id}/messages` | 发送消息（SSE 流式） |
-| POST | `/api/chat/sessions/{id}/evaluate` | 采纳策略入知识库 |
+| POST | `/api/chat/sessions/{id}/evaluate` | 快捷评估（AI 综合评估结论） |
 | POST | `/api/chat/sessions/{id}/strategy` | 生成策略建议 |
 | POST | `/api/chat/sessions/{id}/alert-analysis` | 预警解读 |
 | POST | `/api/chat/sessions/{id}/regenerate` | 重新生成 |

@@ -1,33 +1,39 @@
 @import "tailwindcss";
 
-/* 深蓝科技风设计系统（映射自 docs/prototype/styles.css 的 :root 变量） */
+/* 红白企业风格设计系统（白底 + 黑字 + 红色 CTA #E60012 + 中性灰分层）
+   主色 #E60012，只用于 CTA/主动作/选中态，不做大面积铺色。 */
 @theme {
-  --color-brand: #1A3A5C;
-  --color-brand-deep: #142E49;
-  --color-brand-soft: #24507A;
-  --color-accent: #0066FF;
-  --color-accent-hover: #0052CC;
-  --color-accent-soft: #E8F1FF;
+  /* 红色主色：主 CTA、选中态（靠小面积点缀保持克制） */
+  --color-brand: #E60012;
+  --color-brand-deep: #C5000F;
+  --color-brand-soft: #FF6B6B;
+  --color-accent: #E60012;
+  --color-accent-hover: #C5000F;
+  --color-accent-soft: #FDEBEC;
 
-  --color-bg: #F4F6F9;
+  /* 中性灰阶：主画布白，侧边栏浅灰，结构由发丝线（hairline）撑起 */
+  --color-bg: #FFFFFF;
   --color-surface: #FFFFFF;
-  --color-surface-2: #F8FAFC;
-  --color-sidebar: #F7F9FB;
-  --color-border: #E4E8EE;
-  --color-border-soft: #EEF1F5;
+  --color-surface-2: #F5F5F5;
+  --color-surface-3: #FAFAFA;
+  --color-sidebar: #F5F5F5;
+  --color-border: #E5E5E5;
+  --color-border-soft: #EFEFEF;
+  --color-border-strong: #D4D4D4;
 
-  --color-ink: #111827;
-  --color-ink-2: #4B5563;
-  --color-muted: #8A94A6;
+  --color-ink: #1A1A1A;
+  --color-ink-2: #333333;
+  --color-muted: #666666;
 
-  --color-success: #10B981;
-  --color-success-soft: #E7F8F1;
-  --color-warning: #F59E0B;
-  --color-warning-soft: #FEF4E2;
-  --color-danger: #EF4444;
-  --color-danger-soft: #FDECEC;
-  --color-info: #0EA5E9;
-  --color-info-soft: #E6F6FE;
+  /* 语义色（红/橙/绿/蓝传达状态，与主色红区分） */
+  --color-success: #1AAE39;
+  --color-success-soft: #E4F4E8;
+  --color-warning: #DD5B00;
+  --color-warning-soft: #FAEDE1;
+  --color-danger: #C62828;
+  --color-danger-soft: #FBE9E9;
+  --color-info: #0075DE;
+  --color-info-soft: #E4F0FB;
 }
 
 * { box-sizing: border-box; }
@@ -39,19 +45,32 @@ html, body, #root {
 
 body {
   background: var(--color-bg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", "Hiragino Sans GB", "Helvetica Neue", Arial, sans-serif;
   color: var(--color-ink);
   -webkit-font-smoothing: antialiased;
+  /* 数据密集型产品：数字等宽对齐（分数、趋势、统计） */
+  font-variant-numeric: tabular-nums;
 }
 
 button { font-family: inherit; cursor: pointer; }
 
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  color: var(--color-ink);
+}
+
+/* 输入时红色 2px 边框，选择时红色圈 */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #CBD3DD; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #AEB8C6; }
+::-webkit-scrollbar-thumb { background: #D6D6D6; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #BFBFBF; }
 
 /* 流式打字光标 */
 .cursor-blink {
@@ -66,7 +85,7 @@ button { font-family: inherit; cursor: pointer; }
 
 .typing i {
   width: 6px; height: 6px; border-radius: 50%;
-  background: #B9C3D0; display: inline-block; margin: 0 2px;
+  background: #B9B9B9; display: inline-block; margin: 0 2px;
   animation: bounce 1.2s infinite;
 }
 .typing i:nth-child(2) { animation-delay: .15s; }
@@ -76,20 +95,26 @@ button { font-family: inherit; cursor: pointer; }
 /* Markdown 渲染（轻量） */
 .md { font-size: 14px; line-height: 1.85; color: var(--color-ink); }
 .md p { margin: 0 0 10px; }
-.md h4 { margin: 18px 0 9px; font-size: 14.5px; font-weight: 600; color: var(--color-brand); }
+.md h4 { margin: 18px 0 9px; font-size: 14.5px; font-weight: 600; color: var(--color-ink); }
 .md ol, .md ul { margin: 0 0 10px; padding-left: 22px; }
 .md li { margin-bottom: 6px; }
-.md strong { color: var(--color-brand); font-weight: 600; }
+.md strong { color: var(--color-ink); font-weight: 600; }
 .md code {
   background: var(--color-surface-2); border: 1px solid var(--color-border-soft);
   padding: 1px 5px; border-radius: 4px; font-size: 12.5px;
 }
+.md blockquote {
+  margin: 0 0 10px; padding: 6px 12px;
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-surface-2); border-radius: 0 8px 8px 0;
+  color: var(--color-ink-2);
+}
 
 /* 抽屉遮罩 */
-.overlay-mask { position: fixed; inset: 0; background: rgba(16, 32, 56, .42); z-index: 600; }
+.overlay-mask { position: fixed; inset: 0; background: rgba(15, 15, 15, .38); z-index: 600; }
 .drawer-panel {
   position: fixed; top: 0; right: 0; height: 100%; width: 440px; z-index: 700;
-  background: var(--color-surface); box-shadow: -8px 0 32px rgba(16, 32, 56, .18);
+  background: var(--color-surface); box-shadow: -8px 0 32px rgba(15, 15, 15, .16);
   display: flex; flex-direction: column;
   animation: slideIn .24s cubic-bezier(.4, 0, .2, 1);
 }
@@ -98,6 +123,6 @@ button { font-family: inherit; cursor: pointer; }
 .modal-panel {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: 520px; max-width: 92vw; max-height: 82vh; z-index: 700;
-  background: var(--color-surface); border-radius: 16px; box-shadow: 0 12px 40px rgba(16, 32, 56, .16);
+  background: var(--color-surface); border-radius: 12px; box-shadow: rgba(15, 15, 15, .16) 0 16px 48px -8px;
   display: flex; flex-direction: column;
 }

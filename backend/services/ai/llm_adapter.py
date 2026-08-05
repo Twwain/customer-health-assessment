@@ -55,6 +55,22 @@ class ChatResult:
     finish_reason: str = ""
     latency_ms: int = 0
     raw_usage: dict[str, Any] = field(default_factory=dict)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+def normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    """把 OpenAI 响应的 tool_calls 归一化为 {id, name, arguments} 列表。"""
+    normalized: list[dict[str, Any]] = []
+    for tc in raw or []:
+        function = tc.get("function") or {}
+        normalized.append(
+            {
+                "id": tc.get("id") or "",
+                "name": function.get("name") or "",
+                "arguments": function.get("arguments") or "{}",
+            }
+        )
+    return normalized
 
 
 def estimate_tokens(text: str) -> int:
@@ -150,6 +166,7 @@ class OpenAICompatibleAdapter:
         temperature: float | None,
         max_tokens: int | None,
         extra: dict | None,
+        tools: Sequence[dict] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -160,6 +177,8 @@ class OpenAICompatibleAdapter:
         }
         if stream and self._stream_usage:
             payload["stream_options"] = {"include_usage": True}
+        if tools:
+            payload["tools"] = list(tools)
         if extra:
             payload.update(extra)
         return payload
@@ -192,11 +211,17 @@ class OpenAICompatibleAdapter:
         temperature: float | None = None,
         max_tokens: int | None = None,
         extra: dict | None = None,
+        tools: Sequence[dict] | None = None,
     ) -> ChatResult:
         """一次性返回完整回复。"""
         self._ensure_available()
         payload = self._payload(
-            messages, stream=False, temperature=temperature, max_tokens=max_tokens, extra=extra
+            messages,
+            stream=False,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra=extra,
+            tools=tools,
         )
         started = time.monotonic()
         data = self._post_with_retry("/chat/completions", payload)
@@ -211,6 +236,7 @@ class OpenAICompatibleAdapter:
             finish_reason=choice.get("finish_reason") or "",
             latency_ms=int((time.monotonic() - started) * 1000),
             raw_usage=usage,
+            tool_calls=normalize_tool_calls(message.get("tool_calls")),
         )
 
     def _post_with_retry(self, path: str, payload: dict) -> dict:
@@ -223,6 +249,12 @@ class OpenAICompatibleAdapter:
                     )
                 if response.status_code >= 400:
                     detail = response.text[:300]
+                    if response.status_code == 400 and "tools" in payload:
+                        # 供应商不支持 function calling：去掉 tools 重试一次，
+                        # 避免整条对话被降级为规则引擎。
+                        payload = {k: v for k, v in payload.items() if k != "tools"}
+                        last_error = LLMError(f"HTTP 400: {detail}")
+                        continue
                     if self._retryable_status(response.status_code) and attempt < self.max_retries:
                         last_error = LLMError(f"HTTP {response.status_code}: {detail}")
                         time.sleep(self.retry_backoff * (2**attempt))
@@ -250,6 +282,8 @@ class OpenAICompatibleAdapter:
         max_tokens: int | None = None,
         extra: dict | None = None,
         on_usage=None,
+        tools: Sequence[dict] | None = None,
+        on_tool_calls=None,
     ) -> Iterator[str]:
         """逐 Token 产出文本增量（SOW §3.2.1 首字延迟 < 2s）。
 
@@ -262,14 +296,24 @@ class OpenAICompatibleAdapter:
         attempt = 0
         while True:
             payload = self._payload(
-                messages, stream=True, temperature=temperature, max_tokens=max_tokens, extra=extra
+                messages,
+                stream=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra=extra,
+                tools=tools,
             )
             try:
-                yield from self._iter_stream(payload, on_usage)
+                yield from self._iter_stream(payload, on_usage, on_tool_calls)
                 return
             except _StreamStarted as exc:  # 已经吐过字，不重试，交给上层收尾
                 raise LLMError(str(exc.__cause__ or exc)) from exc
             except _StreamRetry as exc:
+                if exc.disable_tools and tools:
+                    # 供应商不支持 function calling：去掉 tools 重试一次，
+                    # 避免整条对话被降级为规则引擎。
+                    tools = None
+                    continue
                 # 网关不认 stream_options：关掉后立刻重来一次，不计入重试次数
                 if exc.disable_stream_usage and self._stream_usage:
                     self._stream_usage = False
@@ -280,8 +324,9 @@ class OpenAICompatibleAdapter:
                     continue
                 raise LLMUnavailableError(f"LLM 流式请求失败：{exc.reason}") from exc
 
-    def _iter_stream(self, payload: dict, on_usage) -> Iterator[str]:
+    def _iter_stream(self, payload: dict, on_usage, on_tool_calls=None) -> Iterator[str]:
         emitted = False
+        tool_acc: dict[int, dict[str, Any]] = {}
         try:
             with httpx.Client(timeout=self._timeout()) as client:
                 with client.stream(
@@ -297,6 +342,7 @@ class OpenAICompatibleAdapter:
                             disable_stream_usage=(
                                 response.status_code == 400 and "stream_options" in payload
                             ),
+                            disable_tools=(response.status_code == 400 and "tools" in payload),
                             retryable=self._retryable_status(response.status_code),
                         )
                     for line in response.iter_lines():
@@ -315,16 +361,33 @@ class OpenAICompatibleAdapter:
                         if usage and on_usage:
                             on_usage(usage)
                         for choice in chunk.get("choices") or []:
-                            delta = (choice.get("delta") or {}).get("content")
-                            if delta:
+                            delta = choice.get("delta") or {}
+                            content = delta.get("content")
+                            if content:
                                 emitted = True
-                                yield delta
+                                yield content
+                            for tc in delta.get("tool_calls") or []:
+                                emitted = True
+                                index = int(tc.get("index", 0))
+                                entry = tool_acc.setdefault(
+                                    index, {"id": "", "name": "", "arguments": ""}
+                                )
+                                if tc.get("id"):
+                                    entry["id"] = tc["id"]
+                                function = tc.get("function") or {}
+                                if function.get("name"):
+                                    entry["name"] += function["name"]
+                                entry["arguments"] += function.get("arguments") or ""
+            if tool_acc and on_tool_calls:
+                on_tool_calls([tool_acc[i] for i in sorted(tool_acc)])
         except (_StreamRetry, GeneratorExit):
             raise
         except Exception as exc:
             if emitted:
                 raise _StreamStarted() from exc
-            raise _StreamRetry(reason=str(exc), disable_stream_usage=False, retryable=True) from exc
+            raise _StreamRetry(
+                reason=str(exc), disable_stream_usage=False, disable_tools=False, retryable=True
+            ) from exc
 
     # ── Embedding ───────────────────────────────────────────────────────
 
@@ -343,10 +406,13 @@ class OpenAICompatibleAdapter:
 
 
 class _StreamRetry(Exception):
-    def __init__(self, *, reason: str, disable_stream_usage: bool, retryable: bool):
+    def __init__(
+        self, *, reason: str, disable_stream_usage: bool, disable_tools: bool, retryable: bool
+    ):
         super().__init__(reason)
         self.reason = reason
         self.disable_stream_usage = disable_stream_usage
+        self.disable_tools = disable_tools
         self.retryable = retryable
 
 

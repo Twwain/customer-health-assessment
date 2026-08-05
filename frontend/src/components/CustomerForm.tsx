@@ -1,5 +1,14 @@
 import type { CustomerResponse, FactorConfigItem, FactorConfigResponse } from "../types";
 
+/** 客户基本信息字段（与后端 CustomerUpdate 一致），与客情因子区分开 */
+export const BASIC_FIELDS = [
+  "customer_name",
+  "industry",
+  "contact_person",
+  "contact_phone",
+  "notes",
+] as const;
+
 interface CustomerFormProps {
   customer: CustomerResponse;
   config: FactorConfigResponse;
@@ -10,6 +19,9 @@ interface CustomerFormProps {
 
 function getBase(customer: CustomerResponse, config: FactorConfigResponse): Record<string, unknown> {
   const base: Record<string, unknown> = {};
+  for (const f of BASIC_FIELDS) {
+    base[f] = (customer as unknown as Record<string, unknown>)[f] ?? "";
+  }
   for (const dim of config.dimensions) {
     for (const f of dim.factors) {
       if (f.source === "custom_fields") {
@@ -31,12 +43,69 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
 
   return (
     <div className="space-y-3">
-      {config.dimensions
-        .filter((d) => d.enabled)
-        .map((dim, di) => (
-          <div key={dim.key} className="rounded-xl border border-border bg-surface p-3">
+      {/* 区块一：客户基本信息 */}
+      <div className="rounded-xl border border-border bg-surface p-3">
+        <div className="mb-2.5 flex items-center gap-2">
+          <span className="text-[13.5px] font-semibold text-ink">📇 客户基本信息</span>
+        </div>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          <BasicField
+            label="客户名称 *"
+            type="text"
+            value={String(merged.customer_name ?? "")}
+            readOnly={readOnly}
+            placeholder="如：示例汽车集团"
+            onChange={(v) => set("customer_name", v)}
+          />
+          <BasicField
+            label="行业"
+            type="text"
+            value={String(merged.industry ?? "")}
+            readOnly={readOnly}
+            placeholder="如：制造业"
+            onChange={(v) => set("industry", v)}
+          />
+          <BasicField
+            label="对接人"
+            type="text"
+            value={String(merged.contact_person ?? "")}
+            readOnly={readOnly}
+            placeholder="客户方联系人"
+            onChange={(v) => set("contact_person", v)}
+          />
+          <BasicField
+            label="联系电话"
+            type="text"
+            value={String(merged.contact_phone ?? "")}
+            readOnly={readOnly}
+            placeholder="13800000000"
+            onChange={(v) => set("contact_phone", v)}
+          />
+          <BasicField
+            label="备注"
+            type="textarea"
+            value={String(merged.notes ?? "")}
+            readOnly={readOnly}
+            placeholder="重点跟进客户等"
+            onChange={(v) => set("notes", v)}
+            wide
+          />
+        </div>
+      </div>
+
+      {/* 区块二：客情因子信息 */}
+      <div className="rounded-xl border border-border bg-surface p-3">
+        <div className="mb-2.5 flex items-center gap-2">
+          <span className="text-[13.5px] font-semibold text-ink">🧩 客情因子信息</span>
+          <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[11px] text-muted">维度驱动评分</span>
+        </div>
+        <div className="divide-y divide-border-soft">
+          {config.dimensions
+            .filter((d) => d.enabled)
+            .map((dim, di) => (
+              <div key={dim.key} className={di === 0 ? "pb-3" : "py-3"}>
             <div className="mb-2.5 flex items-center gap-2">
-              <span className="text-[13.5px] font-semibold text-brand">
+              <span className="text-[13.5px] font-semibold text-ink">
                 {["①", "②", "③", "④", "⑤", "⑥"][di] ?? "•"} {dim.name}
               </span>
               <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[11px] text-muted">
@@ -54,8 +123,55 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
                 />
               ))}
             </div>
-          </div>
-        ))}
+              </div>
+            ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BasicField({
+  label,
+  type,
+  value,
+  readOnly,
+  placeholder,
+  onChange,
+  wide,
+}: {
+  label: string;
+  type: "text" | "textarea";
+  value: string;
+  readOnly?: boolean;
+  placeholder?: string;
+  onChange: (v: string) => void;
+  wide?: boolean;
+}) {
+  const inputCls =
+    "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
+  return (
+    <div className={wide ? "sm:col-span-2" : ""}>
+      <label className="mb-1 block text-[12.5px] font-medium text-ink-2">{label}</label>
+      {type === "textarea" ? (
+        <textarea
+          className={inputCls}
+          rows={2}
+          value={value}
+          disabled={readOnly}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      ) : (
+        <input
+          type="text"
+          className={inputCls}
+          value={value}
+          disabled={readOnly}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
     </div>
   );
 }
@@ -72,7 +188,7 @@ function FactorField({
   onChange: (v: unknown) => void;
 }) {
   const inputCls =
-    "w-full rounded-lg border border-border bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
+    "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
   const label = (
     <label className="mb-1 block text-[12.5px] font-medium text-ink-2">
       {factor.label}

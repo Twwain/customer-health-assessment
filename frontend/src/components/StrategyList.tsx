@@ -39,7 +39,7 @@ export function StrategyList({
         if (list.length === 0) return null;
         return (
           <div key={g.key}>
-            <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-semibold text-brand">
+            <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-semibold text-ink">
               {g.title}
               <span className="rounded-full bg-surface-2 px-1.5 text-[11px] font-normal text-muted">
                 {list.length} 条

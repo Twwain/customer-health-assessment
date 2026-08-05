@@ -48,6 +48,7 @@ from .llm_adapter import (
 )
 from .prompt_templates import DEFAULT_SCENARIO, SCENARIOS, get_template
 from .strategy import generate, split_strategy_payload
+from .tools import MAX_TOOL_ROUNDS, TOOL_SCHEMAS, append_tool_results
 
 DEFAULT_TITLE = "新对话"
 TITLE_MAX_CHARS = 16
@@ -225,6 +226,20 @@ def _message_payload(message: ChatMessage) -> dict:
     }
 
 
+def _merge_references(*groups: list[dict] | None) -> list[dict]:
+    """合并多组知识引用并按 id 去重（预取 + 工具检索）。"""
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for group in groups:
+        for ref in group or []:
+            rid = ref.get("id") or ""
+            if rid in seen:
+                continue
+            seen.add(rid)
+            merged.append(ref)
+    return merged
+
+
 def run_turn(
     db: Session,
     session: ChatSession,
@@ -299,10 +314,19 @@ def run_turn(
     exclude_id = exclude_message_id or (user_message.id if user_message else None)
 
     chunks: list[str] = []
-    usage: dict[str, Any] = {}
+    tool_refs: list[dict[str, Any]] = []
+    # 工具循环有多轮流式请求：每轮取最后一次 usage 再累计到总 token 数，
+    # 既避免只统计最后一轮，也避免同一轮内 usage 重复出现时虚高。
+    used_tokens = 0
+    round_tokens = 0
+
+    def _collect_usage(u: dict[str, Any]) -> None:
+        nonlocal round_tokens
+        round_tokens = int(u.get("total_tokens") or 0)
+
     degraded_items: list[dict] = []
     degraded = False
-    warning = ""
+    warnings: list[str] = []
     agent_refs: list[dict] | None = None
 
     if scenario in AGENT_SCENARIOS:
@@ -314,23 +338,64 @@ def run_turn(
         for piece in _slice_text(gen.text):
             chunks.append(piece)
             yield TurnEvent("delta", {"text": piece})
+        warnings.extend(gen.warnings)
         for w in gen.warnings:
-            warning = w
             yield TurnEvent("warning", {"message": w})
     else:
         messages, template = _build_llm_messages(
             db, session, scenario=scenario, question=question, ctx=ctx, exclude_message_id=exclude_id
         )
         try:
-            stream = adapter.stream_chat_completion(
-                messages,
-                temperature=template.temperature,
-                max_tokens=template.max_tokens,
-                on_usage=usage.update,
-            )
-            for delta in stream:
-                chunks.append(delta)
-                yield TurnEvent("delta", {"text": delta})
+            tool_rounds = 0
+            exclude_ids = {ref.get("id") for ref in ctx.references}
+            tools_enabled = config.LLM_TOOLS_ENABLED
+            while True:
+                round_tokens = 0
+                tool_calls: list[dict[str, Any]] = []
+
+                def _collect_tool_calls(items: list[dict[str, Any]]) -> None:
+                    tool_calls.extend(items)
+
+                stream = adapter.stream_chat_completion(
+                    messages,
+                    temperature=template.temperature,
+                    max_tokens=template.max_tokens,
+                    on_usage=_collect_usage,
+                    tools=TOOL_SCHEMAS if tools_enabled else None,
+                    on_tool_calls=_collect_tool_calls,
+                )
+                for delta in stream:
+                    chunks.append(delta)
+                    yield TurnEvent("delta", {"text": delta})
+                used_tokens += round_tokens
+                if not tool_calls:
+                    break
+                tool_rounds += 1
+                messages, refs = append_tool_results(
+                    messages,
+                    tool_calls,
+                    customer=customer,
+                    db=db,
+                    exclude_ids=exclude_ids,
+                )
+                tool_refs.extend(refs)
+                exclude_ids.update(ref["id"] for ref in refs)
+                if tool_rounds >= MAX_TOOL_ROUNDS:
+                    # 已回填本轮工具结果：不带工具收尾一次，避免空回复
+                    warnings.append("工具调用次数已达上限，已基于已获取信息作答")
+                    round_tokens = 0
+                    stream = adapter.stream_chat_completion(
+                        messages,
+                        temperature=template.temperature,
+                        max_tokens=template.max_tokens,
+                        on_usage=_collect_usage,
+                        tools=None,
+                    )
+                    for delta in stream:
+                        chunks.append(delta)
+                        yield TurnEvent("delta", {"text": delta})
+                    used_tokens += round_tokens
+                    break
         except LLMUnavailableError as exc:
             degraded = True
             chunks.clear()
@@ -340,8 +405,8 @@ def run_turn(
                 chunks.append(piece)
                 yield TurnEvent("delta", {"text": piece})
         except LLMError as exc:  # 已经吐了一部分字，保留残文并提示
-            warning = f"生成中断：{exc}"
-            yield TurnEvent("warning", {"message": warning})
+            warnings.append(f"生成中断：{exc}")
+            yield TurnEvent("warning", {"message": f"生成中断：{exc}"})
         except Exception as exc:  # noqa: BLE001 - 兜底，保证前端一定收到结束事件
             degraded = True
             chunks.clear()
@@ -352,8 +417,8 @@ def run_turn(
                 yield TurnEvent("delta", {"text": piece})
 
     raw_text = "".join(chunks)
-    if warning:
-        raw_text = f"{raw_text}\n\n> ⚠️ {warning}"
+    if warnings:
+        raw_text = f"{raw_text}\n\n" + "\n\n".join(f"> ⚠️ {w}" for w in warnings)
 
     body, items = split_strategy_payload(guardrails.sanitize_output(raw_text))
     if degraded:
@@ -364,11 +429,12 @@ def run_turn(
             assessment_history.attach_strategy_snapshot(db, customer.id, items)
 
     # 知识溯源：agent 场景用其检索结果，其余用上下文注入的引用
-    final_refs = agent_refs if agent_refs is not None else ctx.references
+    base_refs = agent_refs if agent_refs is not None else ctx.references
+    final_refs = _merge_references(base_refs, tool_refs)
     if final_refs:
         yield TurnEvent("references", {"items": final_refs})
 
-    tokens = int(usage.get("total_tokens") or 0)
+    tokens = used_tokens
     if not tokens and not degraded:
         tokens = estimate_tokens(raw_text)
     assistant = ChatMessage(

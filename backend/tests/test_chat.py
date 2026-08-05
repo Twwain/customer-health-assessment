@@ -95,6 +95,7 @@ class FakeAdapter:
         self.available = available
         self.model = model
         self.calls: list[list] = []
+        self.tool_args: list = []
 
     def status(self):
         return {
@@ -105,8 +106,11 @@ class FakeAdapter:
             "reason": "" if self.available else "测试用不可用适配器",
         }
 
-    def stream_chat_completion(self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None):
+    def stream_chat_completion(
+        self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None, tools=None, on_tool_calls=None
+    ):
         self.calls.append(list(messages))
+        self.tool_args.append(tools)
         if self.error:
             raise self.error
         for chunk in self.chunks:
@@ -1043,3 +1047,387 @@ def test_generate_uses_real_store_for_references(db, customer, fake_llm):
     assert result.references[0]["title"] == "方法"
     assert result.references[0]["document_id"] == 1
     assert result.references[0]["score"] > 0.5
+
+
+# ── 客户对比工具与 function calling ──────────────────────────────────────
+
+
+def _make_customer(db, name, industry, satisfaction=5, **kwargs):
+    c = Customer(
+        customer_name=name,
+        industry=industry,
+        contact_person="",
+        contact_phone="",
+        cooperation_years=kwargs.get("cooperation_years", 1.0),
+        contact_frequency=kwargs.get("contact_frequency", "每月"),
+        customer_satisfaction=satisfaction,
+        contract_amount=kwargs.get("contract_amount", 100),
+        payment_status=kwargs.get("payment_status", "正常"),
+        growth_potential=kwargs.get("growth_potential", "中"),
+        custom_fields={},
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return c
+
+
+def test_customer_compare_returns_all_customers(db, customer):
+    _make_customer(db, "能源甲", "能源", satisfaction=9)
+    _make_customer(db, "能源乙", "能源", satisfaction=4)
+    result = tools.customer_compare(db=db)
+    assert result["count"] == 3
+    assert result["avg_score"] is not None
+    assert all("dimensions" in row for row in result["customers"])
+    assert any(row["industry"] == "能源" for row in result["customers"])
+
+
+def test_customer_compare_filters_industry_and_exclude(db, customer):
+    _make_customer(db, "能源甲", "能源")
+    _make_customer(db, "金融甲", "金融")
+    result = tools.customer_compare(db=db, industry="能源", exclude_customer_id=customer.id)
+    assert result["scope"] == "能源"
+    assert result["customers"]
+    assert all(row["industry"] == "能源" for row in result["customers"])
+    assert all(row["id"] != customer.id for row in result["customers"])
+
+
+def test_execute_tool_unknown_name_returns_error(db):
+    result = tools.execute_tool("not_exist", {}, db=db)
+    assert "error" in result
+
+
+def test_chat_completion_parses_tool_calls(monkeypatch):
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(
+                json_data={
+                    "model": "deepseek-v4-flash",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "customer_compare",
+                                            "arguments": '{"industry": "能源"}',
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {"total_tokens": 50},
+                }
+            )
+        ],
+    )
+    result = adapter.chat_completion(
+        [{"role": "user", "content": "hi"}], tools=tools.TOOL_SCHEMAS
+    )
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0]["name"] == "customer_compare"
+    assert "能源" in result.tool_calls[0]["arguments"]
+    assert fake.requests[0]["json"].get("tools") == tools.TOOL_SCHEMAS
+
+
+def test_stream_parses_tool_calls(monkeypatch):
+    adapter, _ = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(
+                lines=[
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"customer_compare","arguments":"{\\"industry\\": \\"能源\\"}"}}]}}]}',
+                    "data: [DONE]",
+                ]
+            )
+        ],
+    )
+    got: list[list[dict]] = []
+    list(adapter.stream_chat_completion([{"role": "user", "content": "hi"}], on_tool_calls=got.append))
+    assert len(got) == 1
+    assert got[0][0]["name"] == "customer_compare"
+    assert "能源" in got[0][0]["arguments"]
+
+
+class ToolCallingFakeAdapter(FakeAdapter):
+    """前 ``tool_rounds`` 轮请求工具，后续轮输出正文，用于验证 function calling 循环。"""
+
+    def __init__(self, tool_calls, final_chunks, tool_rounds=1, **kwargs):
+        super().__init__(chunks=[], **kwargs)
+        self.tool_calls = tool_calls
+        self.final_chunks = final_chunks
+        self.tool_rounds = tool_rounds
+        self.rounds = 0
+
+    def stream_chat_completion(
+        self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None, tools=None, on_tool_calls=None
+    ):
+        self.calls.append(list(messages))
+        self.tool_args.append(tools)
+        self.rounds += 1
+        if self.rounds <= self.tool_rounds:
+            if on_tool_calls:
+                on_tool_calls(self.tool_calls)
+            if on_usage:
+                on_usage(self.usage)
+            return
+        for chunk in self.final_chunks:
+            yield chunk
+        if on_usage:
+            on_usage(self.usage)
+
+
+def test_free_qa_runs_customer_compare_tool(db, customer):
+    tool_calls = [
+        {
+            "id": "call_1",
+            "name": "customer_compare",
+            "arguments": json.dumps({"exclude_customer_id": customer.id}),
+        }
+    ]
+    adapter = ToolCallingFakeAdapter(tool_calls=tool_calls, final_chunks=["对比结论：满意度最高。"])
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(db, title="", customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, content="和其他客户对比有什么优势"))
+    done = next(e for e in events if e.type == "done")
+    assert done.data["message"]["content"] == "对比结论：满意度最高。"
+    second = adapter.calls[1]
+    roles = [m["role"] for m in second if isinstance(m, dict)]
+    assert "tool" in roles
+    tool_msg = next(m for m in second if isinstance(m, dict) and m["role"] == "tool")
+    assert '"count"' in tool_msg["content"] and '"customers"' in tool_msg["content"]
+
+
+def test_knowledge_search_tool_dedups_and_returns_refs(db, monkeypatch):
+    from services.rag.retriever import RetrievedChunk as RC
+
+    def fake_retrieve(
+        query, *, customer=None, category=None, top_k=8, window=None, status="canonical", db=None, **kwargs
+    ):
+        return [
+            RC(
+                document_id=1, chunk_index=0, item_id=1, item_title="规范A",
+                category="内部规范", content="内容A", score=0.9, metadata={},
+            ),
+            RC(
+                document_id=2, chunk_index=1, item_id=2, item_title="指标B",
+                category="内部指标", content="内容B", score=0.8, metadata={},
+            ),
+        ]
+
+    monkeypatch.setattr("services.rag.retriever.retrieve_knowledge", fake_retrieve)
+    result = tools.knowledge_search(db=db, query="规范", top_k=8)
+    assert result["count"] == 2
+
+    tc = [{"id": "call_k", "name": "knowledge_search", "arguments": json.dumps({"query": "规范"})}]
+    messages, refs = tools.append_tool_results(
+        [{"role": "user", "content": "q"}], tc, db=db, exclude_ids={"1:0"}
+    )
+    payload = json.loads(messages[-1]["content"])
+    assert payload["count"] == 1
+    assert payload["results"][0]["id"] == "2:1"
+    assert [r["id"] for r in refs] == ["2:1"]
+    assert refs[0]["snippet"] == "内容B"
+
+
+def test_free_qa_knowledge_search_tool_adds_references(db, customer, monkeypatch):
+    from services.rag.retriever import RetrievedChunk as RC
+
+    def fake_retrieve(
+        query, *, customer=None, category=None, top_k=8, window=None, status="canonical", db=None, **kwargs
+    ):
+        if query == "规范":
+            return [
+                RC(
+                    document_id=9, chunk_index=2, item_id=9, item_title="规范",
+                    category="内部规范", content="知识内容", score=0.9, metadata={},
+                )
+            ]
+        return [
+            RC(
+                document_id=8, chunk_index=1, item_id=8, item_title="预取",
+                category="内部规范", content="预取内容", score=0.7, metadata={},
+            )
+        ]
+
+    monkeypatch.setattr("services.rag.retriever.retrieve_knowledge", fake_retrieve)
+    tool_calls = [
+        {"id": "call_k", "name": "knowledge_search", "arguments": json.dumps({"query": "规范"})}
+    ]
+    adapter = ToolCallingFakeAdapter(tool_calls=tool_calls, final_chunks=["基于知识作答。"])
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(db, title="", customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, content="公司对回款有什么规范"))
+    done = next(e for e in events if e.type == "done")
+    refs = done.data["message"].get("references") or []
+    assert any(r.get("id") == "9:2" for r in refs)
+
+
+def test_chat_completion_retries_without_tools_on_400(monkeypatch):
+    """非流式：供应商不支持 function calling 时去掉 tools 重试，避免整条对话降级。"""
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, text="tools unsupported"),
+            _FakeResponse(
+                json_data={
+                    "model": "deepseek-v4-flash",
+                    "choices": [{"message": {"content": "正常回答"}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": 12},
+                }
+            ),
+        ],
+    )
+    result = adapter.chat_completion(
+        [{"role": "user", "content": "hi"}], tools=tools.TOOL_SCHEMAS
+    )
+    assert result.content == "正常回答"
+    assert "tools" in fake.requests[0]["json"]
+    assert "tools" not in fake.requests[1]["json"]
+
+
+def test_stream_retries_without_tools_on_400(monkeypatch):
+    """流式：供应商不支持 function calling 时去掉 tools 重试。"""
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, text="function calling unsupported"),
+            _FakeResponse(
+                lines=[
+                    'data: {"choices":[{"delta":{"content":"流式回答"}}]}',
+                    "data: [DONE]",
+                ]
+            ),
+        ],
+    )
+    got = "".join(
+        adapter.stream_chat_completion(
+            [{"role": "user", "content": "hi"}], tools=tools.TOOL_SCHEMAS
+        )
+    )
+    assert got == "流式回答"
+    assert "tools" in fake.requests[0]["json"]
+    assert "tools" not in fake.requests[1]["json"]
+
+
+def test_tools_disabled_by_config(db, customer, monkeypatch):
+    """LLM_TOOLS_ENABLED=false 时 free_qa 不携带 tools，仍正常生成。"""
+    monkeypatch.setattr(config, "LLM_TOOLS_ENABLED", False)
+    adapter = FakeAdapter(chunks=["普通回复"])
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(db, title="", customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, content="你好"))
+    done = next(e for e in events if e.type == "done")
+    assert done.data["message"]["content"] == "普通回复"
+    assert adapter.tool_args == [None]
+
+
+def test_free_qa_tool_round_cap_finishes_with_final_call(db, customer):
+    """工具轮数达到上限后：回填本轮结果并以不带工具的收尾请求完成回答。"""
+    tool_calls = [
+        {
+            "id": "call_cap",
+            "name": "customer_compare",
+            "arguments": json.dumps({"exclude_customer_id": customer.id}),
+        }
+    ]
+    adapter = ToolCallingFakeAdapter(
+        tool_calls=tool_calls, final_chunks=["基于对比数据给出结论。"], tool_rounds=5
+    )
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(db, title="", customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, content="连续对比"))
+    done = next(e for e in events if e.type == "done")
+    assert "基于对比数据给出结论" in done.data["message"]["content"]
+    assert "工具调用次数已达上限" in done.data["message"]["content"]
+    # 5 轮工具 + 1 次收尾，共 6 次流式请求；收尾不带 tools
+    assert len(adapter.calls) == 6
+    assert adapter.tool_args[-1] is None
+    assert all(t is not None for t in adapter.tool_args[:5])
+    # usage 按轮累计（每轮 128）
+    assert done.data["tokens_used"] == 128 * 6
+    # 第 5 轮工具结果已回填给收尾请求
+    last_round = adapter.calls[-1]
+    assert any(isinstance(m, dict) and m.get("role") == "tool" for m in last_round)
+
+
+def test_knowledge_search_tool_truncates_long_content(db, monkeypatch):
+    """工具返回的知识正文按 TOOL_CONTENT_MAX_CHARS 截断，防止上下文撑爆。"""
+    from services.rag.retriever import RetrievedChunk as RC
+
+    def fake_retrieve(
+        query, *, customer=None, category=None, top_k=8, window=None, status="canonical", db=None, **kwargs
+    ):
+        return [
+            RC(
+                document_id=1, chunk_index=0, item_id=1, item_title="长文",
+                category="内部规范", content="x" * 5000, score=0.9, metadata={},
+            )
+        ]
+
+    monkeypatch.setattr("services.rag.retriever.retrieve_knowledge", fake_retrieve)
+    result = tools.knowledge_search(db=db, query="长文")
+    assert len(result["results"][0]["content"]) <= tools.TOOL_CONTENT_MAX_CHARS
+    assert result["results"][0]["snippet"] == "x" * 200
+
+
+def test_graph_builder_tool_round_cap_finishes_with_final_call(db, customer):
+    """graph_builder 工具循环超限后同样以不带工具的收尾请求完成回答。"""
+    from services.ai.graph_builder import AssessmentStrategyAgent
+    from services.ai.prompt_templates import get_template
+
+    tool_calls = [{"id": "call_g", "name": "customer_compare", "arguments": "{}"}]
+    adapter = ToolCallingFakeAdapter(
+        tool_calls=tool_calls, final_chunks=["最终结论"], tool_rounds=5
+    )
+    agent = AssessmentStrategyAgent(adapter=adapter)
+    messages = [
+        llm_adapter.LLMMessage(role="system", content="sys"),
+        llm_adapter.LLMMessage(role="user", content="问"),
+    ]
+    text, _ = agent._call_llm_with_tools(
+        messages, get_template("assessment"), customer=customer, db=db
+    )
+    assert text == "最终结论"
+    assert len(adapter.calls) == 6
+    assert adapter.tool_args[-1] is None
+    assert agent._tool_warning
+
+
+def test_usage_counts_last_value_per_round(db, customer):
+    """同一轮流内 usage 重复出现时只累计最后一次，避免 tokens 虚高。"""
+
+    class MultiUsageAdapter(ToolCallingFakeAdapter):
+        def stream_chat_completion(
+            self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None, tools=None, on_tool_calls=None
+        ):
+            self.calls.append(list(messages))
+            self.tool_args.append(tools)
+            self.rounds += 1
+            if self.rounds <= self.tool_rounds:
+                if on_tool_calls:
+                    on_tool_calls(self.tool_calls)
+                if on_usage:
+                    on_usage({"total_tokens": 30})
+                    on_usage(self.usage)  # 同一轮重复出现，取最后一次 128
+                return
+            for chunk in self.final_chunks:
+                yield chunk
+            if on_usage:
+                on_usage({"total_tokens": 30})
+                on_usage(self.usage)
+
+    tool_calls = [{"id": "call_u", "name": "customer_compare", "arguments": "{}"}]
+    adapter = MultiUsageAdapter(tool_calls=tool_calls, final_chunks=["结论"], tool_rounds=1)
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(db, title="", customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, content="对比"))
+    done = next(e for e in events if e.type == "done")
+    # 1 轮工具 + 1 次收尾，每轮取最后一次 usage（128）；若按出现次数累加会虚高
+    assert done.data["tokens_used"] == 128 * 2

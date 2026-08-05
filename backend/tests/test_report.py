@@ -80,7 +80,9 @@ class _FakeAdapter:
     def status(self):
         return {"available": self.available, "model": self.model}
 
-    def stream_chat_completion(self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None):
+    def stream_chat_completion(
+        self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None, tools=None, on_tool_calls=None
+    ):
         self.calls.append(list(messages))
         if self.error:
             raise self.error

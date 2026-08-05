@@ -88,8 +88,10 @@ pnpm-debug.log*
 *.cache
 frontend/lint_out.txt
 
-# Local project memory (not for git)
+# Local agent / tooling config (not for git)
 .codebuddy/
+.codex/
 
 # Local docs (not for git)
 docs/
+AGENTS.md

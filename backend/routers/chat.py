@@ -202,7 +202,10 @@ def send_message(session_id: int, payload: ChatRequest, db: Session = Depends(ge
     session = _get_session(db, session_id)
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="消息内容不能为空")
-    return _run(db, session, payload, payload.scenario or session.scenario or "free_qa")
+    # 会话内自由提问默认按 free_qa 跟随用户问题（带客户上下文与历史），
+    # 不继承会话创建时的场景，避免在评估会话里追问时反复输出整份评估报告。
+    # 一键评估/策略/预警仍走 /evaluate、/strategy、/alert-analysis 场景端点。
+    return _run(db, session, payload, payload.scenario or "free_qa")
 
 
 @router.post("/sessions/{session_id}/evaluate")

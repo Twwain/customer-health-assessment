@@ -5,7 +5,6 @@ import type {
   AssessmentResponse,
   AssessmentTrendResponse,
   ChatMessageItem,
-  ChatSessionItem,
   KnowledgeReference,
   StrategyItem,
 } from "../types";
@@ -46,7 +45,6 @@ export default function Chat() {
   const [error, setError] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState("AI 对话");
   const [sessionCustomerId, setSessionCustomerId] = useState<number | null>(null);
-  const [recent, setRecent] = useState<ChatSessionItem[]>([]);
   const [ctx, setCtx] = useState<{ assessment?: AssessmentResponse | null; trend?: AssessmentTrendResponse | null }>({});
   const [trace, setTrace] = useState<KnowledgeReference | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -99,7 +97,6 @@ export default function Chat() {
     if (!sessionIdNum) {
       setMessages([]);
       setCtx({});
-      chat.sessions().then((r) => setRecent(r.items)).catch(() => {});
       return;
     }
     setMessages([]);
@@ -258,23 +255,6 @@ export default function Chat() {
     }
   };
 
-  // ── 渲染 ──────────────────────────────────────────────────
-  if (!sessionIdNum) {
-    return (
-      <WelcomeScreen
-        status={status}
-        recent={recent}
-        onOpen={(id) => navigate(`/chat/${id}`)}
-        onNew={() => navigate("/chat")}
-        onPick={(sc) => {
-          pendingScenario.current = sc;
-          setPickerOpen(true);
-        }}
-        onKnowledge={() => navigate("/knowledge")}
-      />
-    );
-  }
-
   const handlePick = (cid: number) => {
     const sc = pendingScenario.current || "assessment";
     pendingScenario.current = null;
@@ -284,6 +264,32 @@ export default function Chat() {
       .then((s) => navigate(`/chat/${s.id}`, { state: { autoScenario: sc } }))
       .catch(() => alert("创建会话失败"));
   };
+
+  const picker = pickerOpen && (
+    <CustomerPicker
+      onClose={() => {
+        setPickerOpen(false);
+        pendingScenario.current = null;
+      }}
+      onPick={handlePick}
+    />
+  );
+
+  // ── 渲染 ──────────────────────────────────────────────────
+  if (!sessionIdNum) {
+    return (
+      <>
+        <WelcomeScreen
+          onPick={(sc) => {
+            pendingScenario.current = sc;
+            setPickerOpen(true);
+          }}
+          onKnowledge={() => navigate("/knowledge")}
+        />
+        {picker}
+      </>
+    );
+  }
 
   const display = stream ? [...messages, stream as unknown as ChatMessageItem] : messages;
 
@@ -365,7 +371,7 @@ export default function Chat() {
             <QuickChip label="🚨 风险排查" onClick={() => runQuick("alert_analysis")} disabled={busy} />
             <QuickChip label="📄 生成报告" onClick={exportPdf} disabled={busy} />
           </div>
-          <div className="flex items-end gap-2 rounded-xl border border-border bg-surface px-3 py-2 focus-within:border-accent">
+          <div className="flex items-end gap-2 rounded-xl border border-border-strong bg-surface px-3 py-2 focus-within:border-accent">
             <textarea
               ref={inputRef}
               rows={1}
@@ -390,15 +396,7 @@ export default function Chat() {
       </div>
 
       {trace && <TraceDrawer reference={trace} onClose={() => setTrace(null)} />}
-      {pickerOpen && (
-        <CustomerPicker
-          onClose={() => {
-            setPickerOpen(false);
-            pendingScenario.current = null;
-          }}
-          onPick={handlePick}
-        />
-      )}
+      {picker}
     </div>
   );
 }
@@ -406,7 +404,7 @@ export default function Chat() {
 function QuickChip({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
   return (
     <button
-      className="shrink-0 rounded-full border border-border bg-surface px-3 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
+      className="shrink-0 rounded-full border border-border-strong bg-surface px-3 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:bg-surface-2 hover:text-accent disabled:opacity-40"
       onClick={onClick}
       disabled={disabled}
     >
@@ -439,7 +437,7 @@ function MessageView({
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-accent px-3.5 py-2.5 text-[13.5px] text-white">
+        <div className="max-w-[80%] rounded-xl rounded-tr-sm bg-ink-2 px-3.5 py-2.5 text-[13.5px] text-white">
           {msg.content}
         </div>
       </div>
@@ -451,7 +449,7 @@ function MessageView({
       <div className="min-w-0 flex-1">
         {assessment && <div className="mb-2"><HealthCard assessment={assessment} trend={trend ?? null} compact onAlertAI={undefined} /></div>}
         {msg.content && (
-          <div className="md-text rounded-2xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5">
+          <div className="md-text rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5">
             <div className="md">
               {renderMarkdown(msg.content)}
               {streaming && <span className="cursor-blink ml-0.5" />}
@@ -558,7 +556,7 @@ function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (cid
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="搜索客户…"
-            className="mb-3 w-full rounded-lg border border-border px-3 py-2 text-[13px] outline-none focus:border-accent"
+            className="mb-3 w-full rounded-lg border border-border-strong px-3 py-2 text-[13px] outline-none focus:border-accent"
           />
           <div className="max-h-[50vh] space-y-1.5 overflow-y-auto">
             {filtered.map((c) => (
@@ -580,15 +578,9 @@ function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (cid
 }
 
 function WelcomeScreen({
-  onOpen,
-  recent,
   onPick,
   onKnowledge,
 }: {
-  status: { degraded?: boolean } | null;
-  recent: ChatSessionItem[];
-  onOpen: (id: number) => void;
-  onNew: () => void;
   onPick: (sc: Scenario) => void;
   onKnowledge: () => void;
 }) {
@@ -599,48 +591,35 @@ function WelcomeScreen({
     { icon: "📚", title: "查询内部知识", desc: "分级标准 / SLA / 行业基准 / 竞品动态", nav: "knowledge" },
   ];
   return (
-    <div className="h-full overflow-y-auto bg-bg">
-      <div className="mx-auto max-w-[820px] px-4 py-8">
-        <div className="mb-5 flex gap-2.5">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand/10 text-[17px]">🤖</div>
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-surface px-4 py-3 text-[14px] leading-relaxed text-ink">
-            你好，我是客情分析助手。我可以结合<strong>量化评估引擎</strong>（因子评分）与<strong>知识增强引擎</strong>（RAG 检索）为你分析客户。
+    <div className="flex min-h-full items-center justify-center overflow-y-auto bg-bg">
+      <div className="w-full max-w-[820px] px-6 py-10">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-[22px]">🤖</div>
+            <h1 className="text-[24px] font-semibold tracking-tight text-ink">你好，我是客情分析助手</h1>
           </div>
+          <p className="mt-2 text-[13.5px] leading-relaxed text-muted">
+            结合<strong className="font-medium text-ink">量化评估引擎</strong>（因子评分）与<strong className="font-medium text-ink">知识增强引擎</strong>（RAG 检索），帮你分析客户健康度、排查风险、制定可执行策略。
+          </p>
         </div>
 
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
           {entries.map((e) => (
             <button
               key={e.title}
-              className="rounded-2xl border border-border bg-surface p-3.5 text-left transition hover:border-accent hover:shadow-sm"
+              className="flex flex-col items-center gap-2.5 rounded-xl border border-border bg-surface p-5 text-center transition hover:border-accent/60 hover:bg-surface-3"
               onClick={() => (e.nav ? onKnowledge() : onPick(e.sc!))}
             >
-              <div className="text-[14px] font-semibold text-ink">
-                {e.icon} {e.title}
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft/70 text-[18px]">
+                {e.icon}
               </div>
-              <div className="mt-1 text-[12.5px] text-muted">{e.desc}</div>
+              <div>
+                <div className="text-[14px] font-medium text-ink">{e.title}</div>
+                <div className="mt-1 text-[12.5px] leading-relaxed text-muted">{e.desc}</div>
+              </div>
             </button>
           ))}
         </div>
-
-        {recent.length > 0 && (
-          <div className="mt-6">
-            <div className="mb-2 text-[13px] font-semibold text-brand">最近会话</div>
-            <div className="space-y-1.5">
-              {recent.map((s) => (
-                <button
-                  key={s.id}
-                  className="flex w-full items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2.5 text-left transition hover:border-accent"
-                  onClick={() => onOpen(s.id)}
-                >
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                  <span className="flex-1 truncate text-[13.5px] text-ink">{s.title}</span>
-                  {s.customer_name && <span className="text-[12px] text-muted">{s.customer_name}</span>}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

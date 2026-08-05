@@ -23,6 +23,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
+import config
 from models import Customer
 from services.ai.context_builder import ChatContext
 from services.ai.fallback import build_degraded_reply
@@ -63,6 +64,7 @@ class AssessmentStrategyAgent:
     def __init__(self, adapter=None, max_iterations: int = 2) -> None:
         self._adapter = adapter or get_chat_adapter()
         self._max = max(1, max_iterations)
+        self._tool_warning = ""
 
     # ── 节点 ────────────────────────────────────────────────────────────────
     def _call_llm(self, messages: list[LLMMessage], template) -> str:
@@ -76,7 +78,9 @@ class AssessmentStrategyAgent:
             chunks.append(delta)
         return "".join(chunks)
 
-    def _reason(self, ctx, references, question, today, template) -> str:
+    def _reason(
+        self, ctx, references, question, today, template, *, customer=None, db=None
+    ) -> tuple[str, list[dict]]:
         system_text = template.render_system(today=today)
         knowledge = _format_retrievals(references) or ctx.knowledge_text
         user_text = template.render_user(
@@ -86,10 +90,55 @@ class AssessmentStrategyAgent:
             alert_context=ctx.alert_text,
             question=question,
         )
-        return self._call_llm(
+        exclude_ids = {ref.get("id") for ref in references}
+        return self._call_llm_with_tools(
             [LLMMessage(role="system", content=system_text), LLMMessage(role="user", content=user_text)],
             template,
+            customer=customer,
+            db=db,
+            exclude_ids=exclude_ids,
         )
+
+    def _call_llm_with_tools(
+        self, messages, template, *, customer=None, db=None, exclude_ids=None
+    ) -> tuple[str, list[dict]]:
+        """生成正文；模型请求工具时执行并回填结果，返回 (正文, 工具引用)。"""
+        tool_rounds = 0
+        refs: list[dict] = []
+        exclude = set(exclude_ids or [])
+        tools_enabled = config.LLM_TOOLS_ENABLED
+        while True:
+            tool_calls: list[dict] = []
+            stream = self._adapter.stream_chat_completion(
+                messages,
+                temperature=template.temperature,
+                max_tokens=template.max_tokens,
+                tools=tools.TOOL_SCHEMAS if tools_enabled else None,
+                on_tool_calls=lambda tcs: tool_calls.extend(tcs),
+            )
+            chunks: list[str] = []
+            for delta in stream:
+                chunks.append(delta)
+            if not tool_calls:
+                return "".join(chunks), refs
+            tool_rounds += 1
+            messages, round_refs = tools.append_tool_results(
+                messages, tool_calls, customer=customer, db=db, exclude_ids=exclude
+            )
+            refs.extend(round_refs)
+            exclude.update(r["id"] for r in round_refs)
+            if tool_rounds >= tools.MAX_TOOL_ROUNDS:
+                # 已回填本轮工具结果：不带工具收尾一次，避免空回复
+                self._tool_warning = "工具调用次数已达上限，已基于已获取信息作答"
+                stream = self._adapter.stream_chat_completion(
+                    messages,
+                    temperature=template.temperature,
+                    max_tokens=template.max_tokens,
+                    tools=None,
+                )
+                for delta in stream:
+                    chunks.append(delta)
+                return "".join(chunks), refs
 
     def _refine(self, ctx, references, draft, critique_text, question, today, template, scenario: str = "strategy") -> str:
         system_text = template.render_system(today=today)
@@ -133,6 +182,7 @@ class AssessmentStrategyAgent:
         store=None,
         max_iterations: int | None = None,
     ) -> AgentResult:
+        self._tool_warning = ""
         max_iter = max_iterations or self._max
         today = datetime.date.today().isoformat()
         template = get_template(scenario)
@@ -157,7 +207,13 @@ class AssessmentStrategyAgent:
 
         # ② reason
         try:
-            draft = self._reason(ctx, references, question, today, template)
+            draft, reason_refs = self._reason(
+                ctx, references, question, today, template, customer=customer, db=db
+            )
+            known = {r.get("id") for r in references}
+            references = list(references) + [
+                r for r in reason_refs if r.get("id") not in known
+            ]
         except (LLMUnavailableError, LLMError) as exc:
             return self._degrade(scenario, ctx, question, references, exc)
 
@@ -180,6 +236,8 @@ class AssessmentStrategyAgent:
 
         if tools.needs_refine(critique_text):
             warnings.append(f"草稿精炼达到 {max_iter} 次上限，输出可能未完全满足：{critique_text.strip()}")
+        if self._tool_warning:
+            warnings.append(self._tool_warning)
 
         return AgentResult(
             text=text,

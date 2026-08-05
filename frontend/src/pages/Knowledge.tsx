@@ -95,14 +95,17 @@ export default function Knowledge() {
   const tabs = ["全部", ...categories];
 
   return (
-    <div className="mx-auto max-w-[1200px] px-4 py-5">
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+    <div className="mx-auto max-w-[1280px] px-6 py-7">
+      <div className="mb-5 flex flex-wrap items-center gap-3">
         <div className="mr-auto">
-          <h1 className="text-[20px] font-bold text-ink">📚 知识库</h1>
-          <div className="text-[12.5px] text-muted">知识增强引擎入口 · 支持浏览 / 检索 / 上传 / 删除 / 编辑元数据</div>
+          <div className="flex items-center gap-2.5">
+            <span className="h-[16px] w-[3px] rounded-full bg-accent" />
+            <h1 className="text-[22px] font-semibold tracking-tight text-ink">知识库</h1>
+          </div>
+          <div className="mt-0.5 text-[13px] text-muted">知识增强引擎入口 · 支持浏览 / 检索 / 上传 / 删除 / 编辑元数据</div>
         </div>
         <button
-          className="rounded-lg border border-border bg-surface px-3 py-2 text-[13px] text-ink-2 transition hover:border-accent hover:text-accent"
+          className="rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink-2 transition hover:border-accent hover:text-accent"
           onClick={reindex}
           disabled={reindexing}
         >
@@ -116,13 +119,13 @@ export default function Knowledge() {
         </button>
       </div>
 
-      <div className="mb-4 flex flex-col gap-2 rounded-2xl border border-border bg-surface p-3 lg:flex-row lg:items-center">
+      <div className="mb-5 flex flex-col gap-2 lg:flex-row lg:items-center">
         <input
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && runSearch()}
           placeholder="语义检索：输入你的问题，如「竞品介入后如何挽回制造业客户」…"
-          className="flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+          className="max-w-[560px] flex-1 rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
         />
         <select value={searchStatus} onChange={(e) => setSearchStatus(e.target.value)} className={selCls}>
           <option value="all">全部状态</option>
@@ -135,7 +138,7 @@ export default function Knowledge() {
       </div>
 
       {searchResults && (
-        <div className="mb-4 rounded-2xl border border-accent/30 bg-accent-soft/40 p-3">
+        <div className="mb-4 rounded-xl border border-accent/30 bg-accent-soft/40 p-3">
           <div className="mb-2 flex items-center">
             <span className="text-[13px] text-ink-2">
               🔍 检索到 <b>{searchResults.length}</b> 条相关片段
@@ -183,11 +186,15 @@ export default function Knowledge() {
       {loading ? (
         <div className="py-20 text-center text-muted">加载中…</div>
       ) : items.length === 0 ? (
-        <div className="py-20 text-center text-muted">暂无知识条目</div>
+        <div className="flex flex-col items-center justify-center py-24 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-surface-2 text-[22px]">📄</div>
+          <div className="mt-3 text-[14px] font-medium text-ink-2">暂无知识条目</div>
+          <div className="mt-1 text-[12.5px] text-muted">点击右上角「上传文档」添加第一条知识</div>
+        </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="overflow-hidden rounded-xl border border-border bg-surface">
           {items.map((k) => (
-            <Card
+            <Row
               key={k.id}
               item={k}
               onApprove={() => approve(k.id)}
@@ -239,9 +246,9 @@ export default function Knowledge() {
 }
 
 const selCls =
-  "rounded-lg border border-border bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent";
+  "rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20";
 
-function Card({
+function Row({
   item,
   onApprove,
   onMeta,
@@ -254,43 +261,41 @@ function Card({
 }) {
   const canonical = item.status === "canonical";
   return (
-    <div className="flex flex-col rounded-2xl border border-border bg-surface p-3.5">
-      <div className="flex items-start gap-2.5">
+    <div className="flex flex-col gap-2.5 border-b border-border-soft px-4 py-3.5 transition last:border-0 hover:bg-surface-3 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 flex-1 items-start gap-2.5">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-[18px]">
           {categoryIcon(item.category)}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[14px] font-semibold text-ink">{item.title}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11.5px] text-muted">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="truncate text-[14px] font-medium text-ink">{item.title}</span>
+            <span
+              className={`shrink-0 rounded-full px-2 py-[2px] text-[11px] font-medium ${
+                canonical ? "bg-success-soft text-success" : "bg-warning-soft text-warning"
+              }`}
+            >
+              {canonical ? "✓ 已审核" : "待审核"}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11.5px] text-muted">
             <span>{item.category}</span>
             <span>·</span>
             <span>{item.chunk_count} 切片</span>
             <span>·</span>
             <span>{storageLabel(item.storage)}</span>
+            {item.tags.slice(0, 3).map((t) => (
+              <span key={t} className="rounded-full bg-surface-2 px-2 py-[1px] text-[11px] text-ink-2">
+                #{t}
+              </span>
+            ))}
+            {item.adoption_count > 0 && (
+              <span>· 采纳 {item.adoption_count} 次</span>
+            )}
           </div>
+          {item.summary && <div className="mt-1 truncate text-[12px] text-muted">{item.summary}</div>}
         </div>
-        <span
-          className={`shrink-0 rounded-full px-2 py-[2px] text-[11px] font-medium ${
-            canonical ? "bg-success-soft text-success" : "bg-warning-soft text-warning"
-          }`}
-        >
-          {canonical ? "✓ 已审核" : "待审核"}
-        </span>
       </div>
-      {item.tags.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {item.tags.slice(0, 4).map((t, i) => (
-            <span key={i} className="rounded-full bg-surface-2 px-2 py-[1px] text-[11px] text-ink-2">
-              #{t}
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="mt-2.5 flex items-center gap-2">
-        <span className="text-[11px] text-muted">{item.summary ? item.summary.slice(0, 24) + "…" : ""}</span>
-        {item.adoption_count > 0 && <span className="ml-auto rounded-full bg-surface-2 px-1.5 py-[1px] text-[11px] text-muted">采纳 {item.adoption_count} 次</span>}
-      </div>
-      <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-border-soft pt-2.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
         {!canonical && (
           <button className="rounded-lg bg-accent px-2.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-accent-hover" onClick={onApprove}>
             通过审核
@@ -352,7 +357,7 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
           </div>
           <div className="mt-3">
             <label className="mb-1 block text-[12.5px] font-medium text-ink-2">标题（可选）</label>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="留空则使用文件名" className="w-full rounded-lg border border-border px-3 py-2 text-[13px] outline-none focus:border-accent" />
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="留空则使用文件名" className="w-full rounded-lg border border-border-strong px-3 py-2 text-[13px] outline-none focus:border-accent" />
           </div>
           <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[12px] text-muted">
             💡 上传后自动执行：解析 → 切片 → 向量化 → 写入向量库 + SQLite。数值型指标表将同时抽取为结构化字段。
@@ -413,7 +418,7 @@ function MetaModal({
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="mb-3">
             <label className="mb-1 block text-[12.5px] font-medium text-ink-2">标题</label>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} className="w-full rounded-lg border border-border px-3 py-2 text-[13px] outline-none focus:border-accent" />
+            <input value={title} onChange={(e) => setTitle(e.target.value)} className="w-full rounded-lg border border-border-strong px-3 py-2 text-[13px] outline-none focus:border-accent" />
           </div>
           <div className="mb-3">
             <label className="mb-1 block text-[12.5px] font-medium text-ink-2">分类</label>
@@ -426,7 +431,7 @@ function MetaModal({
           </div>
           <div className="mb-3">
             <label className="mb-1 block text-[12.5px] font-medium text-ink-2">标签（逗号分隔）</label>
-            <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full rounded-lg border border-border px-3 py-2 text-[13px] outline-none focus:border-accent" />
+            <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full rounded-lg border border-border-strong px-3 py-2 text-[13px] outline-none focus:border-accent" />
           </div>
           <div className="mb-3">
             <label className="mb-1 block text-[12.5px] font-medium text-ink-2">审核状态</label>

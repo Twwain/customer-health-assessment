@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from config import RAG_RECALL_K, RAG_TOP_K
+from config import RAG_RECALL_K, RAG_TOP_K, RAG_WINDOW
 from services.rag.embeddings import EmbeddingUnavailableError, make_embedding_func
 from services.rag.reranker import MetadataReranker, RerankCandidate, get_reranker
 from services.rag.vector_store import VectorStore, get_vector_store
@@ -49,6 +49,7 @@ class KnowledgeRetriever:
         category: str | None = None,
         top_k: int = RAG_TOP_K,
         recall_k: int = RAG_RECALL_K,
+        window: int | None = None,
         status: str = "canonical",
         db: Any | None = None,
     ) -> list[RetrievedChunk]:
@@ -73,6 +74,7 @@ class KnowledgeRetriever:
         boost_industry = getattr(customer, "industry", None) or None
         ranked = self._reranker.rerank(query, candidates, boost_industry=boost_industry)
 
+        window = RAG_WINDOW if window is None else window
         out: list[RetrievedChunk] = []
         seen_items: set[int] = set()
         for r in ranked[:top_k]:
@@ -94,7 +96,43 @@ class KnowledgeRetriever:
 
         if db is not None and seen_items:
             self._bump_hits(db, seen_items)
+        if window > 0 and db is not None:
+            return [self._expand_window(c, window, db) for c in out]
         return out
+
+    @staticmethod
+    def _expand_window(chunk: RetrievedChunk, window: int, db: Any) -> RetrievedChunk:
+        """把命中切片的前后相邻切片一起拼进正文，缓解跨切片信息截断。"""
+        if window <= 0 or db is None or chunk.document_id is None:
+            return chunk
+        try:
+            from models import KnowledgeChunk
+
+            rows = (
+                db.query(KnowledgeChunk)
+                .filter(
+                    KnowledgeChunk.document_id == chunk.document_id,
+                    KnowledgeChunk.chunk_index >= chunk.chunk_index - window,
+                    KnowledgeChunk.chunk_index <= chunk.chunk_index + window,
+                )
+                .order_by(KnowledgeChunk.chunk_index)
+                .all()
+            )
+            if len(rows) <= 1:
+                return chunk
+            expanded = "\n\n".join(r.content for r in rows)
+            return RetrievedChunk(
+                document_id=chunk.document_id,
+                chunk_index=chunk.chunk_index,
+                item_id=chunk.item_id,
+                item_title=chunk.item_title,
+                category=chunk.category,
+                content=expanded,
+                score=chunk.score,
+                metadata=chunk.metadata,
+            )
+        except Exception:  # pragma: no cover - 窗口扩展失败不影响检索
+            return chunk
 
     @staticmethod
     def _bump_hits(db: Any, item_ids: set[int]) -> None:
@@ -122,6 +160,7 @@ def retrieve_knowledge(
     customer: Any | None = None,
     category: str | None = None,
     top_k: int = RAG_TOP_K,
+    window: int | None = None,
     status: str = "canonical",
     db: Any | None = None,
     embed_func=None,
@@ -130,5 +169,11 @@ def retrieve_knowledge(
 ) -> list[RetrievedChunk]:
     """便捷函数：一次性检索。"""
     return KnowledgeRetriever(store=store, embed_func=embed_func, reranker=reranker).retrieve(
-        query, customer=customer, category=category, top_k=top_k, status=status, db=db
+        query,
+        customer=customer,
+        category=category,
+        top_k=top_k,
+        window=window,
+        status=status,
+        db=db,
     )
