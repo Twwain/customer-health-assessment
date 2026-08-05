@@ -6,7 +6,7 @@ db = SessionLocal()
 
 customers = [
     Customer(
-        customer_name='中国银行总行',
+        customer_name='示例银行(总行)',
         industry='金融',
         contact_person='张伟',
         contact_phone='13800138001',
@@ -19,11 +19,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='高',
-        notes='H3C S12500核心交换机 + 全行SDN改造项目，长期战略合作伙伴',
+        notes='核心交换机 + 全行SDN改造项目，长期战略合作伙伴',
         custom_fields={'客户级别': 'S级', '产品线': '交换机/路由器/SDN', '区域': '华北', '销售代表': '陈工'}
     ),
     Customer(
-        customer_name='中国移动集团',
+        customer_name='示例通信集团',
         industry='通信',
         contact_person='李明',
         contact_phone='13800138002',
@@ -36,11 +36,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='高',
-        notes='5G承载网设备采购 + H3C服务器集群，有扩展空间',
+        notes='5G承载网设备采购 + 服务器集群，有扩展空间',
         custom_fields={'客户级别': 'A级', '产品线': '交换机/服务器', '区域': '华东', '销售代表': '王工'}
     ),
     Customer(
-        customer_name='招商银行',
+        customer_name='示例股份银行',
         industry='金融',
         contact_person='王芳',
         contact_phone='13800138003',
@@ -53,11 +53,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='中',
-        notes='H3C SecPath防火墙 + 云桌面解决方案，合规要求高',
+        notes='防火墙 + 云桌面解决方案，合规要求高',
         custom_fields={'客户级别': 'A级', '产品线': '安全/云桌面', '区域': '华南', '销售代表': '赵工'}
     ),
     Customer(
-        customer_name='国家电网',
+        customer_name='示例电网公司',
         industry='能源',
         contact_person='刘洋',
         contact_phone='13800138004',
@@ -70,11 +70,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='中',
-        notes='电力调度网H3C交换机替换项目，数字化转型客户',
+        notes='电力调度网交换机替换项目，数字化转型客户',
         custom_fields={'客户级别': 'B级', '产品线': '交换机/路由器', '区域': '华北', '销售代表': '陈工'}
     ),
     Customer(
-        customer_name='阿里巴巴',
+        customer_name='示例互联网公司',
         industry='互联网',
         contact_person='陈静',
         contact_phone='13800138005',
@@ -87,11 +87,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='高',
-        notes='H3C数据中心交换机 + 智能运维平台，云计算深度合作',
+        notes='数据中心交换机 + 智能运维平台，云计算深度合作',
         custom_fields={'客户级别': 'S级', '产品线': '交换机/运维平台', '区域': '华东', '销售代表': '王工'}
     ),
     Customer(
-        customer_name='万科地产',
+        customer_name='示例地产集团',
         industry='房地产',
         contact_person='赵强',
         contact_phone='13800138006',
@@ -101,14 +101,14 @@ customers = [
         customer_satisfaction=5,
         contract_amount=80,
         payment_status='部分逾期',
-        risk_signals='行业下行，IT预算缩减；H3C无线AP项目暂停',
+        risk_signals='行业下行，IT预算缩减；无线网络项目暂停',
         competitor_involvement=True,
         growth_potential='低',
         notes='受地产行业环境影响，无线网络项目搁置，需密切关注',
         custom_fields={'客户级别': 'C级', '产品线': '无线/WLAN', '区域': '西南', '销售代表': '孙工'}
     ),
     Customer(
-        customer_name='比亚迪',
+        customer_name='示例汽车制造',
         industry='制造业',
         contact_person='孙磊',
         contact_phone='13800138007',
@@ -121,11 +121,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='高',
-        notes='新能源汽车工厂网络建设 + H3C工业交换机，增长迅猛',
+        notes='新能源汽车工厂网络建设 + 工业交换机，增长迅猛',
         custom_fields={'客户级别': 'A级', '产品线': '工业交换机/无线', '区域': '华南', '销售代表': '陈工'}
     ),
     Customer(
-        customer_name='中石油集团',
+        customer_name='示例能源集团',
         industry='能源',
         contact_person='周明',
         contact_phone='13800138008',
@@ -135,14 +135,14 @@ customers = [
         customer_satisfaction=4,
         contract_amount=200,
         payment_status='部分逾期',
-        risk_signals='对接人变更频繁；内部采购流程冗长；华为竞争介入',
+        risk_signals='对接人变更频繁；内部采购流程冗长；友商竞争介入',
         competitor_involvement=True,
         growth_potential='低',
-        notes='H3C路由器/交换机存量替换，但国企决策链长，竞品积极渗透',
+        notes='路由器/交换机存量替换，但国企决策链长，友商积极渗透',
         custom_fields={'客户级别': 'B级', '产品线': '路由器/交换机', '区域': '华北', '销售代表': '赵工'}
     ),
     Customer(
-        customer_name='字节跳动',
+        customer_name='示例内容平台',
         industry='互联网',
         contact_person='黄凯',
         contact_phone='13800138009',
@@ -155,11 +155,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='高',
-        notes='H3C高性能交换机用于新建数据中心，快速增长的互联网客户',
+        notes='高性能交换机用于新建数据中心，快速增长的互联网客户',
         custom_fields={'客户级别': 'A级', '产品线': '交换机/服务器', '区域': '华北', '销售代表': '王工'}
     ),
     Customer(
-        customer_name='协和医院',
+        customer_name='示例中心医院',
         industry='医疗',
         contact_person='郑丽',
         contact_phone='13800138010',
@@ -172,11 +172,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='中',
-        notes='HIS系统网络升级 + H3C医疗物联网方案',
+        notes='HIS系统网络升级 + 医疗物联网方案',
         custom_fields={'客户级别': 'A级', '产品线': '交换机/物联网', '区域': '华北', '销售代表': '李工'}
     ),
     Customer(
-        customer_name='上汽集团',
+        customer_name='示例汽车集团',
         industry='制造业',
         contact_person='马超',
         contact_phone='13800138011',
@@ -186,14 +186,14 @@ customers = [
         customer_satisfaction=3,
         contract_amount=50,
         payment_status='严重逾期',
-        risk_signals='长期未联系；满意度持续下降；思科已介入报价',
+        risk_signals='长期未联系；满意度持续下降；友商已介入报价',
         competitor_involvement=True,
         growth_potential='低',
-        notes='H3C车联网试点项目搁置，竞品思科积极渗透，需立即制定挽留方案',
+        notes='车联网试点项目搁置，友商积极渗透，需立即制定挽留方案',
         custom_fields={'客户级别': 'D级', '产品线': '工业交换机/车联网', '区域': '华东', '销售代表': '孙工'}
     ),
     Customer(
-        customer_name='清华大学',
+        customer_name='示例大学',
         industry='教育',
         contact_person='吴鹏',
         contact_phone='13800138012',
@@ -206,11 +206,11 @@ customers = [
         risk_signals='',
         competitor_involvement=False,
         growth_potential='高',
-        notes='校园网H3C全系列设备 + 科研超算网络，标杆教育客户',
+        notes='校园网全系列设备 + 科研超算网络，标杆教育客户',
         custom_fields={'客户级别': 'A级', '产品线': '交换机/无线/服务器', '区域': '华北', '销售代表': '陈工'}
     ),
     Customer(
-        customer_name='平安保险',
+        customer_name='示例保险集团',
         industry='金融',
         contact_person='何涛',
         contact_phone='13800138013',
@@ -220,10 +220,10 @@ customers = [
         customer_satisfaction=2,
         contract_amount=60,
         payment_status='严重逾期',
-        risk_signals='连续两个季度未回款；IT部门架构调整裁撤；华为已签约替代',
+        risk_signals='连续两个季度未回款；IT部门架构调整裁撤；友商已签约替代',
         competitor_involvement=True,
         growth_potential='低',
-        notes='H3C安全产品线被华为全面替代，极高风险，建议评估退出策略',
+        notes='安全产品线被友商全面替代，极高风险，建议评估退出策略',
         custom_fields={'客户级别': 'D级', '产品线': '安全/防火墙', '区域': '华南', '销售代表': '赵工'}
     ),
 ]
@@ -231,7 +231,7 @@ customers = [
 db.add_all(customers)
 db.commit()
 
-print(f'已生成 {len(customers)} 条 H3C 客情模拟数据：')
+print(f'已生成 {len(customers)} 条 客情模拟数据：')
 print()
 for c in customers:
     cf = c.custom_fields or {}

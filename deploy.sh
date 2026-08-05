@@ -2,7 +2,7 @@
 # 一键部署脚本 — 本地构建镜像 → 传输到服务器 → 加载并重启
 set -e
 
-SERVER="root@8.140.217.197"
+SERVER="${DEPLOY_SERVER:-root@<SERVER_IP>}"
 SSH_OPTS="-o LogLevel=ERROR"
 PROJECT_DIR="/root/customer-health"
 IMAGE_FILE="/tmp/ch-image.tar.gz"

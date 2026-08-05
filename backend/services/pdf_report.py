@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import os
 
@@ -10,27 +12,93 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, KeepTogether
+    PageBreak, KeepTogether, Image as RLImage
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus.flowables import HRFlowable
 
-from schemas import AssessmentResponse
+from schemas import AssessmentResponse, AssessmentTrendResponse
 
 
 class PdfReportGenerator:
     FONT_NAME = "ChineseFont"
+    # 兜底色板：仅在评分配置加载失败时使用（正常路径以 scoring_config.yaml 的 levels 为准）
     COLORS = {
         "优秀": HexColor("#84cc16"),
         "良好": HexColor("#0ea5e9"),
         "一般": HexColor("#d97706"),
         "风险": HexColor("#ef4444"),
     }
+    # 兜底分段：与默认配置一致（55/70/85 三档线）
+    _FALLBACK_LEVELS = [
+        ("风险", 0, 54, "#ef4444"),
+        ("一般", 55, 69, "#d97706"),
+        ("良好", 70, 84, "#0ea5e9"),
+        ("优秀", 85, 100, "#84cc16"),
+    ]
 
     def __init__(self):
         self._register_fonts()
         self.styles = self._build_styles()
+
+    # ── 评分配置（scoring_config.yaml）─────────────────────────────────────
+
+    @staticmethod
+    def _levels() -> list[tuple[str, int, int, str]]:
+        """从评分配置构建等级分段 [(name, lo, hi, color_hex)]，按分数升序。
+
+        等级阈值全部来自 scoring_config.yaml，配置改名/改阈值后 PDF 自动跟随，
+        不再使用写死的"优秀/良好/一般/风险"。
+        """
+        try:
+            from services.scoring import load_scoring_config
+
+            config = load_scoring_config()
+            total = int(config.total_max_score)
+            ordered = sorted(config.levels, key=lambda lv: lv.min_score)  # 升序
+            if not ordered:
+                raise ValueError("levels 为空")
+            out: list[tuple[str, int, int, str]] = []
+            for i, lv in enumerate(ordered):
+                lo = 0 if i == 0 else int(lv.min_score)
+                hi = total if i == len(ordered) - 1 else int(ordered[i + 1].min_score) - 1
+                out.append((lv.name, lo, hi, lv.color))
+            return out
+        except Exception:
+            return list(PdfReportGenerator._FALLBACK_LEVELS)
+
+    def _color_for(self, level_name: str, default: HexColor | None = None) -> HexColor:
+        """等级颜色：优先评分配置，其次兜底色板，最后中性灰。"""
+        for name, _, _, color in self._levels():
+            if name == level_name:
+                try:
+                    return HexColor(color)
+                except Exception:
+                    break
+        fallback = self.COLORS.get(level_name)
+        if fallback is not None:
+            return fallback
+        return default or HexColor("#64748b")
+
+    @staticmethod
+    def _model_description() -> tuple[str, str]:
+        """评分模型说明文案（页脚用），从评分配置动态生成。"""
+        try:
+            from services.scoring import load_scoring_config
+
+            config = load_scoring_config()
+            dims = [d for d in config.dimensions if d.enabled]
+            n = len(dims)
+            total = config.total_max_score
+            line1 = f"综合健康分由 {n} 个维度加权求和得出（满分 {total:.0f} 分）："
+            parts = [f"{d.name}（{d.max_score:.0f} 分）" for d in dims]
+            return line1, "、".join(parts) + "。"
+        except Exception:
+            return (
+                "综合健康分由 4 个维度各 25 分加权求和得出（满分 100 分）：",
+                "关系深度、客户满意度、商业价值、风险水平。",
+            )
 
     def _register_fonts(self):
         # 先尝试已知路径（快速通道）
@@ -128,7 +196,16 @@ class PdfReportGenerator:
         ))
         return styles
 
-    def generate(self, a: AssessmentResponse) -> bytes:
+    def generate(
+        self,
+        a: AssessmentResponse,
+        *,
+        strategy_items: list[dict] | None = None,
+        references: list[dict] | None = None,
+        trend: AssessmentTrendResponse | None = None,
+        degraded: bool = False,
+        ai_error: str | None = None,
+    ) -> bytes:
         buf = io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=2 * cm, bottomMargin=2 * cm,
                                 leftMargin=2 * cm, rightMargin=2 * cm,
@@ -139,13 +216,15 @@ class PdfReportGenerator:
         story.extend(self._overview(a))
         story.extend(self._dimension_detail(a))
         story.extend(self._alerts(a))
+        story.extend(self._ai_strategy_section(strategy_items, references, degraded, ai_error))
+        story.extend(self._trend_section_pdf(trend))
         story.extend(self._footer())
         doc.build(story)
         return buf.getvalue()
 
     def _cover(self, a: AssessmentResponse) -> list:
         return [
-            HRFlowable(width="100%", thickness=3, color=self.COLORS.get("优秀", HexColor("#d97706"))),
+            HRFlowable(width="100%", thickness=3, color=self._color_for(a.level, HexColor("#d97706"))),
             Spacer(1, 4 * cm),
             Paragraph("客情健康度评估报告", self.styles["CoverTitle"]),
             Spacer(1, 1 * cm),
@@ -160,8 +239,8 @@ class PdfReportGenerator:
         ]
 
     def _overview(self, a: AssessmentResponse) -> list:
-        color = self.COLORS.get(a.level, HexColor("#64748b"))
-        pct = min(100, max(0, a.total_score))
+        color = self._color_for(a.level)
+        pct = min(100, max(0, a.total_score / max(a.max_score, 1) * 100))
         bar_w = 12 * cm
         elements = [
             Paragraph("一、综合评分", self.styles["SectionTitle"]),
@@ -200,9 +279,14 @@ class PdfReportGenerator:
         elements.append(label_table)
         elements.append(Spacer(1, 0.7 * cm))
 
-        # 等级标识条 — 上方标注分数位置
-        level_order = [("风险", 0, 54), ("一般", 55, 69), ("良好", 70, 84), ("优秀", 85, 100)]
-        range_pcts = [0.54, 0.15, 0.15, 0.16]
+        # 等级标识条 — 上方标注分数位置（分段来自评分配置，不写死）
+        level_ranges = self._levels()  # [(name, lo, hi, color_hex)] 升序
+        total_span = level_ranges[-1][2] - level_ranges[0][1] + 1 if level_ranges else 100
+        level_order = [(name, lo, hi) for name, lo, hi, _ in level_ranges]
+        range_pcts = [max(0.02, (hi - lo + 1) / total_span) for _, lo, hi in level_order]
+        # 归一化使列宽合计恰好等于条宽
+        pct_sum = sum(range_pcts)
+        range_pcts = [rp / pct_sum for rp in range_pcts]
         indicator_pct = max(2, min(98, pct)) / 100
         score_w = 1.8 * cm
 
@@ -241,7 +325,7 @@ class PdfReportGenerator:
         # 等级分段条
         scale_row_cells = []
         for lvl_name, lo, hi in level_order:
-            lvl_color = self.COLORS.get(lvl_name, HexColor("#64748b"))
+            lvl_color = self._color_for(lvl_name)
             is_current = lvl_name == a.level
             cell_text = "white" if is_current else lvl_color.hexval()
             scale_row_cells.append(Paragraph(
@@ -265,7 +349,7 @@ class PdfReportGenerator:
         ]
         for i, (lvl_name, lo, hi) in enumerate(level_order):
             is_current = lvl_name == a.level
-            lvl_color = self.COLORS.get(lvl_name, HexColor("#64748b"))
+            lvl_color = self._color_for(lvl_name)
             bg = lvl_color if is_current else HexColor("#f8fafc")
             scale_style_cmds.append(("BACKGROUND", (i, 0), (i, 0), bg))
             if i > 0:
@@ -301,7 +385,7 @@ class PdfReportGenerator:
     def _dimension_detail(self, a: AssessmentResponse) -> list:
         elements = [Paragraph("二、分维度得分明细", self.styles["SectionTitle"]), Spacer(1, 0.3 * cm)]
 
-        score_color = self.COLORS.get(a.level, HexColor("#d97706"))
+        score_color = self._color_for(a.level, HexColor("#d97706"))
         bar_w = 14 * cm
 
         for d in a.dimensions:
@@ -434,7 +518,183 @@ class PdfReportGenerator:
 
         return elements
 
+    # ── M5：AI 策略建议 + 知识溯源 ────────────────────────────────────────────
+    _GROUP_TITLES = {
+        "recommended": "✅ 推荐策略",
+        "alternative": "□ 备选策略",
+        "long_term": "💡 长期建议",
+    }
+    _URGENCY_CN = {"high": "高", "medium": "中", "low": "低"}
+    _URGENCY_COLOR = {"high": "#dc2626", "medium": "#d97706", "low": "#0066FF"}
+    _PRIORITY_ORDER = ("recommended", "alternative", "long_term")
+
+    def _ai_strategy_section(
+        self, strategy_items, references, degraded, ai_error
+    ) -> list:
+        if not strategy_items:
+            return []
+        elements = [
+            Spacer(1, 0.5 * cm),
+            Paragraph("四、AI 智能策略建议", self.styles["SectionTitle"]),
+            Spacer(1, 0.2 * cm),
+        ]
+        if degraded:
+            elements.append(Paragraph(
+                '<font color="#d97706"><b>⚠️ 当前 LLM 暂不可用，以下为规则引擎兜底建议。</b></font>',
+                self.styles["BodyCN"],
+            ))
+            elements.append(Spacer(1, 0.2 * cm))
+        if ai_error:
+            elements.append(Paragraph(
+                f'<font color="#dc2626">{ai_error}</font>',
+                self.styles["SmallCN"],
+            ))
+            elements.append(Spacer(1, 0.2 * cm))
+
+        for priority in self._PRIORITY_ORDER:
+            group = [i for i in strategy_items if (i.get("priority") or "recommended") == priority]
+            if not group:
+                continue
+            elements.append(Paragraph(
+                self._GROUP_TITLES.get(priority, priority),
+                ParagraphStyle(f"Grp_{priority}", fontName=self.FONT_NAME, fontSize=13,
+                              leading=20, textColor=HexColor("#1e293b"), spaceBefore=8, spaceAfter=4),
+            ))
+            for item in group:
+                elements.append(self._strategy_card(item))
+                elements.append(Spacer(1, 0.25 * cm))
+
+        if references:
+            elements.append(Spacer(1, 0.3 * cm))
+            elements.append(Paragraph(
+                "📎 知识溯源",
+                ParagraphStyle("RefTitle", fontName=self.FONT_NAME, fontSize=12,
+                              leading=18, textColor=HexColor("#1e293b")),
+            ))
+            ref_lines = []
+            for i, ref in enumerate(references, 1):
+                title = ref.get("title") or ref.get("item_title") or "未命名知识"
+                category = ref.get("category") or ""
+                score = ref.get("score")
+                score_txt = f" · 相似度 {score:.2f}" if isinstance(score, (int, float)) else ""
+                cat_txt = f"（{category}）" if category else ""
+                ref_lines.append(f"{i}. 《{title}》{cat_txt}{score_txt}")
+            elements.append(Paragraph(
+                "<br/>".join(ref_lines),
+                ParagraphStyle("RefBody", fontName=self.FONT_NAME, fontSize=9.5,
+                              leading=15, textColor=HexColor("#475569")),
+            ))
+        return elements
+
+    def _strategy_card(self, item: dict):
+        urgency = item.get("urgency") or "medium"
+        urg_cn = self._URGENCY_CN.get(urgency, "中")
+        urg_hex = self._URGENCY_COLOR.get(urgency, "#d97706")
+        urg_color = HexColor(urg_hex)
+        title = item.get("title") or "（未命名策略）"
+        rows = [
+            Paragraph(
+                f'<b>{title}</b>　<font color="{urg_hex}">紧急度：{urg_cn}</font>',
+                ParagraphStyle("StrTitle", fontName=self.FONT_NAME, fontSize=11,
+                              leading=16, textColor=HexColor("#1e293b")),
+            ),
+        ]
+        for label, key in (("原因", "reason"), ("行动", "action"), ("预期", "expected_outcome")):
+            val = item.get(key)
+            if val:
+                rows.append(Paragraph(
+                    f'<font color="#64748b">{label}：</font>{val}',
+                    ParagraphStyle(f"Str_{key}", fontName=self.FONT_NAME, fontSize=9.5,
+                                  leading=15, textColor=HexColor("#475569")),
+                ))
+        ref = item.get("reference")
+        if ref:
+            rows.append(Paragraph(
+                f'<font color="#0066FF">📎 来源：{ref}</font>',
+                ParagraphStyle("StrRef", fontName=self.FONT_NAME, fontSize=9,
+                              leading=14, textColor=HexColor("#0066FF")),
+            ))
+        card = Table([[r] for r in rows], colWidths=[16.5 * cm])
+        card.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), HexColor("#f8fafc")),
+            ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#e2e8f0")),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, urg_color),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        return card
+
+    # ── M5：健康分趋势图 ──────────────────────────────────────────────────────
+    def _trend_section_pdf(self, trend: AssessmentTrendResponse | None) -> list:
+        elements = [
+            Spacer(1, 0.5 * cm),
+            Paragraph("五、健康分趋势", self.styles["SectionTitle"]),
+            Spacer(1, 0.2 * cm),
+        ]
+        if not trend or len(trend.points) < 2:
+            elements.append(Paragraph(
+                "当前仅有一次评估记录，暂无可对比的趋势曲线。持续评估后将自动生成历史趋势。",
+                self.styles["BodyCN"],
+            ))
+            return elements
+
+        try:
+            elements.append(self._render_trend_chart(trend))
+        except Exception:
+            # 绘图失败不应拖垮整份报告
+            elements.append(Paragraph("趋势曲线生成失败，已略去图示。", self.styles["SmallCN"]))
+
+        trend_cn = {"up": "↑ 上升", "down": "↓ 下降", "flat": "→ 持平"}
+        delta_txt = f"{trend.delta:+.1f}" if trend.previous_score is not None else "—"
+        elements.append(Spacer(1, 0.2 * cm))
+        elements.append(Paragraph(
+            f'趋势：<b>{trend_cn.get(trend.trend, trend.trend)}</b>（较上次 {delta_txt} 分）',
+            self.styles["BodyCN"],
+        ))
+        if trend.level_lines:
+            lines = " / ".join(
+                f"{lv.name} {lv.min_score}分" for lv in trend.level_lines if lv.min_score > 0
+            )
+            if lines:
+                elements.append(Paragraph(
+                    f'<font color="#64748b">等级参考线：{lines}</font>',
+                    self.styles["SmallCN"],
+                ))
+        return elements
+
+    def _render_trend_chart(self, trend: AssessmentTrendResponse):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        xs = [p.label for p in trend.points]
+        ys = [p.total_score for p in trend.points]
+        fig, ax = plt.subplots(figsize=(8, 3.2), dpi=150)
+        ax.plot(range(len(ys)), ys, marker="o", color="#0066FF", linewidth=2.2)
+        ax.set_xticks(range(len(xs)))
+        ax.set_xticklabels(xs, fontsize=8)
+        ax.set_ylim(0, max(100, getattr(trend, "max_score", 100) or 100))
+        ax.set_ylabel("Score", fontsize=9)
+        ax.set_title("Health Score Trend", fontsize=11)
+        ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+        for lv in trend.level_lines:
+            try:
+                yv = float(lv.min_score)
+            except (TypeError, ValueError):
+                continue
+            if yv <= 0:
+                continue
+            ax.axhline(yv, color=(lv.color or "#94a3b8"), linestyle="--", linewidth=0.9, alpha=0.8)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return RLImage(buf, width=15 * cm, height=6 * cm)
+
     def _footer(self) -> list:
+        model_line1, model_line2 = self._model_description()
         return [
             Spacer(1, 1.5 * cm),
             HRFlowable(width="100%", thickness=0.5, color=HexColor("#e2e8f0")),
@@ -446,20 +706,13 @@ class PdfReportGenerator:
             ),
             Spacer(1, 0.15 * cm),
             Paragraph(
-                "综合健康分由 4 个维度各 25 分加权求和得出（满分 100 分）：",
+                model_line1,
                 ParagraphStyle("FooterBody1", fontName=self.FONT_NAME, fontSize=8,
                               leading=13, textColor=HexColor("#94a3b8")),
             ),
             Paragraph(
-                "关系深度（合作年限 + 联系频率 + 最近联系时间）、"
-                "客户满意度（1-10 分 × 2.5）、",
+                model_line2,
                 ParagraphStyle("FooterBody2", fontName=self.FONT_NAME, fontSize=8,
-                              leading=13, textColor=HexColor("#94a3b8")),
-            ),
-            Paragraph(
-                "商业价值（合同金额 + 回款状态）、"
-                "风险水平（基础 25 分 − 风险扣分 + 增长潜力加分）。",
-                ParagraphStyle("FooterBody3", fontName=self.FONT_NAME, fontSize=8,
                               leading=13, textColor=HexColor("#94a3b8")),
             ),
             Spacer(1, 0.3 * cm),

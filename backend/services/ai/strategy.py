@@ -1,0 +1,264 @@
+"""策略结构化处理（SOW §3.4 / §5.1 ChatMessage.strategy_items）。
+
+本文件负责两件事：
+1. 从 LLM 输出里剥离 ```json 代码块，解析成结构化策略条目（前端 StrategyItem 直接渲染）；
+2. LLM 不可用时，用规则引擎的预警与建议生成三层降级策略（SOW §7 降级不影响基础功能）。
+
+M4 接入 LangGraph Agent Loop 后，生成逻辑迁到 graph_builder，
+本文件的**解析与降级**能力仍然复用。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from schemas import AssessmentResponse
+from services.scoring import load_scoring_config
+
+PRIORITIES = ("recommended", "alternative", "long_term")
+URGENCIES = ("high", "medium", "low")
+
+PRIORITY_ALIASES = {
+    "recommended": "recommended",
+    "推荐": "recommended",
+    "推荐策略": "recommended",
+    "high": "recommended",
+    "p0": "recommended",
+    "alternative": "alternative",
+    "备选": "alternative",
+    "备选策略": "alternative",
+    "medium": "alternative",
+    "p1": "alternative",
+    "long_term": "long_term",
+    "long-term": "long_term",
+    "长期": "long_term",
+    "长期建议": "long_term",
+    "low": "long_term",
+    "p2": "long_term",
+}
+
+URGENCY_ALIASES = {
+    "high": "high",
+    "高": "high",
+    "紧急": "high",
+    "medium": "medium",
+    "mid": "medium",
+    "中": "medium",
+    "low": "low",
+    "低": "low",
+}
+
+# 兼容 ```json / ``` 两种围栏
+_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)
+
+_ALERT_PRIORITY = {
+    "high": ("recommended", "high"),
+    "medium": ("alternative", "medium"),
+    "low": ("long_term", "low"),
+}
+
+
+def _norm_priority(value: Any) -> str:
+    return PRIORITY_ALIASES.get(str(value or "").strip().lower(), "recommended")
+
+
+def _norm_urgency(value: Any) -> str:
+    return URGENCY_ALIASES.get(str(value or "").strip().lower(), "medium")
+
+
+def normalize_item(raw: dict) -> dict | None:
+    """把任意形态的策略字典规整成 SOW §5.1 约定的字段集。"""
+    if not isinstance(raw, dict):
+        return None
+    title = str(raw.get("title") or raw.get("name") or "").strip()
+    if not title:
+        return None
+    return {
+        "priority": _norm_priority(raw.get("priority") or raw.get("level")),
+        "title": title,
+        "urgency": _norm_urgency(raw.get("urgency")),
+        "reason": str(raw.get("reason") or "").strip(),
+        "action": str(raw.get("action") or "").strip(),
+        "expected_outcome": str(
+            raw.get("expected_outcome") or raw.get("expected") or raw.get("outcome") or ""
+        ).strip(),
+        "reference": str(raw.get("reference") or raw.get("ref") or "").strip(),
+    }
+
+
+def _sort_key(item: dict) -> tuple[int, int]:
+    return (
+        PRIORITIES.index(item["priority"]) if item["priority"] in PRIORITIES else 9,
+        URGENCIES.index(item["urgency"]) if item["urgency"] in URGENCIES else 9,
+    )
+
+
+def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
+    """返回 ``(展示正文, 结构化策略列表)``。
+
+    正文里的 json 代码块只用于机器解析，不应展示给用户，因此会被剥离。
+    解析失败时返回原文 + 空列表——宁可少结构化，也不能把对话搞崩。
+    """
+    if not text:
+        return "", []
+
+    items: list[dict] = []
+    body = text
+    for match in list(_JSON_BLOCK_RE.finditer(text)):
+        snippet = match.group(1)
+        try:
+            payload = json.loads(snippet)
+        except json.JSONDecodeError:
+            continue
+
+        raw_items: list = []
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            for key in ("strategies", "items", "strategy_items"):
+                if isinstance(payload.get(key), list):
+                    raw_items = payload[key]
+                    break
+        if not raw_items:
+            continue
+
+        for raw in raw_items:
+            item = normalize_item(raw)
+            if item:
+                items.append(item)
+        body = body.replace(match.group(0), "")
+
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    items.sort(key=_sort_key)
+    return body, items
+
+
+# ── 降级生成（LLM 不可用）────────────────────────────────────────────────────
+
+
+def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dict]:
+    """用规则引擎的预警 + 建议拼出三层策略，字段与 LLM 输出保持一致。"""
+    if assessment is None:
+        return []
+
+    rules = {rule.id: rule for rule in load_scoring_config().alerts}
+    items: list[dict] = []
+
+    for alert in assessment.alerts:
+        priority, urgency = _ALERT_PRIORITY.get(alert.level, ("alternative", "medium"))
+        rule = rules.get(alert.id)
+        suggestion = (rule.suggestion if rule else "") or "由客户经理结合现场情况制定具体动作"
+        items.append(
+            {
+                "priority": priority,
+                "title": suggestion.replace("建议", "", 1).strip() or alert.message,
+                "urgency": urgency,
+                "reason": alert.message,
+                "action": suggestion,
+                "expected_outcome": "消除该项预警，对应维度分数回升",
+                "reference": "规则引擎（LLM 不可用时的兜底建议）",
+            }
+        )
+
+    # 机会类建议（如高增长潜力）落到长期建议层
+    alert_suggestions = {i["action"] for i in items}
+    for suggestion in assessment.suggestions:
+        if suggestion in alert_suggestions:
+            continue
+        items.append(
+            {
+                "priority": "long_term",
+                "title": suggestion.replace("建议", "", 1).strip() or suggestion,
+                "urgency": "low",
+                "reason": "规则引擎识别到的机会点",
+                "action": suggestion,
+                "expected_outcome": "扩大合作面，提升商业价值维度得分",
+                "reference": "规则引擎（LLM 不可用时的兜底建议）",
+            }
+        )
+
+    if not items:
+        items.append(
+            {
+                "priority": "long_term",
+                "title": "保持现有服务节奏并持续观察",
+                "urgency": "low",
+                "reason": f"当前健康分 {assessment.total_score}，未触发任何预警规则",
+                "action": "按既定周期回访，关注满意度与回款两项先行指标",
+                "expected_outcome": "维持健康度不下滑",
+                "reference": "规则引擎（LLM 不可用时的兜底建议）",
+            }
+        )
+
+    items.sort(key=_sort_key)
+    return items
+
+
+_GROUP_TITLES = {
+    "recommended": "✅ 推荐策略",
+    "alternative": "□ 备选策略",
+    "long_term": "💡 长期建议",
+}
+_URGENCY_CN = {"high": "高", "medium": "中", "low": "低"}
+
+
+def render_strategies_markdown(items: list[dict]) -> str:
+    """把结构化策略渲染成 Markdown（降级回复与 PDF 报告复用）。"""
+    if not items:
+        return ""
+
+    lines: list[str] = []
+    index = 1
+    for priority in PRIORITIES:
+        group = [i for i in items if i["priority"] == priority]
+        if not group:
+            continue
+        lines.append(f"### {_GROUP_TITLES[priority]}")
+        for item in group:
+            lines.append(f"{index}. **{item['title']}**（紧急度：{_URGENCY_CN.get(item['urgency'], '中')}）")
+            if item.get("reason"):
+                lines.append(f"   - 原因：{item['reason']}")
+            if item.get("action"):
+                lines.append(f"   - 行动：{item['action']}")
+            if item.get("expected_outcome"):
+                lines.append(f"   - 预期：{item['expected_outcome']}")
+            index += 1
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+# ── M4 Agent Loop 接入（SOW §3.4）────────────────────────────────────────────
+
+
+def generate(
+    scenario: str,
+    ctx,
+    customer,
+    db,
+    *,
+    adapter=None,
+    question: str = "",
+    max_iterations: int = 2,
+    embed_func=None,
+    store=None,
+):
+    """运行评估 / 策略 Agent Loop，返回 ``graph_builder.AgentResult``。
+
+    由 ``chat_engine`` 在 assessment / strategy / alert_analysis 场景下调用；
+    解析与降级能力仍复用本文件的 ``split_strategy_payload`` / ``build_degraded_*``。
+    """
+    from .graph_builder import AssessmentStrategyAgent
+
+    agent = AssessmentStrategyAgent(adapter=adapter, max_iterations=max_iterations)
+    return agent.run(
+        scenario,
+        ctx,
+        customer,
+        db,
+        question=question,
+        embed_func=embed_func,
+        store=store,
+    )

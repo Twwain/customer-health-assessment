@@ -1,237 +1,184 @@
-import { useState, useEffect } from "react";
-import { Customer } from "../api";
+import type { CustomerResponse, FactorConfigItem, FactorConfigResponse } from "../types";
 
-interface Props {
-  data?: Partial<Customer>;
-  onChange: (data: Partial<Customer>) => void;
+interface CustomerFormProps {
+  customer: CustomerResponse;
+  config: FactorConfigResponse;
+  value: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>) => void;
   readOnly?: boolean;
 }
 
-const freqOptions = ["每周", "双周", "每月", "每季度", "不定期"];
-const paymentOptions = ["正常", "部分逾期", "严重逾期"];
-const growthOptions = ["高", "中", "低"];
+function getBase(customer: CustomerResponse, config: FactorConfigResponse): Record<string, unknown> {
+  const base: Record<string, unknown> = {};
+  for (const dim of config.dimensions) {
+    for (const f of dim.factors) {
+      if (f.source === "custom_fields") {
+        base[f.field] = customer.custom_fields?.[f.field] ?? "";
+      } else {
+        const v = (customer as unknown as Record<string, unknown>)[f.field];
+        base[f.field] = v ?? (f.input.type === "bool" ? false : "");
+      }
+    }
+  }
+  return base;
+}
 
-export default function CustomerForm({ data = {}, onChange, readOnly }: Props) {
-  const update = (key: string, value: unknown) => {
-    if (!readOnly) onChange({ ...data, [key]: value });
-  };
+export default function CustomerForm({ customer, config, value, onChange, readOnly }: CustomerFormProps) {
+  const base = getBase(customer, config);
+  const merged: Record<string, unknown> = { ...base, ...value };
+
+  const set = (field: string, v: unknown) => onChange({ ...value, [field]: v });
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <Field label="客户名称" required>
-        <input
-          type="text"
-          value={data.customer_name ?? ""}
-          onChange={(e) => update("customer_name", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-          placeholder="请输入客户名称"
-        />
-      </Field>
+    <div className="space-y-3">
+      {config.dimensions
+        .filter((d) => d.enabled)
+        .map((dim, di) => (
+          <div key={dim.key} className="rounded-xl border border-border bg-surface p-3">
+            <div className="mb-2.5 flex items-center gap-2">
+              <span className="text-[13.5px] font-semibold text-brand">
+                {["①", "②", "③", "④", "⑤", "⑥"][di] ?? "•"} {dim.name}
+              </span>
+              <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[11px] text-muted">
+                维度权重 {dim.max_score} 分
+              </span>
+            </div>
+            <div className="space-y-2.5">
+              {dim.factors.map((f) => (
+                <FactorField
+                  key={f.field}
+                  factor={f}
+                  value={merged[f.field]}
+                  readOnly={readOnly}
+                  onChange={(v) => set(f.field, v)}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+    </div>
+  );
+}
 
-      <Field label="所属行业">
-        <input
-          type="text"
-          value={data.industry ?? ""}
-          onChange={(e) => update("industry", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-          placeholder="如：信息技术、金融"
-        />
-      </Field>
+function FactorField({
+  factor,
+  value,
+  readOnly,
+  onChange,
+}: {
+  factor: FactorConfigItem;
+  value: unknown;
+  readOnly?: boolean;
+  onChange: (v: unknown) => void;
+}) {
+  const inputCls =
+    "w-full rounded-lg border border-border bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
+  const label = (
+    <label className="mb-1 block text-[12.5px] font-medium text-ink-2">
+      {factor.label}
+      {factor.description && <span className="ml-1 text-[11px] font-normal text-muted">{factor.description}</span>}
+    </label>
+  );
 
-      <Field label="对接人">
-        <input
-          type="text"
-          value={data.contact_person ?? ""}
-          onChange={(e) => update("contact_person", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-        />
-      </Field>
-
-      <Field label="联系电话">
-        <input
-          type="text"
-          value={data.contact_phone ?? ""}
-          onChange={(e) => update("contact_phone", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-        />
-      </Field>
-
-      <Field label="合作年限">
-        <input
-          type="number"
-          step="0.5"
-          min="0"
-          value={data.cooperation_years ?? 0}
-          onChange={(e) => update("cooperation_years", parseFloat(e.target.value) || 0)}
-          disabled={readOnly}
-          className={inputClass}
-        />
-      </Field>
-
-      <Field label="沟通频率">
-        <select
-          value={data.contact_frequency ?? "每月"}
-          onChange={(e) => update("contact_frequency", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-        >
-          {freqOptions.map((o) => (
-            <option key={o} value={o}>{o}</option>
-          ))}
-        </select>
-      </Field>
-
-      <Field label="最近联系日期">
-        <input
-          type="date"
-          value={data.last_contact_date?.split("T")[0] ?? ""}
-          onChange={(e) => update("last_contact_date", e.target.value || null)}
-          disabled={readOnly}
-          className={inputClass}
-        />
-      </Field>
-
-      <Field label="客户满意度 (1-10)">
+  let control: React.ReactNode;
+  const t = factor.input.type;
+  if (t === "textarea") {
+    control = (
+      <textarea
+        className={inputCls}
+        rows={2}
+        value={String(value ?? "")}
+        disabled={readOnly}
+        placeholder={factor.input.placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    );
+  } else if (t === "number") {
+    control = (
+      <input
+        type="number"
+        className={inputCls}
+        min={factor.input.min ?? undefined}
+        max={factor.input.max ?? undefined}
+        step={factor.input.step ?? undefined}
+        value={value === "" || value == null ? "" : Number(value)}
+        disabled={readOnly}
+        onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
+      />
+    );
+  } else if (t === "slider" || t === "range") {
+    const num = typeof value === "number" ? value : Number(value) || 0;
+    control = (
+      <div className="flex items-center gap-3">
         <input
           type="range"
-          min="1"
-          max="10"
-          value={data.customer_satisfaction ?? 5}
-          onChange={(e) => update("customer_satisfaction", parseInt(e.target.value))}
+          className="flex-1 accent-accent"
+          min={factor.input.min ?? 0}
+          max={factor.input.max ?? 10}
+          step={factor.input.step ?? 1}
+          value={num}
           disabled={readOnly}
-          className="w-full accent-amber-500"
+          onChange={(e) => onChange(Number(e.target.value))}
         />
-        <div className="text-center text-lg font-bold text-amber-600">
-          {data.customer_satisfaction ?? 5} 分
-        </div>
-      </Field>
-
-      <Field label="合同金额 (万元)">
+        <span className="w-12 text-right text-[14px] font-bold text-accent">{num}</span>
+        {factor.input.unit && <span className="text-[12px] text-muted">{factor.input.unit}</span>}
+      </div>
+    );
+  } else if (t === "select") {
+    control = (
+      <select
+        className={inputCls}
+        value={String(value ?? "")}
+        disabled={readOnly}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {factor.input.options.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    );
+  } else if (t === "date") {
+    control = (
+      <input
+        type="date"
+        className={inputCls}
+        value={String(value ?? "")}
+        disabled={readOnly}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    );
+  } else if (t === "bool") {
+    control = (
+      <label className="flex items-center gap-2 text-[13px] text-ink-2">
         <input
-          type="number"
-          min="0"
-          step="1"
-          value={data.contract_amount ?? 0}
-          onChange={(e) => update("contract_amount", parseFloat(e.target.value) || 0)}
+          type="checkbox"
+          className="h-4 w-4 rounded border-border accent-accent"
+          checked={Boolean(value)}
           disabled={readOnly}
-          className={inputClass}
+          onChange={(e) => onChange(e.target.checked)}
         />
-      </Field>
-
-      <Field label="回款情况">
-        <select
-          value={data.payment_status ?? "正常"}
-          onChange={(e) => update("payment_status", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-        >
-          {paymentOptions.map((o) => (
-            <option key={o} value={o}>{o}</option>
-          ))}
-        </select>
-      </Field>
-
-      <Field label="增长潜力">
-        <select
-          value={data.growth_potential ?? "中"}
-          onChange={(e) => update("growth_potential", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-        >
-          {growthOptions.map((o) => (
-            <option key={o} value={o}>{o}</option>
-          ))}
-        </select>
-      </Field>
-
-      <Field label="竞品介入">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={data.competitor_involvement ?? false}
-            onChange={(e) => update("competitor_involvement", e.target.checked)}
-            disabled={readOnly}
-            className="w-4 h-4 rounded border-slate-300 accent-amber-500"
-          />
-          <span className="text-sm text-slate-700">是</span>
-        </label>
-      </Field>
-
-      <Field label="风险信号" full>
-        <textarea
-          value={data.risk_signals ?? ""}
-          onChange={(e) => update("risk_signals", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-          rows={2}
-          placeholder="描述客户当前存在的风险信号"
-        />
-      </Field>
-
-      <Field label="备注" full>
-        <textarea
-          value={data.notes ?? ""}
-          onChange={(e) => update("notes", e.target.value)}
-          disabled={readOnly}
-          className={inputClass}
-          rows={3}
-          placeholder="其他备注信息"
-        />
-      </Field>
-
-      {/* 自定义扩展字段 */}
-      {data.custom_fields && Object.keys(data.custom_fields).length > 0 && (
-        <>
-          <div className="md:col-span-2 mt-2">
-            <h3 className="text-sm font-semibold text-slate-600 border-t border-slate-200 pt-4 pb-2 bg-slate-50 -mx-2 px-2 rounded-lg">
-              扩展字段
-            </h3>
-          </div>
-          {Object.entries(data.custom_fields).map(([key, value]) => (
-            <Field key={key} label={key}>
-              <input
-                type="text"
-                value={value}
-                onChange={(e) => {
-                  const newFields = { ...data.custom_fields, [key]: e.target.value };
-                  onChange({ ...data, custom_fields: newFields });
-                }}
-                disabled={readOnly}
-                className={inputClass}
-              />
-            </Field>
-          ))}
-        </>
-      )}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  required,
-  full,
-  children,
-}: {
-  label: string;
-  required?: boolean;
-  full?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={full ? "md:col-span-2" : ""}>
-      <label className="block text-sm font-medium text-slate-700 mb-1.5">
-        {label}
-        {required && <span className="text-red-500 ml-0.5">*</span>}
+        是
       </label>
-      {children}
+    );
+  } else {
+    control = (
+      <input
+        type="text"
+        className={inputCls}
+        value={String(value ?? "")}
+        disabled={readOnly}
+        placeholder={factor.input.placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    );
+  }
+
+  return (
+    <div>
+      {label}
+      {control}
     </div>
   );
 }
-
-const inputClass =
-  "w-full px-3 py-2 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none disabled:bg-slate-50 disabled:text-slate-500 transition-colors";

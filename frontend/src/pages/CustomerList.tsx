@@ -1,147 +1,303 @@
-import { useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { listCustomers, listIndustries, deleteCustomer, Customer, CustomerListResponse } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { chat, customers } from "../api";
+import type {
+  AssessmentResponse,
+  AssessmentTrendResponse,
+  CustomerResponse,
+  FactorConfigResponse,
+} from "../types";
+import { getLevels, levelColor, trendMeta, type LevelSpec } from "../lib/ui";
+import { useIsMobile } from "../hooks";
+import { AlertBadge, LevelBadge } from "../components/Badges";
+import { Sparkline, TrendChart } from "../components/Charts";
+import CustomerForm from "../components/CustomerForm";
+
+interface Row {
+  customer: CustomerResponse;
+  a?: AssessmentResponse;
+  t?: AssessmentTrendResponse;
+}
+
+// 等级表：优先本页已加载的 factorConfig（React 状态，避免依赖全局注册时序），
+// 兜底用 Layout 启动时注册的全局等级表；均不写死"优秀/良好/一般/风险"。
+const resolveLevels = (config: FactorConfigResponse | null): LevelSpec[] =>
+  config?.levels?.length ? config.levels : getLevels();
 
 export default function CustomerList() {
-  const [searchParams] = useSearchParams();
-  const [data, setData] = useState<CustomerListResponse | null>(null);
+  const navigate = useNavigate();
+  const isMobile = useIsMobile();
+
+  const [rows, setRows] = useState<CustomerResponse[]>([]);
+  const [assess, setAssess] = useState<Record<number, AssessmentResponse | null>>({});
+  const [trends, setTrends] = useState<Record<number, AssessmentTrendResponse | null>>({});
   const [industries, setIndustries] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const search = searchParams.get("search") ?? "";
-  const industry = searchParams.get("industry") ?? "";
-  const level = searchParams.get("level") ?? "";
-  const page = parseInt(searchParams.get("page") ?? "1");
+  const [search, setSearch] = useState("");
+  const [industry, setIndustry] = useState("");
+  const [level, setLevel] = useState("");
+  const [trendFilter, setTrendFilter] = useState("");
+  const [sort, setSort] = useState("score_desc");
 
-  useEffect(() => {
-    listIndustries().then((r) => setIndustries(r.data)).catch(() => {});
-  }, []);
+  const [config, setConfig] = useState<FactorConfigResponse | null>(null);
+  const [factorDrawer, setFactorDrawer] = useState<{ customer: CustomerResponse; readOnly: boolean } | null>(null);
+  const [draft, setDraft] = useState<Record<string, unknown>>({});
+  const [saving, setSaving] = useState(false);
+  const [trendDrawer, setTrendDrawer] = useState<CustomerResponse | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+
+  const enrich = async (list: CustomerResponse[]) => {
+    // 并发请求每个客户的评分与趋势；内层 promise 必须返回给 Promise.all，
+    // 否则 await 立即完成、loading 提前结束（此前 loading 语义不准）
+    await Promise.all(
+      list.flatMap((c) => [
+        customers
+          .assessment(c.id)
+          .then((a) => setAssess((p) => ({ ...p, [c.id]: a })))
+          .catch(() => setAssess((p) => ({ ...p, [c.id]: null }))),
+        customers
+          .trend(c.id, 12)
+          .then((t) => setTrends((p) => ({ ...p, [c.id]: t })))
+          .catch(() => setTrends((p) => ({ ...p, [c.id]: null }))),
+      ]),
+    );
+  };
 
   const fetchData = () => {
     setLoading(true);
     setError(null);
-    listCustomers({ search, industry, level, page })
-      .then((r) => setData(r.data))
+    customers
+      .list({ page_size: 200 })
+      .then(async (r) => {
+        setRows(r.items);
+        await enrich(r.items);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "加载失败"))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchData(); }, [search, industry, level, page]);
+  useEffect(() => {
+    fetchData();
+    customers.industries().then(setIndustries).catch(() => {});
+    customers.factorConfig().then(setConfig).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`确定删除「${name}」吗？`)) return;
-    await deleteCustomer(id);
-    listCustomers({ search, industry, page })
-      .then((r) => setData(r.data));
+  const data: Row[] = useMemo(
+    () =>
+      rows.map((c) => ({ customer: c, a: assess[c.id] ?? undefined, t: trends[c.id] ?? undefined })),
+    [rows, assess, trends],
+  );
+
+  const filtered = useMemo(() => {
+    let list = data;
+    const q = search.trim().toLowerCase();
+    if (q)
+      list = list.filter(
+        (x) =>
+          x.customer.customer_name.toLowerCase().includes(q) ||
+          x.customer.industry.toLowerCase().includes(q) ||
+          x.customer.contact_person.toLowerCase().includes(q),
+      );
+    if (industry) list = list.filter((x) => x.customer.industry === industry);
+    if (level) list = list.filter((x) => x.a?.level === level);
+    if (trendFilter === "up") list = list.filter((x) => x.t?.trend === "up");
+    else if (trendFilter === "down") list = list.filter((x) => x.t?.trend === "down");
+    else if (trendFilter === "flat") list = list.filter((x) => x.t?.trend === "flat" || !x.t);
+    const sorted = [...list];
+    if (sort === "score_asc") sorted.sort((a, b) => (a.a?.total_score ?? 0) - (b.a?.total_score ?? 0));
+    else if (sort === "delta") sorted.sort((a, b) => (a.t?.delta ?? 0) - (b.t?.delta ?? 0));
+    else sorted.sort((a, b) => (b.a?.total_score ?? 0) - (a.a?.total_score ?? 0));
+    return sorted;
+  }, [data, search, industry, level, trendFilter, sort]);
+
+  const stats = useMemo(() => {
+    const scores = rows.map((c) => assess[c.id]?.total_score).filter((v): v is number => typeof v === "number");
+    const avg = scores.length ? scores.reduce((s, v) => s + v, 0) / scores.length : 0;
+    // 最低档等级（配置驱动，不假定叫"风险"）
+    const lv = resolveLevels(config);
+    const riskName = lv.length ? lv[lv.length - 1].name : "风险";
+    const risk = rows.filter((c) => assess[c.id]?.level === riskName).length;
+    const down = rows.filter((c) => trends[c.id]?.trend === "down").length;
+    return { total: rows.length, avg: Math.round(avg * 10) / 10, risk, down, riskName };
+  }, [rows, assess, trends, config]);
+
+  const openFactor = (c: CustomerResponse) => {
+    setDraft({});
+    setFactorDrawer({ customer: c, readOnly: isMobile });
   };
 
-  const buildUrl = (updates: Record<string, string>) => {
-    const p = new URLSearchParams(searchParams);
-    Object.entries(updates).forEach(([k, v]) => (v ? p.set(k, v) : p.delete(k)));
-    return `/customers?${p.toString()}`;
+  const saveFactors = async () => {
+    if (!factorDrawer || !config) return;
+    setSaving(true);
+    try {
+      const r = await customers.updateFactors(factorDrawer.customer.id, draft);
+      setRows((prev) => prev.map((c) => (c.id === r.customer.id ? r.customer : c)));
+      setAssess((p) => ({ ...p, [r.customer.id]: r.assessment }));
+      setFactorDrawer(null);
+    } catch (e) {
+      alert("保存失败：" + (e instanceof Error ? e.message : "未知错误"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const evalCustomer = async (c: CustomerResponse) => {
+    try {
+      const s = await chat.createSession({
+        title: `${c.customer_name} · AI 评估`,
+        customer_id: c.id,
+        scenario: "assessment",
+      });
+      navigate(`/chat/${s.id}`, { state: { autoScenario: "assessment" } });
+    } catch {
+      alert("创建评估会话失败");
+    }
   };
 
   return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-        <h1 className="text-2xl font-bold text-slate-800">客情列表</h1>
-        <Link
-          to="/customers/new"
-          className="inline-flex items-center justify-center px-4 py-2 bg-amber-600 text-white rounded-xl text-sm font-medium hover:bg-amber-700 transition"
+    <div className="mx-auto max-w-[1200px] px-4 py-5">
+      {/* 页头 */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="mr-auto">
+          <h1 className="text-[20px] font-bold text-ink">👥 客户库</h1>
+          <div className="text-[12.5px] text-muted">量化评估引擎入口 · 编辑客情因子后可一键触发 AI 评估</div>
+        </div>
+        <button
+          className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white transition hover:bg-accent-hover"
+          onClick={() => setAddOpen(true)}
         >
-          + 新增客户
-        </Link>
+          ＋ 添加客户
+        </button>
       </div>
 
-      {/* Filters */}
-      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 mb-4 flex flex-col sm:flex-row gap-3">
+      {/* 筛选 */}
+      <div className="mb-4 flex flex-col gap-2 rounded-2xl border border-border bg-surface p-3 lg:flex-row lg:items-center">
         <input
           type="text"
-          defaultValue={search}
-          placeholder="搜索客户名称、行业、对接人..."
-          className="flex-1 px-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              window.location.href = buildUrl({ search: (e.target as HTMLInputElement).value, page: "" });
-            }
-          }}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="搜索客户名称 / 行业 / 对接人…"
+          className="flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
         />
-        <select
-          value={industry}
-          onChange={(e) => {
-            window.location.href = buildUrl({ industry: e.target.value, page: "" });
-          }}
-          className="px-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-500"
-        >
+        <select value={industry} onChange={(e) => setIndustry(e.target.value)} className={selCls}>
           <option value="">全部行业</option>
-          {industries.map((ind) => (
-            <option key={ind} value={ind}>{ind}</option>
+          {industries.map((i) => (
+            <option key={i} value={i}>
+              {i}
+            </option>
           ))}
+        </select>
+        <select value={level} onChange={(e) => setLevel(e.target.value)} className={selCls}>
+          <option value="">全部等级</option>
+          {resolveLevels(config).map((l) => (
+            <option key={l.name} value={l.name}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+        <select value={trendFilter} onChange={(e) => setTrendFilter(e.target.value)} className={selCls}>
+          <option value="">全部趋势</option>
+          <option value="up">↑ 上升</option>
+          <option value="down">↓ 下降</option>
+          <option value="flat">→ 持平</option>
+        </select>
+        <select value={sort} onChange={(e) => setSort(e.target.value)} className={selCls}>
+          <option value="score_desc">按健康分降序</option>
+          <option value="score_asc">按健康分升序</option>
+          <option value="delta">按跌幅排序</option>
         </select>
       </div>
 
+      {/* 统计 */}
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Stat label="客户总数" value={String(stats.total)} />
+        <Stat label="平均健康分" value={String(stats.avg)} />
+        <Stat label={`风险客户（${stats.riskName}级）`} value={String(stats.risk)} danger />
+        <Stat label="趋势下滑客户" value={String(stats.down)} warning />
+      </div>
+
       {loading ? (
-        <div className="text-slate-400 py-20 text-center">加载中...</div>
+        <div className="py-20 text-center text-muted">加载中…</div>
       ) : error ? (
         <div className="py-20 text-center">
-          <div className="text-4xl mb-4">⚠️</div>
-          <div className="text-red-600 font-medium mb-2">数据加载失败</div>
-          <div className="text-slate-400 text-sm mb-4">{error}</div>
-          <button onClick={fetchData} className="px-4 py-2 bg-amber-600 text-white rounded-xl text-sm hover:bg-amber-700 transition">重试</button>
+          <div className="mb-2 text-danger">数据加载失败</div>
+          <div className="mb-3 text-[13px] text-muted">{error}</div>
+          <button className="rounded-lg bg-accent px-4 py-2 text-[13px] text-white" onClick={fetchData}>
+            重试
+          </button>
         </div>
-      ) : !data || data.items.length === 0 ? (
-        <div className="py-20 text-center text-slate-400">
-          {search || industry ? "没有匹配的客户" : "暂无客户数据"}
-        </div>
+      ) : filtered.length === 0 ? (
+        <div className="py-20 text-center text-muted">没有匹配的客户</div>
       ) : (
         <>
-          {/* Desktop table */}
-          <div className="hidden md:block bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          {/* 桌面表格 */}
+          <div className="hidden overflow-hidden rounded-2xl border border-border bg-surface md:block">
             <table className="w-full">
-              <thead className="bg-slate-50 border-b border-slate-100">
+              <thead className="border-b border-border bg-surface-2 text-[12px] text-muted">
                 <tr>
-                  <TH>客户名称</TH>
-                  <TH>行业</TH>
-                  <TH>合作年限</TH>
-                  <TH>满意度</TH>
-                  <TH>回款情况</TH>
-                  <TH>最近联系</TH>
-                  <TH>操作</TH>
+                  <th className="px-4 py-3 text-left font-medium">客户名称</th>
+                  <th className="px-4 py-3 text-left font-medium">行业</th>
+                  <th className="w-[160px] px-4 py-3 text-left font-medium">健康分 / 趋势</th>
+                  <th className="w-[120px] px-4 py-3 text-left font-medium">近 12 次</th>
+                  <th className="px-4 py-3 text-left font-medium">等级</th>
+                  <th className="px-4 py-3 text-left font-medium">预警</th>
+                  <th className="px-4 py-3 text-right font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((c) => (
-                  <tr key={c.id} className="border-b border-slate-50 hover:bg-amber-50/30 transition-colors">
+                {filtered.map((x) => (
+                  <tr key={x.customer.id} className="border-b border-border-soft last:border-0 hover:bg-surface-2/60">
                     <td className="px-4 py-3">
-                      <Link to={`/customers/${c.id}`} className="text-amber-700 font-medium hover:underline">
-                        {c.customer_name}
-                      </Link>
+                      <div className="font-medium text-ink">{x.customer.customer_name}</div>
+                      <div className="text-[11px] text-muted">{x.customer.contact_person || "—"}</div>
                     </td>
-                    <td className="px-4 py-3 text-sm text-slate-600">{c.industry || "-"}</td>
-                    <td className="px-4 py-3 text-sm text-slate-600">{c.cooperation_years}年</td>
-                    <td className="px-4 py-3 text-sm text-slate-600">{c.customer_satisfaction}/10</td>
-                    <td className="px-4 py-3 text-sm">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className={`inline-block w-2 h-2 rounded-full ${c.payment_status === "正常" ? "bg-lime-500" : "bg-red-500"}`} />
-                        <span className={c.payment_status === "正常" ? "text-lime-700" : "text-red-600"}>
-                          {c.payment_status}
-                        </span>
-                      </span>
+                    <td className="px-4 py-3 text-[13px] text-ink-2">{x.customer.industry || "—"}</td>
+                    <td className="px-4 py-3">
+                      {x.a ? (
+                        <ScoreCell score={x.a.total_score} level={x.a.level} trend={x.t} />
+                      ) : (
+                        <span className="text-[12px] text-muted">计算中…</span>
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-slate-500">
-                      {c.last_contact_date?.split("T")[0] ?? "无记录"}
+                    <td className="px-4 py-3">
+                      {x.t ? (
+                        <Sparkline values={x.t.points.map((p) => p.total_score)} color={levelColor(x.a?.level || "一般")} width={92} height={26} />
+                      ) : (
+                        <span className="text-[12px] text-muted">—</span>
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-sm space-x-2">
-                      <Link to={`/customers/${c.id}`} className="text-amber-600 hover:underline font-medium">
-                        查看
-                      </Link>
-                      <button
-                        onClick={() => handleDelete(c.id, c.customer_name)}
-                        className="text-red-500 hover:underline"
-                      >
-                        删除
-                      </button>
+                    <td className="px-4 py-3">{x.a ? <LevelBadge grade={x.a.level} size="sm" /> : "—"}</td>
+                    <td className="px-4 py-3">
+                      {x.a && x.a.alerts.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {x.a.alerts.slice(0, 2).map((al, i) => (
+                            <AlertBadge key={i} level={al.level} message={al.message} />
+                          ))}
+                          {x.a.alerts.length > 2 && (
+                            <span className="rounded-full bg-surface-2 px-1.5 py-[2px] text-[11px] text-muted">
+                              +{x.a.alerts.length - 2}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-[12px] text-muted">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-1.5">
+                        <button className="rounded-lg border border-border px-2.5 py-1.5 text-[12px] text-ink-2 transition hover:border-accent hover:text-accent" onClick={() => openFactor(x.customer)}>
+                          编辑
+                        </button>
+                        <button className="rounded-lg border border-border px-2.5 py-1.5 text-[12px] text-ink-2 transition hover:border-accent hover:text-accent" onClick={() => setTrendDrawer(x.customer)}>
+                          趋势
+                        </button>
+                        <button className="rounded-lg bg-accent px-2.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-accent-hover" onClick={() => evalCustomer(x.customer)}>
+                          ✨ AI 评估
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -149,67 +305,516 @@ export default function CustomerList() {
             </table>
           </div>
 
-          {/* Mobile cards */}
-          <div className="md:hidden space-y-3">
-            {data.items.map((c) => (
-              <Link
-                key={c.id}
-                to={`/customers/${c.id}`}
-                className="block bg-white rounded-2xl p-4 shadow-sm border border-slate-100 hover:shadow transition-shadow"
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <span className="font-semibold text-slate-800">{c.customer_name}</span>
-                  <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${
-                    c.payment_status === "正常" ? "bg-lime-50 text-lime-700" : "bg-red-50 text-red-600"
-                  }`}>
-                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${c.payment_status === "正常" ? "bg-lime-500" : "bg-red-500"}`} />
-                    {c.payment_status}
-                  </span>
+          {/* 移动卡片 */}
+          <div className="space-y-3 md:hidden">
+            {filtered.map((x) => (
+              <div key={x.customer.id} className="rounded-2xl border border-border bg-surface p-3.5">
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-[15px] font-semibold text-ink">{x.customer.customer_name}</span>
+                      {x.a && <LevelBadge grade={x.a.level} size="sm" />}
+                    </div>
+                    <div className="mt-0.5 text-[11.5px] text-muted">
+                      {x.customer.industry || "未填写行业"}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[19px] font-bold" style={{ color: x.a ? levelColor(x.a.level) : "#8A94A6" }}>
+                      {x.a ? Math.round(x.a.total_score * 10) / 10 : "—"}
+                    </div>
+                    {x.t && <TrendArrow trend={x.t} />}
+                  </div>
                 </div>
-                <div className="text-xs text-slate-500 space-y-0.5">
-                  <div>{c.industry || "未填写行业"} · 合作{c.cooperation_years}年</div>
-                  <div>满意度 {c.customer_satisfaction}/10 · 最近联系 {c.last_contact_date?.split("T")[0] ?? "无"}</div>
+                {x.t && (
+                  <div className="mt-2 flex justify-center">
+                    <Sparkline values={x.t.points.map((p) => p.total_score)} color={levelColor(x.a?.level || "一般")} width={120} height={28} />
+                  </div>
+                )}
+                {x.a && x.a.alerts.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {x.a.alerts.slice(0, 2).map((al, i) => (
+                      <AlertBadge key={i} level={al.level} message={al.message} />
+                    ))}
+                  </div>
+                )}
+                <div className="mt-2.5 flex gap-2">
+                  <button className="flex-1 rounded-lg border border-border py-2 text-[12.5px] text-ink-2" onClick={() => openFactor(x.customer)}>
+                    编辑
+                  </button>
+                  <button className="flex-1 rounded-lg bg-accent py-2 text-[12.5px] font-medium text-white" onClick={() => evalCustomer(x.customer)}>
+                    ✨ AI 评估
+                  </button>
                 </div>
-              </Link>
+              </div>
             ))}
           </div>
-
-          {/* Pagination */}
-          <div className="flex items-center justify-between mt-4 text-sm">
-            <span className="text-slate-500">共 {data.total} 条</span>
-            <div className="flex gap-2">
-              <a
-                href={buildUrl({ page: String(Math.max(1, page - 1)) })}
-                className={`px-3 py-1.5 rounded-xl border text-sm font-medium transition ${
-                  page <= 1
-                    ? "text-slate-300 border-slate-200 cursor-not-allowed"
-                    : "text-slate-600 border-slate-300 hover:bg-amber-50 hover:border-amber-300"
-                }`}
-              >
-                上一页
-              </a>
-              <a
-                href={buildUrl({ page: String(page + 1) })}
-                className={`px-3 py-1.5 rounded-xl border text-sm font-medium transition ${
-                  data.items.length < data.page_size
-                    ? "text-slate-300 border-slate-200 cursor-not-allowed"
-                    : "text-slate-600 border-slate-300 hover:bg-amber-50 hover:border-amber-300"
-                }`}
-              >
-                下一页
-              </a>
-            </div>
+          <div className="mt-3 text-[12px] text-muted">
+            共 {filtered.length} 条
           </div>
         </>
       )}
+
+      {factorDrawer && config && (
+        <Drawer
+          title={factorDrawer.readOnly ? `客情因子 — ${factorDrawer.customer.customer_name}` : `编辑客情因子 — ${factorDrawer.customer.customer_name}`}
+          onClose={() => setFactorDrawer(null)}
+          narrow={factorDrawer.readOnly}
+          footer={
+            factorDrawer.readOnly ? (
+              <>
+                <span className="mr-auto text-[12px] text-muted">
+                  当前基础客情分{" "}
+                  <b className="text-danger">
+                    {factorDrawer.customer ? (assess[factorDrawer.customer.id]?.total_score ?? "—") : "—"}
+                  </b>
+                </span>
+                <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={() => setFactorDrawer(null)}>
+                  关闭
+                </button>
+                <button className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white" onClick={() => evalCustomer(factorDrawer.customer)}>
+                  ✨ AI 评估
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="mr-auto text-[12px] text-muted">保存后重算基础客情分并写入评估历史</span>
+                <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={() => setFactorDrawer(null)}>
+                  取消
+                </button>
+                <button className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50" onClick={saveFactors} disabled={saving}>
+                  {saving ? "保存中…" : "保存并重新评分"}
+                </button>
+              </>
+            )
+          }
+        >
+          {factorDrawer.readOnly && (
+            <div className="mb-3 rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 text-[12px] text-warning">
+              📱 移动端为只读视图。因子编辑请在桌面端完成。
+            </div>
+          )}
+          <CustomerForm
+            customer={factorDrawer.customer}
+            config={config}
+            value={draft}
+            onChange={setDraft}
+            readOnly={factorDrawer.readOnly}
+          />
+        </Drawer>
+      )}
+
+      {trendDrawer && (
+        <Drawer title={`📈 ${trendDrawer.customer_name} — 健康分历史趋势`} onClose={() => setTrendDrawer(null)}>
+          <TrendDrawerBody a={assess[trendDrawer.id] ?? undefined} t={trends[trendDrawer.id] ?? undefined} />
+        </Drawer>
+      )}
+
+      {addOpen && <AddCustomerModal config={config} onClose={() => setAddOpen(false)} onDone={() => { setAddOpen(false); fetchData(); }} />}
     </div>
   );
 }
 
-function TH({ children }: { children: React.ReactNode }) {
+const selCls =
+  "rounded-lg border border-border bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent";
+
+function Stat({ label, value, danger, warning }: { label: string; value: string; danger?: boolean; warning?: boolean }) {
+  const color = danger ? "text-danger" : warning ? "text-warning" : "text-ink";
   return (
-    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-      {children}
-    </th>
+    <div className="rounded-2xl border border-border bg-surface p-3.5">
+      <div className={`text-[22px] font-bold ${color}`}>{value}</div>
+      <div className="text-[12px] text-muted">{label}</div>
+    </div>
+  );
+}
+
+function ScoreCell({ score, level, trend }: { score: number; level: string; trend?: AssessmentTrendResponse }) {
+  const color = levelColor(level);
+  const t = trend ? trendMeta(trend.latest_score, trend.previous_score) : null;
+  return (
+    <div>
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[16px] font-bold" style={{ color }}>
+          {Math.round(score * 10) / 10}
+        </span>
+        {t && (
+          <span className={`text-[12px] font-medium ${t.cls === "trend-up" ? "text-success" : t.cls === "trend-down" ? "text-danger" : "text-muted"}`}>
+            {t.arrow} {t.text}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TrendArrow({ trend }: { trend: AssessmentTrendResponse }) {
+  const t = trendMeta(trend.latest_score, trend.previous_score);
+  return (
+    <span className={`text-[11px] font-medium ${t.cls === "trend-up" ? "text-success" : t.cls === "trend-down" ? "text-danger" : "text-muted"}`}>
+      {t.arrow} {t.text}
+    </span>
+  );
+}
+
+function Drawer({
+  title,
+  onClose,
+  children,
+  footer,
+  narrow,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  narrow?: boolean;
+}) {
+  return (
+    <>
+      <div className="overlay-mask" onClick={onClose} />
+      <div className={`drawer-panel ${narrow ? "narrow" : ""}`}>
+        <div className="flex items-center border-b border-border px-4 py-3">
+          <h3 className="flex-1 truncate text-[15px] font-semibold text-ink">{title}</h3>
+          <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+        {footer && <div className="flex items-center gap-2 border-t border-border px-4 py-3">{footer}</div>}
+      </div>
+    </>
+  );
+}
+
+function TrendDrawerBody({
+  a,
+  t,
+}: {
+  a?: AssessmentResponse;
+  t?: AssessmentTrendResponse;
+}) {
+  const color = a ? levelColor(a.level) : "#0066FF";
+  const history = t ? [...t.points].reverse() : [];
+  return (
+    <div>
+      {a && (
+        <div className="mb-3 flex items-center gap-3">
+          <div>
+            <div className="text-[20px] font-bold" style={{ color }}>
+              {Math.round(a.total_score * 10) / 10}
+            </div>
+            <LevelBadge grade={a.level} size="sm" />
+          </div>
+          <div className="text-[12px] text-muted">
+            满分 {a.max_score} · 共 {t?.points.length ?? 0} 次评估
+          </div>
+        </div>
+      )}
+      {t ? (
+        <div className="overflow-x-auto rounded-xl border border-border-soft bg-surface-2 p-3">
+          <TrendChart trend={t} color={color} width={420} height={180} />
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border-soft bg-surface-2 p-4 text-[13px] text-muted">暂无趋势数据</div>
+      )}
+      {history.length > 0 && (
+        <div className="mt-3 overflow-hidden rounded-xl border border-border">
+          <table className="w-full text-[12.5px]">
+            <thead className="bg-surface-2 text-muted">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">评估时间</th>
+                <th className="px-3 py-2 text-right font-medium">总分</th>
+                <th className="px-3 py-2 text-right font-medium">变化</th>
+                <th className="px-3 py-2 text-left font-medium">等级</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((p, i) => {
+                const d = i < history.length - 1 ? +(history[i + 1].total_score - p.total_score).toFixed(1) : null;
+                return (
+                  <tr key={i} className="border-t border-border-soft">
+                    <td className="px-3 py-2 text-ink-2">{p.label}</td>
+                    <td className="px-3 py-2 text-right font-medium" style={{ color: levelColor(p.level) }}>
+                      {p.total_score}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {d == null ? (
+                        "—"
+                      ) : (
+                        <span className={d > 0 ? "text-success" : d < 0 ? "text-danger" : "text-muted"}>
+                          {d > 0 ? "+" : ""}
+                          {d}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <LevelBadge grade={p.level} size="sm" />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[12px] text-muted">
+        趋势箭头基于最近 2 次评分差值；曲线基于 AssessmentHistory 全量记录。
+      </div>
+    </div>
+  );
+}
+
+const EMPTY_CUSTOMER: CustomerResponse = {
+  id: 0,
+  customer_name: "",
+  industry: "",
+  contact_person: "",
+  contact_phone: "",
+  cooperation_years: 0,
+  contact_frequency: "",
+  last_contact_date: null,
+  customer_satisfaction: 0,
+  contract_amount: 0,
+  payment_status: "",
+  risk_signals: "",
+  competitor_involvement: false,
+  growth_potential: "",
+  notes: "",
+  custom_fields: {},
+  created_at: "",
+  updated_at: "",
+};
+
+// 批量导入模板表头：须与 backend/routers/customers.py 的 field_map 保持一致
+const IMPORT_TEMPLATE_HEADERS = [
+  "客户名称",
+  "行业",
+  "对接人",
+  "联系电话",
+  "合作年限",
+  "沟通频率",
+  "最近联系日期",
+  "客户满意度",
+  "合同金额(万元)",
+  "回款情况",
+  "风险信号",
+  "竞品介入",
+  "增长潜力",
+  "备注",
+];
+const IMPORT_TEMPLATE_SAMPLE_MAP: Record<string, string> = {
+  客户名称: "示例科技",
+  行业: "制造业",
+  对接人: "张三",
+  联系电话: "13800000000",
+  备注: "重点跟进客户",
+  合作年限: "3",
+  沟通频率: "每月",
+  最近联系日期: "2026-07-01",
+  满意度评分: "8",
+  合同金额: "500",
+  回款情况: "正常",
+  风险信号: "",
+  竞品介入: "否",
+  增长潜力: "高",
+  交付质量: "良",
+  技术适配度: "高",
+  需求响应时效: "24小时内响应",
+  团队稳定性: "稳定",
+};
+
+// 由配置动态生成模板表头：基础字段 + 各因子 label（与后端导入识别一致）
+const buildTemplateHeaders = (cfg: FactorConfigResponse | null): string[] => {
+  if (!cfg) return IMPORT_TEMPLATE_HEADERS;
+  const base = ["客户名称", "行业", "对接人", "联系电话", "备注"];
+  const labels: string[] = [];
+  for (const dim of cfg.dimensions) {
+    for (const f of dim.factors) {
+      if (f.input.type === "readonly") continue;
+      labels.push(f.label);
+    }
+  }
+  return [...base, ...labels];
+};
+
+function AddCustomerModal({
+  config,
+  onClose,
+  onDone,
+}: {
+  config: FactorConfigResponse | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [tab, setTab] = useState<"single" | "import">("single");
+  const [name, setName] = useState("");
+  const [industry, setIndustry] = useState("");
+  const [draft, setDraft] = useState<Record<string, unknown>>({});
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const downloadTemplate = () => {
+    const headers = buildTemplateHeaders(config);
+    const sample = headers.map((h) => IMPORT_TEMPLATE_SAMPLE_MAP[h] ?? "");
+    const csv = "﻿" + [headers.join(","), sample.join(",")].join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "客户导入模板.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const submitSingle = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      // 先建档，再一次性写入因子并重算（两步完成「建档 + 填因子」）
+      const c = await customers.create({ customer_name: name.trim(), industry: industry.trim() });
+      if (Object.keys(draft).length) {
+        await customers.updateFactors(c.id, draft);
+      }
+      onDone();
+    } catch (e) {
+      alert("创建失败：" + (e instanceof Error ? e.message : "未知错误"));
+      setBusy(false);
+    }
+  };
+
+  const submitImport = async () => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const r = await customers.import(file);
+      alert(`导入完成：新建 ${r.created ?? 0} 条${r.errors?.length ? `，${r.errors.length} 条出错` : ""}`);
+      onDone();
+    } catch (e) {
+      alert("导入失败：" + (e instanceof Error ? e.message : "未知错误"));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="overlay-mask" onClick={onClose} />
+      <div className="modal-panel">
+        <div className="flex items-center border-b border-border px-4 py-3">
+          <h3 className="flex-1 text-[15px] font-semibold text-ink">＋ 添加客户</h3>
+          <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+
+        {/* Tab 切换：逐个新建 / 批量导入 */}
+        <div className="flex gap-1 border-b border-border px-4 pt-2">
+          {([
+            { k: "single", t: "新建客户" },
+            { k: "import", t: "批量导入（Excel/CSV）" },
+          ] as const).map((item) => (
+            <button
+              key={item.k}
+              onClick={() => setTab(item.k)}
+              className={`rounded-t-lg px-3 py-2 text-[13px] transition ${
+                tab === item.k ? "border-b-2 border-accent font-medium text-accent" : "text-muted hover:text-ink-2"
+              }`}
+            >
+              {item.t}
+            </button>
+          ))}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {tab === "single" ? (
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-[12.5px] font-medium text-ink-2">客户名称 *</label>
+                <input
+                  className="w-full rounded-lg border border-border px-3 py-2 text-[13px] outline-none focus:border-accent"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="如：示例汽车集团"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[12.5px] font-medium text-ink-2">行业</label>
+                <input
+                  className="w-full rounded-lg border border-border px-3 py-2 text-[13px] outline-none focus:border-accent"
+                  value={industry}
+                  onChange={(e) => setIndustry(e.target.value)}
+                  placeholder="如：制造业"
+                />
+              </div>
+              <div>
+                <div className="mb-1.5 text-[12.5px] font-medium text-ink-2">客情因子（建档同时填写，可留空后续补全）</div>
+                {config ? (
+                  <CustomerForm customer={EMPTY_CUSTOMER} config={config} value={draft} onChange={setDraft} />
+                ) : (
+                  <div className="text-[12.5px] text-muted">因子配置加载中…</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={downloadTemplate}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
+                >
+                  ⬇️ 下载模板
+                </button>
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent">
+                  📁 选择文件
+                  <input
+                    type="file"
+                    accept=".csv,.xlsx"
+                    className="hidden"
+                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  />
+                </label>
+                {file && (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-surface-2 px-3 py-1.5 text-[12.5px] text-ink-2">
+                    已选择：{file.name}
+                    <button
+                      type="button"
+                      onClick={() => setFile(null)}
+                      className="ml-0.5 text-muted transition hover:text-[#ff7875]"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 border-t border-border px-4 py-3">
+          <span className="mr-auto" />
+          <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={onClose}>
+            取消
+          </button>
+          {tab === "single" ? (
+            <button
+              className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50"
+              onClick={submitSingle}
+              disabled={busy || !name.trim()}
+            >
+              {busy ? "创建中…" : "创建并保存因子"}
+            </button>
+          ) : (
+            <button
+              className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50"
+              onClick={submitImport}
+              disabled={busy || !file}
+            >
+              {busy ? "导入中…" : "开始导入"}
+            </button>
+          )}
+        </div>
+      </div>
+    </>
   );
 }

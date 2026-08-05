@@ -1,0 +1,397 @@
+# ==============================================================================
+# 客情评估智能体 — 量化评估引擎评分配置
+# ------------------------------------------------------------------------------
+# 对应 SOW §3.0（M0 因子评分扩展性）：维度 / 因子 / 权重 / 打分规则全部配置化，
+# 修改本文件后重启服务即生效，**无需改动任何代码**。
+#
+# 新增一个因子只需三步：
+#   ① 若为新字段：在 Customer 模型加列，或直接使用 custom_fields（设 source: custom_fields）
+#   ② 在下面对应维度的 factors 中注册字段、权重、input（供前端动态渲染表单）与 rule
+#   ③ 重启服务，评分引擎与 GET /api/customers/factor-config 自动读取
+#
+# ------------------------------------------------------------------------------
+# 支持的打分规则类型（rule.type）
+# ------------------------------------------------------------------------------
+#   threshold  数值分档。brackets 按顺序匹配，命中即止；支持 gte/gt/lte/lt/eq。
+#              （加载时自动规范化顺序：纯 gte/gt 按阈值降序、纯 lte/lt 按升序）
+#   mapping    枚举映射。map 精确匹配取分，未命中用 default_score。
+#   days_since 日期距今天数分档。empty 处理空值，brackets 用 lte/gte 匹配天数。
+#   linear     线性换算。score = value * multiplier + offset，可选 clamp。
+#   penalty    条件扣分。when: truthy / falsy / is_true / is_false，命中才计分与记明细。
+#   constant   固定分（用于占位因子）。
+#
+# detail 为明细文案模板，可用占位符：{value} 原始值 · {score} 本因子得分 · {days} 距今天数
+# ------------------------------------------------------------------------------
+# 说明：weight = 该因子在本维度中的满分（风险维度为负值扣分上限），
+#       仅用于展示与校验；实际得分由 rule 计算。weight: 0 表示已注册但暂不参与计分。
+# ==============================================================================
+
+version: "1.0"
+updated_at: "2026-08-03"
+description: "客情健康度评分配置 — 4 维度加权（关系25 + 满意25 + 价值25 + 风险25 = 100）"
+
+# ── 等级阈值（按 min_score 从高到低匹配）────────────────────────────────────────
+levels:
+  - name: 优秀
+    min_score: 85
+    color: "#22c55e"
+  - name: 良好
+    min_score: 70
+    color: "#3b82f6"
+  - name: 一般
+    min_score: 55
+    color: "#eab308"
+  - name: 风险
+    min_score: 0
+    color: "#ef4444"
+
+# ── 评分维度 ────────────────────────────────────────────────────────────────
+dimensions:
+
+  # ① 关系紧密度 ──────────────────────────────────────────────────────────
+  - key: relationship
+    name: 关系紧密度
+    max_score: 25
+    enabled: true
+    description: 合作深度、沟通频率与联系新鲜度
+    factors:
+
+      - field: cooperation_years
+        label: 合作年限
+        weight: 10
+        source_role: 销售
+        input:
+          type: number
+          min: 0
+          step: 0.5
+          unit: 年
+        rule:
+          type: threshold
+          brackets:
+            - gte: 5
+              score: 10
+              detail: "合作{value}年(≥5年)：+{score}分"
+            - gte: 3
+              score: 7
+              detail: "合作{value}年(3-5年)：+{score}分"
+            - gte: 1
+              score: 4
+              detail: "合作{value}年(1-3年)：+{score}分"
+          default:
+            score: 0
+            detail: "合作不足1年：+0分"
+
+      - field: contact_frequency
+        label: 沟通频率
+        weight: 10
+        source_role: 销售
+        input:
+          type: select
+          options: [每周, 双周, 每月, 每季度, 不定期]
+        rule:
+          type: mapping
+          map:
+            每周: 10
+            双周: 7
+            每月: 5
+            每季度: 3
+            不定期: 1
+          default_score: 3
+          detail: "沟通频率「{value}」：+{score}分"
+
+      - field: last_contact_date
+        label: 最近联系日期
+        weight: 5
+        source_role: 销售
+        input:
+          type: date
+        rule:
+          type: days_since
+          empty:
+            score: 0
+            detail: "无联系记录：+0分"
+          brackets:
+            - lte: 7
+              score: 5
+              detail: "最近联系{days}天前(≤7天)：+{score}分"
+            - lte: 30
+              score: 3
+              detail: "最近联系{days}天前(8-30天)：+{score}分"
+            - lte: 90
+              score: 1
+              detail: "最近联系{days}天前(31-90天)：+{score}分"
+          default:
+            score: 0
+            detail: "最近联系{days}天前(>90天)：+0分"
+
+  # ② 客户满意度 ──────────────────────────────────────────────────────────
+  - key: satisfaction
+    name: 客户满意度
+    max_score: 25
+    enabled: true
+    description: 客户主观满意度评价
+    factors:
+
+      - field: customer_satisfaction
+        label: 满意度评分
+        weight: 25
+        source_role: 服务
+        input:
+          type: slider
+          min: 1
+          max: 10
+          step: 1
+        rule:
+          type: linear
+          multiplier: 2.5
+          offset: 0
+          detail: "客户满意度评分 {value}/10 × 2.5 = {score}分"
+
+  # ③ 商业价值 ────────────────────────────────────────────────────────────
+  - key: business
+    name: 商业价值
+    max_score: 25
+    enabled: true
+    description: 合同规模与回款健康度
+    factors:
+
+      - field: contract_amount
+        label: 合同金额
+        weight: 15
+        source_role: 销售
+        input:
+          type: number
+          min: 0
+          step: 1
+          unit: 万元
+        rule:
+          type: threshold
+          brackets:
+            - gte: 500
+              score: 15
+              detail: "合同金额{value}万元(≥500万)：+{score}分"
+            - gte: 100
+              score: 10
+              detail: "合同金额{value}万元(100-500万)：+{score}分"
+            - gte: 50
+              score: 6
+              detail: "合同金额{value}万元(50-100万)：+{score}分"
+            - gt: 0
+              score: 3
+              detail: "合同金额{value}万元(<50万)：+{score}分"
+          default:
+            score: 0
+            detail: "无合同金额：+0分"
+
+      - field: payment_status
+        label: 回款情况
+        weight: 10
+        source_role: 财务
+        input:
+          type: select
+          options: [正常, 部分逾期, 严重逾期]
+        rule:
+          type: mapping
+          map:
+            正常: 10
+            部分逾期: 4
+            严重逾期: 0
+          default_score: 5
+          detail: "回款情况「{value}」：+{score}分"
+
+  # ④ 风险等级（基础分制：25 分起，按风险项扣减，增长潜力加分）────────────────
+  - key: risk
+    name: 风险等级
+    max_score: 25
+    enabled: true
+    description: 风险信号、竞品威胁、回款异常扣分，增长潜力加分
+    base_score: 25
+    base_detail: "基础分25分，按风险项扣减"
+    clamp:
+      min: 0
+      max: 25
+    factors:
+
+      - field: risk_signals
+        label: 风险信号
+        weight: -8
+        source_role: 销售
+        input:
+          type: textarea
+          # 填"无"/"暂无"/"没有"等占位文案视为无风险信号（EMPTY_LIKE_STRINGS），不扣分
+          placeholder: 多条风险信号用分号分隔；无风险请留空或填"无"
+        rule:
+          type: penalty
+          when: truthy
+          score: -8
+          detail: "存在风险信号：-8分"
+
+      - field: competitor_involvement
+        label: 竞品介入
+        weight: -10
+        source_role: 市场
+        input:
+          type: bool
+        rule:
+          type: penalty
+          when: is_true
+          score: -10
+          detail: "竞品已介入：-10分"
+
+      - field: payment_status
+        label: 回款逾期扣分
+        weight: -7
+        source_role: 财务
+        input:
+          type: readonly            # 与商业价值维度共用同一字段，表单不重复渲染
+        rule:
+          type: mapping
+          map:
+            严重逾期: -7
+            部分逾期: -4
+          default_score: 0
+          omit_detail_on_default: true
+          detail: "{value}：{score}分"
+
+      - field: growth_potential
+        label: 增长潜力
+        weight: 5
+        source_role: 销售
+        input:
+          type: select
+          options: [高, 中, 低]
+        rule:
+          type: mapping
+          map:
+            高: 5
+            中: 2
+            低: 0
+          default_score: 0
+          detail: "增长潜力「{value}」：+{score}分"
+
+  # ⑤ 多角色反馈因子（预留占位）─────────────────────────────────────────────
+  # SOW §3.0.2「多角色因子预留」：因子来源为研发 / 市场 / HR 等多角色，
+  # 业务侧团队完成因子库整理与权重定义后：
+  #   1) 把 enabled 改为 true
+  #   2) 填写 max_score 与各因子 weight / rule
+  #   3) 同步调整上面 4 个维度的 max_score，保证总分仍为 100
+  # 当前 enabled: false，不参与计分、不影响总分，但会出现在 factor-config 接口中，
+  # 供前端表单以「预留因子」分组渲染（权重 0）。
+  - key: multi_role
+    name: 多角色反馈
+    max_score: 0
+    enabled: false
+    description: 研发 / 市场 / HR 等多角色反馈因子，待业务侧确认权重后启用
+    factors:
+
+      - field: delivery_quality
+        label: 交付质量
+        weight: 0
+        source: custom_fields
+        source_role: 研发
+        input:
+          type: select
+          options: [优, 良, 差]
+        rule:
+          type: constant
+          score: 0
+
+      - field: tech_fitness
+        label: 技术适配度
+        weight: 0
+        source: custom_fields
+        source_role: 研发
+        input:
+          type: select
+          options: [高, 中, 低]
+        rule:
+          type: constant
+          score: 0
+
+      - field: demand_response
+        label: 需求响应时效
+        weight: 0
+        source: custom_fields
+        source_role: 服务
+        input:
+          type: text
+          placeholder: 如：24 小时内响应
+        rule:
+          type: constant
+          score: 0
+
+      - field: team_stability
+        label: 团队稳定性
+        weight: 0
+        source: custom_fields
+        source_role: HR
+        input:
+          type: select
+          options: [稳定, 波动]
+        rule:
+          type: constant
+          score: 0
+
+# ── 风险预警规则（顺序即展示顺序）────────────────────────────────────────────
+# level：high=红 / medium=黄 / low=蓝（评审结论 Q5，前端 AlertBadge 色彩编码）
+# when.op 支持：truthy / falsy / is_true / is_false / empty / eq / ne /
+#               lt / lte / gt / gte / in / not_in / contains /
+#               days_since_gt / days_since_gt_or_empty
+alerts:
+
+  - id: stale_contact
+    level: high
+    when:
+      field: last_contact_date
+      op: days_since_gt_or_empty
+      value: 90
+    message: "超过90天未联系客户，关系存在疏远风险"
+    suggestion: "建议尽快安排客户拜访或沟通"
+
+  - id: low_satisfaction
+    level: high
+    when:
+      field: customer_satisfaction
+      op: lte
+      value: 4
+    message: "客户满意度较低({value}/10)，存在流失风险"
+    suggestion: "建议深入了解客户不满原因并制定改善计划"
+
+  - id: competitor_involved
+    level: high
+    when:
+      field: competitor_involvement
+      op: is_true
+    message: "竞品已介入，客户存在被挖角风险"
+    suggestion: "建议加强客情维护，突出自身差异化优势"
+
+  - id: payment_abnormal
+    level: medium
+    when:
+      field: payment_status
+      op: in
+      value: [部分逾期, 严重逾期]
+    message: "回款状态异常：{value}"
+    suggestion: "建议跟进回款进度，评估是否需要调整合作模式"
+
+  - id: risk_signal
+    level: medium
+    when:
+      field: risk_signals
+      op: truthy
+    message: "存在风险信号：{value}"
+    suggestion: "建议针对风险信号制定应对方案"
+
+# ── 机会点建议（不产生预警，仅追加建议）──────────────────────────────────────
+opportunities:
+
+  - id: high_growth_potential
+    when:
+      all:
+        - field: growth_potential
+          op: eq
+          value: 高
+        - field: customer_satisfaction
+          op: gte
+          value: 7
+    suggestion: "该客户增长潜力高且满意度良好，建议加大资源投入推动增长"

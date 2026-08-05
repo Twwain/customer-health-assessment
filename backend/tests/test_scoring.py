@@ -122,6 +122,17 @@ def test_risk_signals_deduct():
         assert dim.score == 17  # 25 - 8
 
 
+@pytest.mark.parametrize("placeholder", ["无", "暂无", "没有", "无风险", "none", "N/A", "-", " "])
+def test_risk_signals_placeholder_no_deduct(placeholder):
+    """占位空值文案（"无"/"暂无"等）视为无风险信号，不扣分也不触发预警。"""
+    for eng in engines():
+        c = base_customer(risk_signals=placeholder, growth_potential="低")
+        dim = eng._risk_score(c)
+        assert dim.score == 25
+        result = eng.evaluate(c)
+        assert not any("风险信号" in a for a in result.risk_alerts)
+
+
 def test_competitor_deduct():
     for eng in engines():
         c = base_customer(competitor_involvement=True, growth_potential="低")

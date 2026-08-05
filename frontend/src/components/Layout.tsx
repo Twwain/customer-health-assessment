@@ -1,121 +1,120 @@
-import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet } from "react-router-dom";
+import { LLMStatusProvider, useLLMStatus } from "../statusContext";
+import { useIsMobile } from "../hooks";
+import { customers } from "../api";
+import { setLevels } from "../lib/ui";
+import Sidebar from "./Sidebar";
 
-const navItems = [
-  { to: "/", label: "仪表盘", icon: "📊" },
-  { to: "/customers", label: "客情列表", icon: "👥" },
-  { to: "/import", label: "数据导入", icon: "📥" },
-];
+function Topbar({ onMenu }: { onMenu?: () => void }) {
+  const { status } = useLLMStatus();
+  const degraded = status?.degraded ?? false;
+  return (
+    <div className="flex h-[52px] shrink-0 items-center gap-2.5 bg-brand px-[18px] text-white">
+      <button
+        onClick={onMenu}
+        className="mr-1 flex h-7 w-7 items-center justify-center rounded-lg text-[16px] text-[#CFE0F2] md:hidden"
+      >
+        ☰
+      </button>
+      <div className="flex items-center gap-2 text-[15px] font-semibold tracking-wide">
+        <span className="h-4 w-4 rounded-full border-[3px] border-[#4D9AFF]" />
+        客情评估智能体
+      </div>
+      <div className="flex-1" />
+      {status && (
+        <div
+          className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] ${
+            degraded ? "bg-[rgba(245,158,11,.2)] text-[#FFD79A]" : "bg-[rgba(255,255,255,.1)] text-[#CFE0F2]"
+          }`}
+        >
+          <span className={`h-[7px] w-[7px] rounded-full ${degraded ? "bg-warning" : "bg-success"}`} />
+          {degraded ? "LLM 不可用 · 已降级为规则引擎" : `AI 就绪${status.model ? ` · ${status.model}` : ""}`}
+        </div>
+      )}
+    </div>
+  );
+}
 
-export default function Layout() {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const loc = useLocation();
+function BottomTabBar() {
+  const tabs = [
+    { icon: "💬", label: "对话", path: "/chat" },
+    { icon: "👥", label: "客户库", path: "/customers" },
+    { icon: "📚", label: "知识库", path: "/knowledge" },
+  ];
+  return (
+    <div className="flex h-[58px] shrink-0 border-t border-border bg-surface pb-1">
+      {tabs.map((t) => (
+        <NavLink
+          key={t.path}
+          to={t.path}
+          className={({ isActive }) =>
+            `flex flex-1 flex-col items-center justify-center gap-0.5 text-[10.5px] ${
+              isActive ? "text-brand font-semibold" : "text-muted"
+            }`
+          }
+        >
+          <span className="text-[18px]">{t.icon}</span>
+          {t.label}
+        </NavLink>
+      ))}
+    </div>
+  );
+}
+
+function Shell() {
+  const isMobile = useIsMobile();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  if (isMobile) {
+    return (
+      <div className="flex h-full flex-col">
+        <Topbar onMenu={() => setDrawerOpen(true)} />
+        <div className="min-h-0 flex-1 overflow-y-auto bg-bg">
+          <Outlet />
+        </div>
+        <BottomTabBar />
+        {drawerOpen && (
+          <>
+            <div className="overlay-mask" onClick={() => setDrawerOpen(false)} />
+            <div className="fixed inset-y-0 left-0 z-[700] w-[268px] bg-sidebar shadow-[6px_0_24px_rgba(0,0,0,.2)]">
+              <Sidebar onNavigate={() => setDrawerOpen(false)} />
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-[#faf9f6] flex flex-col">
-      {/* Top bar - mobile */}
-      <header className="lg:hidden bg-white shadow-sm sticky top-0 z-30">
-        <div className="flex items-center justify-between px-4 h-14">
-          <div>
-            <span className="font-bold text-slate-800 text-lg">客情健康度</span>
-            <div className="h-0.5 w-8 bg-amber-500 rounded-full mt-0.5" />
-          </div>
-          <button
-            onClick={() => setMenuOpen(!menuOpen)}
-            className="p-2 text-slate-500"
-          >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              {menuOpen ? (
-                <path strokeLinecap="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              ) : (
-                <path strokeLinecap="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-              )}
-            </svg>
-          </button>
-        </div>
-        {menuOpen && (
-          <nav className="border-t border-slate-100 bg-white px-2 py-2">
-            {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === "/"}
-                onClick={() => setMenuOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium border-l-2 ${
-                    isActive
-                      ? "border-amber-500 bg-amber-50 text-amber-700"
-                      : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-700"
-                  }`
-                }
-              >
-                <span>{item.icon}</span>
-                {item.label}
-              </NavLink>
-            ))}
-          </nav>
-        )}
-      </header>
-
-      <div className="flex flex-1">
-        {/* Sidebar - desktop */}
-        <aside className="hidden lg:flex flex-col w-56 bg-white shadow-sm shrink-0">
-          <div className="h-14 flex items-center px-6 border-b border-slate-100">
-            <div>
-              <span className="font-bold text-slate-800 text-lg">客情健康度</span>
-              <div className="h-0.5 w-10 bg-amber-500 rounded-full mt-0.5" />
-            </div>
-          </div>
-          <nav className="flex-1 px-3 py-4 space-y-1">
-            {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === "/"}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-r-lg text-sm font-medium transition-colors border-l-2 ${
-                    isActive
-                      ? "border-amber-500 bg-amber-50 text-amber-700"
-                      : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                  }`
-                }
-              >
-                <span>{item.icon}</span>
-                {item.label}
-              </NavLink>
-            ))}
-          </nav>
-          <div className="p-4 border-t border-slate-100 text-xs text-slate-400">
-            客情健康度评估系统 v1.0
-          </div>
+    <div className="flex h-full flex-col">
+      <Topbar />
+      <div className="flex min-h-0 flex-1">
+        <aside className="w-[260px] shrink-0 border-r border-border bg-sidebar">
+          <Sidebar />
         </aside>
-
-        {/* Main content */}
-        <main className="flex-1 overflow-auto">
-          <div className="max-w-6xl mx-auto p-4 lg:p-8">
-            <Outlet />
-          </div>
+        <main className="min-w-0 flex-1">
+          <Outlet />
         </main>
       </div>
-
-      {/* Bottom nav - mobile */}
-      <nav className="lg:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-30 flex">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.to === "/"}
-            className={({ isActive }) =>
-              `flex-1 flex flex-col items-center gap-0.5 py-2 text-xs font-medium ${
-                isActive ? "text-amber-600" : "text-slate-400"
-              }`
-            }
-          >
-            <span className="text-lg">{item.icon}</span>
-            {item.label}
-          </NavLink>
-        ))}
-      </nav>
     </div>
+  );
+}
+
+export default function Layout() {
+  // 启动时拉取评分配置中的等级表，注册到全局，使等级名/颜色随 scoring_config.yaml 走
+  useEffect(() => {
+    customers
+      .factorConfig()
+      .then((cfg) => setLevels(cfg.levels))
+      .catch(() => {
+        /* 配置拉取失败时用内置默认等级 */
+      });
+  }, []);
+
+  return (
+    <LLMStatusProvider>
+      <Shell />
+    </LLMStatusProvider>
   );
 }
