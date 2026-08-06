@@ -549,7 +549,7 @@ function TrendDrawerBody({
   a?: AssessmentResponse;
   t?: AssessmentTrendResponse;
 }) {
-  const color = a ? levelColor(a.level) : "#E60012";
+  const color = a ? levelColor(a.level) : "var(--color-primary)";
   const history = t ? [...t.points].reverse() : [];
   return (
     <div>
@@ -818,7 +818,7 @@ function AddCustomerModal({
                     <button
                       type="button"
                       onClick={() => setFile(null)}
-                      className="ml-0.5 text-muted transition hover:text-[#ff7875]"
+                      className="ml-0.5 text-muted transition hover:text-[#E60012]"
                     >
                       ✕
                     </button>

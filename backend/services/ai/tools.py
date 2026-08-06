@@ -105,6 +105,12 @@ CUSTOMER_COMPARE_SCHEMA: dict[str, Any] = {
                     "type": "integer",
                     "description": "需要排除的客户 id（通常为当前对话客户）。",
                 },
+                "limit": {
+                    "type": "integer",
+                    "description": "最多返回多少条对比结果，默认 30，最大 100。",
+                    "minimum": 1,
+                    "maximum": 100,
+                },
             },
             "additionalProperties": False,
         },

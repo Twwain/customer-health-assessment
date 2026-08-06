@@ -458,7 +458,7 @@ def get_embedding_adapter() -> OpenAICompatibleAdapter:
             connect_timeout=config.LLM_CONNECT_TIMEOUT,
             max_retries=config.LLM_MAX_RETRIES,
             retry_backoff=config.LLM_RETRY_BACKOFF,
-            enabled=config.LLM_ENABLED,
+            enabled=config.EMBEDDING_ENABLED,
         )
     return _embedding_adapter
 

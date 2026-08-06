@@ -242,6 +242,7 @@ def generate(
     adapter=None,
     question: str = "",
     max_iterations: int = 2,
+    tools_enabled: bool = True,
     embed_func=None,
     store=None,
 ):
@@ -252,7 +253,9 @@ def generate(
     """
     from .graph_builder import AssessmentStrategyAgent
 
-    agent = AssessmentStrategyAgent(adapter=adapter, max_iterations=max_iterations)
+    agent = AssessmentStrategyAgent(
+        adapter=adapter, max_iterations=max_iterations, tools_enabled=tools_enabled
+    )
     return agent.run(
         scenario,
         ctx,

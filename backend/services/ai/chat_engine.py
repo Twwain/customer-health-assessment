@@ -331,7 +331,10 @@ def run_turn(
 
     if scenario in AGENT_SCENARIOS:
         # M4：评估 / 策略 / 预警解读走 Agent Loop（检索→推理→自批判→精炼）
-        gen = generate(scenario, ctx, customer, db, adapter=adapter, question=question)
+        gen = generate(
+            scenario, ctx, customer, db, adapter=adapter, question=question,
+            tools_enabled=config.LLM_TOOLS_ENABLED,
+        )
         degraded = gen.degraded
         degraded_items = gen.degraded_items
         agent_refs = gen.references

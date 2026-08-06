@@ -100,6 +100,9 @@ EMBEDDING_MODEL = (
 )
 EMBEDDING_DIM = _env_int("EMBEDDING_DIM", 1024)
 EMBEDDING_BATCH_SIZE = _env_int("EMBEDDING_BATCH_SIZE", 16)
+# 嵌入可用性独立于 LLM 总开关：只要配置了 EMBEDDING_API_KEY 即可用
+# （即使 LLM_ENABLED=False，RAG 检索仍应可用，不应被 LLM 开关绑死）
+EMBEDDING_ENABLED = _env_bool("EMBEDDING_ENABLED", bool(EMBEDDING_API_KEY))
 
 
 # ══════════════════════════ 对话编排（SOW §3.2.1）════════════════════════════

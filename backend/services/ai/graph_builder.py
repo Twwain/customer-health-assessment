@@ -23,7 +23,6 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
-import config
 from models import Customer
 from services.ai.context_builder import ChatContext
 from services.ai.fallback import build_degraded_reply
@@ -61,9 +60,10 @@ def _format_retrievals(references: list[dict]) -> str:
 class AssessmentStrategyAgent:
     """评估 / 策略 Agent：检索增强 + 自批判精炼。"""
 
-    def __init__(self, adapter=None, max_iterations: int = 2) -> None:
+    def __init__(self, adapter=None, max_iterations: int = 2, tools_enabled: bool = True) -> None:
         self._adapter = adapter or get_chat_adapter()
         self._max = max(1, max_iterations)
+        self._tools_enabled = tools_enabled
         self._tool_warning = ""
 
     # ── 节点 ────────────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ class AssessmentStrategyAgent:
         tool_rounds = 0
         refs: list[dict] = []
         exclude = set(exclude_ids or [])
-        tools_enabled = config.LLM_TOOLS_ENABLED
+        tools_enabled = self._tools_enabled
         while True:
             tool_calls: list[dict] = []
             stream = self._adapter.stream_chat_completion(
