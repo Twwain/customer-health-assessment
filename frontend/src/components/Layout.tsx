@@ -1,39 +1,27 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { LLMStatusProvider, useLLMStatus } from "../statusContext";
+import { LLMStatusProvider } from "../LLMStatusProvider";
 import { useIsMobile } from "../hooks";
 import { customers } from "../api";
 import { setLevels } from "../lib/ui";
 import Sidebar from "./Sidebar";
 
 function Topbar({ onMenu }: { onMenu?: () => void }) {
-  const { status } = useLLMStatus();
-  const degraded = status?.degraded ?? false;
   return (
     <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border bg-surface px-5">
       <button
         onClick={onMenu}
-        className="mr-1 flex h-7 w-7 items-center justify-center rounded-lg text-[16px] text-ink-2 md:hidden"
+        className="mr-1 flex h-7 w-7 items-center justify-center rounded-lg text-[17px] text-ink-2 md:hidden"
       >
         ☰
       </button>
-      <div className="flex items-center gap-2 text-[14.5px] font-semibold tracking-tight text-ink">
-        <span className="h-[18px] w-[18px] rounded-[5px] bg-accent" />
+      <div className="flex items-center gap-2 text-[15.5px] font-semibold tracking-tight text-ink">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0">
+          <path d="M3 12h4.4l1.9-4.2 3.8 8.4 2.1-5.4 1.5 1.2H21" stroke="var(--color-accent)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
         客情评估智能体
       </div>
       <div className="flex-1" />
-      {status && (
-        <div
-          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] ${
-            degraded
-              ? "border-warning/25 bg-warning-soft text-warning"
-              : "border-border bg-surface-2 text-ink-2"
-          }`}
-        >
-          <span className={`h-[7px] w-[7px] rounded-full ${degraded ? "bg-warning" : "bg-success"}`} />
-          {degraded ? "LLM 不可用 · 已降级为规则引擎" : `AI 就绪${status.model ? ` · ${status.model}` : ""}`}
-        </div>
-      )}
     </div>
   );
 }
@@ -51,12 +39,12 @@ function BottomTabBar() {
           key={t.path}
           to={t.path}
           className={({ isActive }) =>
-            `flex flex-1 flex-col items-center justify-center gap-0.5 text-[10.5px] ${
+            `flex flex-1 flex-col items-center justify-center gap-0.5 text-[11.5px] ${
               isActive ? "text-brand font-semibold" : "text-muted"
             }`
           }
         >
-          <span className="text-[18px]">{t.icon}</span>
+          <span className="text-[19px]">{t.icon}</span>
           {t.label}
         </NavLink>
       ))}

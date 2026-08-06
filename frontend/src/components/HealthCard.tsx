@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { AssessmentResponse, AssessmentTrendResponse, DimensionScore } from "../types";
 import { fmtDate, levelColor, trendMeta } from "../lib/ui";
 import { AlertBadge, LevelBadge } from "./Badges";
-import { RadarChart, Ring, TrendChart } from "./Charts";
+import { Ring, TrendChart } from "./Charts";
 
 interface HealthCardProps {
   assessment: AssessmentResponse;
@@ -17,7 +17,6 @@ function dimColor(pct: number): string {
 }
 
 export default function HealthCard({ assessment, trend, compact, onAlertAI, onEditFactors }: HealthCardProps) {
-  const [radarOpen, setRadarOpen] = useState(false);
   const [trendOpen, setTrendOpen] = useState(false);
   const color = assessment.level_color || levelColor(assessment.level);
   const t = trend ? trendMeta(trend.latest_score, trend.previous_score) : null;
@@ -56,7 +55,7 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
           const dc = dimColor(pct);
           return (
             <div key={d.key} className="flex items-center gap-2">
-              <span className="w-[68px] shrink-0 text-[12px] text-ink-2">{d.name}</span>
+              <span className="w-[150px] shrink-0 whitespace-nowrap text-[13px] text-ink-2">{d.name}</span>
               <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-[#F0F0F0]">
                 <div className="h-full rounded-full" style={{ width: `${pct}%`, background: dc }} />
               </div>
@@ -78,12 +77,6 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <button
-          className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
-          onClick={() => setRadarOpen((v) => !v)}
-        >
-          {radarOpen ? "收起" : "展开"}雷达图
-        </button>
         <button
           className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
           onClick={() => setTrendOpen((v) => !v)}
@@ -109,34 +102,9 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
         )}
       </div>
 
-      {radarOpen && (
-        <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
-          <div className="mb-1 text-[13px] font-semibold text-ink">📐 维度雷达图</div>
-          <div className="flex flex-col items-center gap-2 sm:flex-row sm:items-center">
-            <RadarChart dimensions={assessment.dimensions} color={color} size={compact ? 168 : 190} />
-            <div className="flex-1 space-y-2">
-              {assessment.dimensions.map((d) => (
-                <div key={d.key} className="flex items-center gap-2 text-[12px]">
-                  <span className="w-[64px] text-muted">{d.name}</span>
-                  <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-[#F0F0F0]">
-                    <div
-                      className="h-full rounded-full"
-                      style={{ width: `${d.max_score ? (d.score / d.max_score) * 100 : 0}%`, background: color }}
-                    />
-                  </div>
-                  <b className="w-[52px] text-right text-ink">
-                    {Math.round(d.score * 10) / 10} / {d.max_score}
-                  </b>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {trendOpen && trend && (
         <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
-          <div className="mb-1 text-[13px] font-semibold text-ink">📈 健康分历史趋势</div>
+          <div className="mb-1 text-[13px] font-semibold text-ink">📈 客情评分趋势</div>
           <div className="overflow-x-auto">
             <TrendChart trend={trend} color={color} width={compact ? 360 : 470} height={168} />
           </div>

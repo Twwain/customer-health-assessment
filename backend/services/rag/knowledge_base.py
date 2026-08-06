@@ -1,4 +1,4 @@
-"""知识库服务（SOW §3.3 / §5 / §6.4）。
+"""知识库服务。
 
 编排整条管道：上传文档 → 解析 → 中文切片 → 向量化 → 写入向量库 + 切片表；
 并提供条目浏览 / 检索 / 元数据编辑 / 删除 / 重索引，以及"对话沉淀"采纳入库。
@@ -7,7 +7,7 @@
 - 一次上传（或一次策略采纳）= 一个 ``KnowledgeDocument``，对应一个聚合 ``KnowledgeItem``。
 - 向量库只存标量 metadata（document_id / chunk_index / category / title / status / item_id），
   用于检索过滤与溯源；正文不进结构化的 ``KnowledgeMetric``（精确数值走 SQLite 精确查询）。
-- Embedding 不可用时索引标记 failed 但不崩溃，满足 SOW §7 可用性。
+- Embedding 不可用时索引标记 failed 但不崩溃，满足  可用性。
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def migrate_legacy_categories(db: Any, store: VectorStore | None = None) -> int:
 def migrate_seed_knowledge_status(db: Any, store: VectorStore | None = None) -> int:
     """把 seed 预置知识从 proposed 提升为 canonical，幂等。
 
-    v3.0 初期 seed 走 ``create_from_upload`` 默认 proposed，而检索默认只查
+    初期 seed 走 ``create_from_upload`` 默认 proposed，而检索默认只查
     canonical，导致预置知识实际不可检索。本迁移在应用启动时执行一次，同步：
     documents / items 表、切片表 metadata 副本、向量库 metadata。
     返回提升的文档行数。
@@ -297,7 +297,7 @@ class KnowledgeBaseService:
         self._db.commit()
         return doc
 
-    # ── 对话沉淀：采纳策略入库（SOW §3.3.1）─────────────────────────────────
+    # ── 对话沉淀：采纳策略入库─────────────────────────────────
     def create_from_strategy(
         self,
         title: str,
@@ -397,7 +397,7 @@ class KnowledgeBaseService:
             store=self._store,
         )
 
-    # ── 元数据编辑（正文不可编辑，SOW §2.2）────────────────────────────────
+    # ── 元数据编辑（正文不可编辑，）────────────────────────────────
     def update_item_metadata(
         self,
         item_id: int,
@@ -461,7 +461,7 @@ class KnowledgeBaseService:
                     logger.warning("更新向量 metadata 失败：%s", exc)
         return item
 
-    # ── 审核：proposed → canonical（SOW §3.3.1 审核态，Q7 无权限校验）──────────
+    # ── 审核：proposed → canonical──────────
     def approve_item(self, item_id: int) -> KnowledgeItem | None:
         item = self.get_item(item_id)
         if item is None:
@@ -560,7 +560,7 @@ class KnowledgeBaseService:
             count += 1
         return count
 
-    # ── 预置知识（SOW §3.3.3 评估方法论）──────────────────────────────────
+    # ── 预置知识──────────────────────────────────
     def seed_default_knowledge(self, source_path: str | None = None) -> KnowledgeDocument | None:
         existing = (
             self._db.query(KnowledgeDocument)
@@ -580,7 +580,7 @@ class KnowledgeBaseService:
             filename="customer_health_methodology.md",
             raw=raw,
             created_by="seed",
-            # 预置知识随项目交付即可用（SOW §3.3.3）：直接 canonical，无需人工审核；
+            # 预置知识随项目交付即可用：直接 canonical，无需人工审核；
             # 检索默认只查 canonical，若为 proposed 将导致预置知识实际不可检索
             status="canonical",
         )

@@ -1,18 +1,18 @@
-"""评估 / 策略 Agent Loop（SOW §3.4 / §4.2 services/ai/graph_builder.py）。
+"""评估 / 策略 Agent Loop。
 
 用状态图编排 reason → retrieve → critique → refine 的多轮推理循环：
 - reason：基于量化事实 + 知识检索，调用 LLM 生成评估结论 / 策略
 - retrieve：RAG 工具召回知识（Agent 自带检索能力，而非仅依赖上下文注入）
 - critique：自批判（启发式，可升级为 LLM 批判），检测缺策略块 / 缺引用
 - refine：根据批判精炼，最多迭代 ``max_iterations`` 次，带死循环检测
-- 任意一步 LLM 不可用 → 降级为规则引擎兜底（SOW §7），不中断对话
+- 任意一步 LLM 不可用 → 降级为规则引擎兜底，不中断对话
 
 知识溯源：retrieve 命中的切片经 ``tools.to_reference`` 转为引用，随结论返回，
-供前端 📎 溯源抽屉定位原文（SOW §3.4 结构化输出 + 知识溯源）。
+供前端 📎 溯源抽屉定位原文。
 
-设计说明（偏差，同 Step 4 思路）：SOW 指定 LangGraph 作为编排框架。本期以
+设计说明（偏差，同 Step 4 思路）：原方案指定 LangGraph 作为编排框架。本期以
 **自包含的轻量状态机**实现等价逻辑——LangGraph 为重量级依赖、不利于轻量自包含，
-且自包含实现更易测试、不引入重量级依赖；节点语义与 SOW 一致
+且自包含实现更易测试、不引入重量级依赖；节点语义一致
 （reason / retrieve / critique / refine），后续可平滑替换为 ``langgraph.StateGraph``
 而无需改动 ``tools`` / ``chat_engine``。
 """
@@ -23,6 +23,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
+import config
 from models import Customer
 from services.ai.context_builder import ChatContext
 from services.ai.fallback import build_degraded_reply
@@ -72,14 +73,14 @@ class AssessmentStrategyAgent:
         stream = self._adapter.stream_chat_completion(
             messages,
             temperature=template.temperature,
-            max_tokens=template.max_tokens,
+            max_tokens=min(template.max_tokens, config.LLM_MAX_TOKENS),
         )
         for delta in stream:
             chunks.append(delta)
         return "".join(chunks)
 
     def _reason(
-        self, ctx, references, question, today, template, *, customer=None, db=None
+        self, ctx, references, question, today, template, *, customer=None, db=None, tools_enabled=None
     ) -> tuple[str, list[dict]]:
         system_text = template.render_system(today=today)
         knowledge = _format_retrievals(references) or ctx.knowledge_text
@@ -97,22 +98,23 @@ class AssessmentStrategyAgent:
             customer=customer,
             db=db,
             exclude_ids=exclude_ids,
+            tools_enabled=tools_enabled,
         )
 
     def _call_llm_with_tools(
-        self, messages, template, *, customer=None, db=None, exclude_ids=None
+        self, messages, template, *, customer=None, db=None, exclude_ids=None, tools_enabled=None
     ) -> tuple[str, list[dict]]:
         """生成正文；模型请求工具时执行并回填结果，返回 (正文, 工具引用)。"""
         tool_rounds = 0
         refs: list[dict] = []
         exclude = set(exclude_ids or [])
-        tools_enabled = self._tools_enabled
+        tools_enabled = self._tools_enabled if tools_enabled is None else tools_enabled
         while True:
             tool_calls: list[dict] = []
             stream = self._adapter.stream_chat_completion(
                 messages,
                 temperature=template.temperature,
-                max_tokens=template.max_tokens,
+                max_tokens=min(template.max_tokens, config.LLM_MAX_TOKENS),
                 tools=tools.TOOL_SCHEMAS if tools_enabled else None,
                 on_tool_calls=lambda tcs: tool_calls.extend(tcs),
             )
@@ -133,7 +135,7 @@ class AssessmentStrategyAgent:
                 stream = self._adapter.stream_chat_completion(
                     messages,
                     temperature=template.temperature,
-                    max_tokens=template.max_tokens,
+                    max_tokens=min(template.max_tokens, config.LLM_MAX_TOKENS),
                     tools=None,
                 )
                 for delta in stream:
@@ -188,7 +190,7 @@ class AssessmentStrategyAgent:
         template = get_template(scenario)
         warnings: list[str] = []
 
-        # ⓪ 量化工具（SOW §3.4.1 工具②③）：对话路径下评分/画像已由 chat_engine
+        # ⓪ 量化工具：对话路径下评分/画像已由 chat_engine
         # 注入 ctx；Agent 独立调用（测试 / 报告整合 / 批处理）时由工具自行补齐
         if customer is not None:
             if ctx.assessment is None:
@@ -210,12 +212,36 @@ class AssessmentStrategyAgent:
             draft, reason_refs = self._reason(
                 ctx, references, question, today, template, customer=customer, db=db
             )
+            if not draft.strip():
+                # 空草稿重试一次（不带工具）：避免模型偶发空响应直接带崩整个流程
+                self._tool_warning = "首次生成返回为空，已自动重试"
+                retry_draft, retry_refs = self._reason(
+                    ctx,
+                    references,
+                    question,
+                    today,
+                    template,
+                    customer=customer,
+                    db=db,
+                    tools_enabled=False,
+                )
+                draft = retry_draft
+                reason_refs = list(reason_refs) + retry_refs
             known = {r.get("id") for r in references}
             references = list(references) + [
                 r for r in reason_refs if r.get("id") not in known
             ]
         except (LLMUnavailableError, LLMError) as exc:
             return self._degrade(scenario, ctx, question, references, exc)
+
+        if not draft.strip():
+            return self._degrade(
+                scenario,
+                ctx,
+                question,
+                references,
+                LLMUnavailableError("AI 连续多次返回空内容"),
+            )
 
         # ③ critique → ④ refine 循环（带死循环检测）
         # 检查项按场景裁剪：仅 strategy 要求 json 策略块；仅检索有命中时要求知识引用
@@ -238,6 +264,15 @@ class AssessmentStrategyAgent:
             warnings.append(f"草稿精炼达到 {max_iter} 次上限，输出可能未完全满足：{critique_text.strip()}")
         if self._tool_warning:
             warnings.append(self._tool_warning)
+
+        if not text.strip():
+            return self._degrade(
+                scenario,
+                ctx,
+                question,
+                references,
+                LLMUnavailableError("AI 连续多次返回空内容"),
+            )
 
         return AgentResult(
             text=text,

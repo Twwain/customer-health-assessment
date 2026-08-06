@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from reportlab.platypus import Paragraph, Table
 
 import config
 from database import Base, get_db
@@ -211,6 +212,62 @@ def test_pdf_include_ai_false_backward_compatible(db, customer):
         trend=report.trend,
     )
     assert _pdf_starts_ok(pdf)
+
+
+def test_build_report_data_ai_without_strategy_text_falls_back(db, customer, fake_llm):
+    """AI 已参与但未返回结构化策略块时，用规则引擎建议兜底并如实标注。"""
+    llm_adapter.set_chat_adapter(_FakeAdapter(chunks=["这是一段没有策略块的纯文本回复。"]))
+
+    report = build_report_data(db, customer, include_ai=True)
+
+    assert report.degraded is False
+    assert report.has_ai is True
+    assert report.strategy_items, "无策略块时应有规则引擎兜底建议"
+    assert "规则引擎" in (report.error or "")
+    assert any("规则引擎" in (i.get("reference") or "") for i in report.strategy_items)
+
+
+def test_split_strategy_payload_unclosed_fence_recovers_items():
+    """输出被 max_tokens 截断（```json 围栏未闭合）时仍能解析出策略条目。"""
+    from services.ai.strategy import split_strategy_payload
+
+    truncated = (
+        "以下为策略：\n\n```json\n"
+        '{"strategies": [{"priority": "recommended", "title": "启动分级评审", '
+        '"urgency": "high", "reason": "客情评分低于 25", "action": "15 个工作日内召集评审", '
+        '"expected_outcome": "完成挽留/退出决策"}]}'
+    )
+
+    body, items = split_strategy_payload(truncated)
+
+    assert len(items) == 1
+    assert items[0]["title"] == "启动分级评审"
+    assert items[0]["priority"] == "recommended"
+    assert body == "以下为策略："
+
+
+def _collect_flow_text(flows) -> str:
+    """递归收集 reportlab flowable 树里的所有段落文本（含 Table 单元格）。"""
+    texts: list[str] = []
+    for flow in flows:
+        if isinstance(flow, Paragraph):
+            texts.append(flow.text)
+        elif isinstance(flow, Table):
+            for row in flow._cellvalues:
+                texts.append(_collect_flow_text(row))
+    return "".join(texts)
+
+
+def test_pdf_cover_shows_industry_and_config_version(db, customer):
+    """封面展示真实行业与评分配置版本，不再硬编码占位符。"""
+    assessment = build_report_data(db, customer, include_ai=False).assessment
+    gen = PdfReportGenerator()
+
+    cover = gen._cover(assessment, industry=customer.industry)
+    text = _collect_flow_text(cover)
+
+    assert customer.industry in text
+    assert assessment.config_version in text
 
 
 def test_pdf_with_trend_chart(db, customer):

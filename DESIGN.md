@@ -28,11 +28,11 @@
 | `--color-ink-2` | `#333333` | 次文本 |
 | `--color-muted` | `#666666` | 辅助/弱文本 |
 | `--color-success` / `soft` | `#1AAE39` / `#E4F4E8` | 成功、上升 |
-| `--color-warning` / `soft` | `#DD5B00` / `#FAEDE1` | 警告、一般 |
-| `--color-danger` / `soft` | `#C62828` / `#FBE9E9` | 错误、风险 |
+| `--color-warning` / `soft` | `#DD5B00` / `#FAEDE1` | 警告、亚健康 |
+| `--color-danger` / `soft` | `#C62828` / `#FBE9E9` | 错误、风险/高危 |
 | `--color-info` / `soft` | `#0075DE` / `#E4F0FB` | 信息、低优先级 |
 
-> 等级颜色（优秀/良好/一般/风险）由 `backend/scoring_config.yaml` 的 `levels` 配置驱动，**不要**在前端写死；前端兜底值见 `frontend/src/lib/ui.tsx` 的 `DEFAULT_LEVELS`，与 YAML 保持一致。
+> 等级颜色（健康/亚健康/风险/高危）由 `backend/scoring_config.yaml` 的 `levels` 配置驱动，**不要**在前端写死；前端兜底值见 `frontend/src/lib/ui.tsx` 的 `DEFAULT_LEVELS`，与 YAML 保持一致。
 
 ## 排版
 

@@ -8,7 +8,7 @@
 - ai.strategy.split_strategy_payload / build_degraded_strategies 解析与兜底
 
 设计要点：报告导出是「读取型」操作，不写库、不持久化会话；任何 AI 异常都降级为
-规则引擎建议，保证 PDF 一定能导出（SOW §7 可用性）。
+规则引擎建议，保证 PDF 一定能导出。
 """
 
 from __future__ import annotations
@@ -74,6 +74,11 @@ def build_report_data(
         data.references = list(gen.references or [])
         data.degraded = gen.degraded
         data.has_ai = True
+        if not data.strategy_items:
+            # AI 已参与但未产出结构化策略：用规则引擎建议兜底，并如实标注
+            data.strategy_items = strategy_mod.build_degraded_strategies(assessment)
+            if not gen.degraded:
+                data.error = "AI 未返回结构化策略建议，已用规则引擎建议补充"
     except Exception as exc:  # 兜底：绝不能让报告导出失败
         data.strategy_items = strategy_mod.build_degraded_strategies(assessment)
         data.degraded = True

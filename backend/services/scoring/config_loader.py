@@ -1,4 +1,4 @@
-"""评分配置加载与校验（SOW §3.0 M0）。
+"""评分配置加载与校验。
 
 把维度 / 因子 / 权重 / 规则从代码里搬到 ``backend/scoring_config.yaml``：
 修改配置文件后重启服务即生效，无需改代码。
@@ -263,6 +263,8 @@ def _parse_factor(raw: Any, ctx: str) -> FactorConfig:
         raise ScoringConfigError(f"{ctx} 的因子必须是对象")
 
     field_name = str(_require(raw, "field", ctx))
+    if not field_name:
+        raise ScoringConfigError(f"{ctx} 的因子 `field` 不能为空字符串")
     source = str(raw.get("source", "model"))
     if source not in VALID_SOURCES:
         raise ScoringConfigError(
@@ -331,11 +333,16 @@ def _parse_condition(raw: Any, ctx: str) -> Condition:
         raise ScoringConfigError(
             f"{ctx} 的 op=`{op}` 不受支持，可用：{sorted(VALID_CONDITION_OPS)}"
         )
+    source = str(raw.get("source", "model"))
+    if source not in VALID_SOURCES:
+        raise ScoringConfigError(
+            f"{ctx} 的 source=`{source}` 不受支持，可用：{sorted(VALID_SOURCES)}"
+        )
     return Condition(
         op=op,
         field=str(_require(raw, "field", ctx)),
         value=raw.get("value"),
-        source=str(raw.get("source", "model")),
+        source=source,
     )
 
 
@@ -401,14 +408,25 @@ def parse_scoring_config(raw: Any, source_path: str = "") -> ScoringConfig:
         for i, lv in enumerate(levels_raw)
     ]
     levels.sort(key=lambda lv: lv.min_score, reverse=True)
+    min_scores = [lv.min_score for lv in levels]
+    if len(set(min_scores)) != len(min_scores):
+        raise ScoringConfigError("levels 的 min_score 存在重复，等级区间会相互遮蔽")
 
     alerts_raw = raw.get("alerts") or []
     if not isinstance(alerts_raw, list):
         raise ScoringConfigError("`alerts` 必须是数组")
+    alerts = [_parse_alert(a, i) for i, a in enumerate(alerts_raw)]
+    alert_ids = [a.id for a in alerts]
+    if len(set(alert_ids)) != len(alert_ids):
+        raise ScoringConfigError(f"alerts 的 id 存在重复：{sorted(set(a for a in alert_ids if alert_ids.count(a) > 1))}")
 
     opportunities_raw = raw.get("opportunities") or []
     if not isinstance(opportunities_raw, list):
         raise ScoringConfigError("`opportunities` 必须是数组")
+    opportunities = [_parse_opportunity(o, i) for i, o in enumerate(opportunities_raw)]
+    opp_ids = [o.id for o in opportunities]
+    if len(set(opp_ids)) != len(opp_ids):
+        raise ScoringConfigError(f"opportunities 的 id 存在重复：{sorted(set(a for a in opp_ids if opp_ids.count(a) > 1))}")
 
     return ScoringConfig(
         version=str(raw.get("version", "")),
@@ -416,8 +434,8 @@ def parse_scoring_config(raw: Any, source_path: str = "") -> ScoringConfig:
         description=str(raw.get("description", "")),
         levels=levels,
         dimensions=dimensions,
-        alerts=[_parse_alert(a, i) for i, a in enumerate(alerts_raw)],
-        opportunities=[_parse_opportunity(o, i) for i, o in enumerate(opportunities_raw)],
+        alerts=alerts,
+        opportunities=opportunities,
         source_path=source_path,
     )
 
@@ -446,7 +464,7 @@ def load_scoring_config(path: str | None = None, *, force_reload: bool = False) 
     """加载评分配置。
 
     按「路径 + mtime」缓存：配置文件被修改后自动重新加载，无需重启进程
-    （SOW §11.1 要求「重启生效」，此处更进一步支持热更新）。
+    。
     """
     resolved = os.path.abspath(path or default_config_path())
 

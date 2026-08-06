@@ -1,16 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { chat } from "./api";
 import type { LLMStatusResponse } from "./types";
+import { Ctx } from "./statusContext";
 
-interface StatusCtx {
-  status: LLMStatusResponse | null;
-  loading: boolean;
-  refresh: () => void;
-}
-
-const Ctx = createContext<StatusCtx>({ status: null, loading: true, refresh: () => {} });
-
-export function LLMStatusProvider({ children }: { children: React.ReactNode }) {
+export function LLMStatusProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<LLMStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -30,8 +23,4 @@ export function LLMStatusProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   return <Ctx.Provider value={{ status, loading, refresh }}>{children}</Ctx.Provider>;
-}
-
-export function useLLMStatus() {
-  return useContext(Ctx);
 }

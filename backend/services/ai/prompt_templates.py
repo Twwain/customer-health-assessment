@@ -1,4 +1,4 @@
-"""Prompt 模板加载器（SOW §7 可维护性：Prompt 模板外部可配 / §8 交付物）。
+"""Prompt 模板加载器。
 
 模板正文在 ``backend/prompt_templates.yaml``，占位符用 ``{{变量名}}``——
 刻意不用 ``str.format``，避免模板里的 JSON 示例大括号被当成格式化占位符。
@@ -103,8 +103,9 @@ def parse_prompt_templates(raw: dict, path: str = "") -> PromptTemplateSet:
             key=str(key),
             name=str(item.get("name") or key),
             description=str(item.get("description") or ""),
-            # 公共护栏在加载期就注入，避免每次渲染都要传
-            system=render(system, {"guardrails": guardrails}) if "{{guardrails}}" in system else system,
+            # 公共护栏在加载期就注入，避免每次渲染都要传；
+            # 只替换 guardrails 占位符，保留 {{today}} 等运行时变量
+            system=system.replace("{{guardrails}}", guardrails) if "{{guardrails}}" in system else system,
             user=str(item.get("user") or ""),
             temperature=float(item.get("temperature", default_temperature)),
             max_tokens=int(item.get("max_tokens", default_max_tokens)),

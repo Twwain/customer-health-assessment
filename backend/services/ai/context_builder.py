@@ -1,11 +1,11 @@
-"""LLM 上下文组装（SOW §3.2.1 上下文管理 / §3.4 双引擎结合）。
+"""LLM 上下文组装。
 
 把「量化评估引擎」的输出（基础客情分、维度明细、预警、趋势、因子快照）
 组装成结构化 Markdown 注入 Prompt——这是 AI 结论不跑偏的事实基座。
 
 知识增强引擎（RAG）的上下文由 ``build_knowledge_context`` 注入：调用检索召回
 canonical 知识切片，附带来源供 📎 溯源。Embedding 不可用时静默降级为
-``NO_KNOWLEDGE_HINT``，配合护栏防止模型编造知识来源（SOW §7）。
+``NO_KNOWLEDGE_HINT``，配合护栏防止模型编造知识来源。
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def _fmt_date(value) -> str:
 
 
 def _customer_profile(c: Customer, today: datetime.date) -> str:
-    """客户基础信息。刻意不含联系电话等个人隐私字段（SOW §7）。"""
+    """客户基础信息。刻意不含联系电话等个人隐私字段。"""
     lines = [
         "## 客户基础信息",
         f"- 客户名称：{c.customer_name}",
@@ -83,11 +83,6 @@ def _customer_profile(c: Customer, today: datetime.date) -> str:
     if c.notes:
         lines.append(f"- 备注：{c.notes}")
 
-    extras = {k: v for k, v in (c.custom_fields or {}).items() if v not in (None, "")}
-    if extras:
-        detail = "；".join(f"{k}={v}" for k, v in extras.items())
-        lines.append(f"- 扩展因子：{detail}")
-
     return "\n".join(lines)
 
 
@@ -97,9 +92,9 @@ def _assessment_section(a: AssessmentResponse) -> str:
         f"- 总分：{a.total_score} / {a.max_score}，等级「{a.level}」，评分配置版本 {a.config_version or 'n/a'}",
         "- 维度明细：",
     ]
+    # 只注入维度得分，不逐条罗列因子明细（60 个因子的明细会让结论淹没在数据里）
     for d in a.dimensions:
-        detail = "；".join(d.details) if d.details else "无扣分/加分明细"
-        lines.append(f"  - {d.name}：{d.score}/{d.max_score} —— {detail}")
+        lines.append(f"  - {d.name}：{d.score}/{d.max_score}")
 
     if a.alerts:
         lines.append("- 规则引擎预警：")
@@ -164,7 +159,7 @@ def build_knowledge_context(
     embed_func=None,
     store=None,
 ) -> tuple[str, list[dict]]:
-    """RAG 上下文（SOW §3.3 / §3.4 双引擎结合）。
+    """RAG 上下文。
 
     调用检索召回 canonical 知识切片，返回 ``(文本, 引用列表)``。
     引用列表带 title / score / chunk_id / document_id / item_id，供前端 📎 溯源抽屉定位原文。
@@ -172,7 +167,7 @@ def build_knowledge_context(
     ``embed_func`` / ``store`` 可注入（测试或特定场景）；缺省走默认向量库与 Embedding 适配器。
 
     Embedding 不可用 / 无命中 / 异常时静默降级为 ``NO_KNOWLEDGE_HINT``，
-    不让 RAG 故障影响对话基础功能（SOW §7）。
+    不让 RAG 故障影响对话基础功能。
     """
     if not query or not query.strip():
         return NO_KNOWLEDGE_HINT, []
@@ -215,7 +210,7 @@ def build_knowledge_context(
 
 
 def _metrics_section(db: Session, customer: Customer) -> str:
-    """行业基准指标段落（SOW §3.3.1 结构化知识层：精确数值走 SQLite 精确查询）。
+    """行业基准指标段落。
 
     客户有行业 → 注入该行业 + 通用指标；无行业 → 仅注入通用指标，
     避免把其他行业的特定基准错配给该客户。

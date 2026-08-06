@@ -1,4 +1,4 @@
-"""LLM 降级兜底（SOW §7 可用性 / §10 风险「LLM API 不稳定」）。
+"""LLM 降级兜底。
 
 LLM 不可用时，对话不返回错误页，而是用**量化评估引擎**的既有结果拼出一份
 可读的规则化回复：分数、维度明细、预警、规则建议、三层策略照常呈现，
@@ -19,7 +19,7 @@ def _score_line(ctx: ChatContext) -> str:
     a = ctx.assessment
     if not a:
         return "当前会话未关联客户，无法给出量化结果。"
-    line = f"**{a.customer_name}** 当前健康分 **{a.total_score} / {a.max_score}**，等级「{a.level}」。"
+    line = f"**{a.customer_name}** 当前客情评分 **{a.total_score} / {a.max_score}**，等级「{a.level}」。"
     t = ctx.trend
     if t and t.previous_score is not None:
         line += f"较上次评估 {t.delta:+.1f} 分（{TREND_LABEL.get(t.trend, t.trend)}）。"
@@ -32,8 +32,7 @@ def _dimension_lines(ctx: ChatContext) -> list[str]:
         return []
     lines = ["", "### 📊 维度明细"]
     for d in a.dimensions:
-        detail = "；".join(d.details) if d.details else "无明细"
-        lines.append(f"- **{d.name}** {d.score}/{d.max_score} —— {detail}")
+        lines.append(f"- **{d.name}** {d.score}/{d.max_score}")
     return lines
 
 

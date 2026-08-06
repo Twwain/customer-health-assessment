@@ -1,4 +1,4 @@
-"""Embedding 函数：包装智谱 GLM embedding-3（OpenAI 兼容）适配器（SOW §3.3.2）。
+"""Embedding 函数：包装大模型兼容协议 embedding 适配器。
 
 向量库（Chroma / 内存）只接收外部算好的向量，不直接持有 embedding 模型，
 因此换供应商只需改 ``.env``，向量库代码无需改动。

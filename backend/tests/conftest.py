@@ -6,6 +6,8 @@ import pytest
 import config
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# 允许测试模块间共享工厂（tests/factories.py 等）
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 @pytest.fixture(autouse=True)

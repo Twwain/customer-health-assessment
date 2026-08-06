@@ -228,17 +228,59 @@ customers = [
     ),
 ]
 
-db.add_all(customers)
-db.commit()
+# ── 客情因子（7 维度 × 60 因子，配置驱动）────────────────────────────────────
+# 三档画像 GOOD（健康）/ MEDIUM（亚健康）/ RISKY（高危）由 seed_factors.py
+# 从 scoring_config.yaml 的打分规则自动推导；修改配置档位无需维护本文件。
+# 注意：满意度因子（HIS-09）复用模型列 customer_satisfaction，不在此处填报。
+from seed_factors import GOOD_FACTORS, MEDIUM_FACTORS, RISKY_FACTORS
 
-print(f'已生成 {len(customers)} 条 客情模拟数据：')
-print()
-for c in customers:
-    cf = c.custom_fields or {}
-    print(f'  [{c.id}] {c.customer_name} ({c.industry})')
-    print(f'       产品: {cf.get("产品线", "-")} | {c.contract_amount}万 | {c.cooperation_years}年')
-    print(f'       满意度: {c.customer_satisfaction}/10 | 回款: {c.payment_status} | 级别: {cf.get("客户级别", "-")}')
-    print(f'       备注: {c.notes}')
+PROFILE_BY_CUSTOMER = {
+    "示例银行(总行)": GOOD_FACTORS,
+    "示例互联网公司": GOOD_FACTORS,
+    "示例内容平台": GOOD_FACTORS,
+    "示例大学": GOOD_FACTORS,
+    "示例汽车制造": GOOD_FACTORS,
+    "示例通信集团": MEDIUM_FACTORS,
+    "示例股份银行": MEDIUM_FACTORS,
+    "示例电网公司": MEDIUM_FACTORS,
+    "示例中心医院": MEDIUM_FACTORS,
+    "示例地产集团": RISKY_FACTORS,
+    "示例能源集团": RISKY_FACTORS,
+    "示例汽车集团": RISKY_FACTORS,
+    "示例保险集团": RISKY_FACTORS,
+}
+
+
+def main() -> None:
+    # 幂等：已存在的客户按名称跳过，重复执行不会产生重复数据
+    existing = {name for (name,) in db.query(Customer.customer_name).all()}
+    to_insert = []
+    skipped = 0
+    for c in customers:
+        if c.customer_name in existing:
+            skipped += 1
+            continue
+        profile = PROFILE_BY_CUSTOMER.get(c.customer_name)
+        if profile:
+            c.custom_fields = {**(c.custom_fields or {}), **profile}
+        to_insert.append(c)
+
+    if to_insert:
+        db.add_all(to_insert)
+        db.commit()
+
+    print(f'新增 {len(to_insert)} 条 客情模拟数据（跳过已存在 {skipped} 条）：')
     print()
+    for c in to_insert:
+        cf = c.custom_fields or {}
+        print(f'  [{c.id}] {c.customer_name} ({c.industry})')
+        print(f'       产品: {cf.get("产品线", "-")} | {c.contract_amount}万 | {c.cooperation_years}年')
+        print(f'       满意度: {c.customer_satisfaction}/10 | 回款: {c.payment_status} | 级别: {cf.get("客户级别", "-")}')
+        print(f'       备注: {c.notes}')
+        print()
 
-db.close()
+    db.close()
+
+
+if __name__ == "__main__":
+    main()

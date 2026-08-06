@@ -1,7 +1,7 @@
-"""配置驱动评分引擎测试（SOW §3.0 M0 / §11.1 验收项）。
+"""配置驱动评分引擎测试。
 
 覆盖三件事：
-1. 默认配置与 v1.0 硬编码算法**逐分逐字**一致（改造不改结果）
+1. 默认配置（7 维度 × 60 因子）
 2. 改 `scoring_config.yaml` 即改算法 —— 不需要改任何代码
 3. 通过 custom_fields 注册新因子即可参与计分
 """
@@ -12,6 +12,7 @@ import textwrap
 import pytest
 
 from models import Customer
+from factories import MAX_FACTORS
 from services.health_score import HealthScoreEngine
 from services.scoring.config_driven import ConfigDrivenStrategy
 from services.scoring.config_loader import (
@@ -41,7 +42,6 @@ def make_customer(**overrides) -> Customer:
         setattr(c, k, v)
     return c
 
-
 def write_config(tmp_path, body: str) -> str:
     path = tmp_path / "scoring_config.yaml"
     path.write_text(textwrap.dedent(body), encoding="utf-8")
@@ -56,110 +56,148 @@ def _reset_cache():
     clear_config_cache()
 
 
-# ── 1. 默认配置结构 ──────────────────────────────────────────────────────
+# ── 1. 默认配置结构（7 维度 × 60 因子）───────────────────────────────────────
 
 
 def test_default_config_loads():
     config = load_scoring_config()
-    assert config.version == "1.0"
+    assert config.version == "2026.08"
     assert config.source_path.endswith("scoring_config.yaml")
 
 
-def test_default_config_has_four_enabled_dimensions_totaling_100():
+def test_default_config_has_seven_enabled_dimensions_totaling_100():
     config = load_scoring_config()
     keys = [d.key for d in config.enabled_dimensions]
-    assert keys == ["relationship", "satisfaction", "business", "risk"]
+    assert keys == ["kcr", "er", "or", "ci", "his", "risk", "svc"]
     assert config.total_max_score == 100
 
 
-def test_reserved_multi_role_dimension_is_registered_but_disabled():
-    """SOW §3.0.2 多角色因子预留：已注册、不计分、不影响总分。"""
+def test_default_config_registers_60_factors_with_weights_summing_to_max():
+    """7 维度 × 60 因子；因子权重按二级维度均权折算后等于维度满分。"""
     config = load_scoring_config()
-    reserved = next(d for d in config.dimensions if d.key == "multi_role")
-    assert reserved.enabled is False
-    assert reserved not in config.enabled_dimensions
-    assert {f.source_role for f in reserved.factors} == {"研发", "服务", "HR"}
-    assert all(f.source == "custom_fields" for f in reserved.factors)
+    assert sum(len(d.factors) for d in config.enabled_dimensions) == 60
+    for dim in config.enabled_dimensions:
+        weight_sum = sum(f.weight for f in dim.factors)
+        assert weight_sum == pytest.approx(dim.max_score, abs=1e-3), dim.key
+        assert all(f.enabled for f in dim.factors)
+
+
+def test_factors_carry_role_and_secondary_dimension_info():
+    """方案 10.2 数据采集分工：AR/SR/FR/财务/市场/管理层/生态/系统多角色输入。"""
+    config = load_scoring_config()
+    roles = {f.source_role for d in config.dimensions for f in d.factors}
+    assert {"AR", "SR", "FR", "财务", "市场", "管理层", "生态/行业", "系统"} <= roles
+    assert all(
+        f.source in ("model", "custom_fields")
+        for d in config.dimensions
+        for f in d.factors
+    )
 
 
 def test_levels_sorted_desc_by_min_score():
     config = load_scoring_config()
-    assert [lv.name for lv in config.levels] == ["优秀", "良好", "一般", "风险"]
+    assert [lv.name for lv in config.levels] == ["健康", "亚健康", "风险", "高危"]
+    assert [lv.min_score for lv in config.levels] == [80, 60, 40, 0]
 
 
 def test_find_factor_prefers_editable_definition():
-    """payment_status 同时被商业价值与风险维度引用，取可编辑的那份。"""
+    """HIS-09 满意度调研复用模型列 customer_satisfaction，应可被表单找到。"""
     config = load_scoring_config()
-    factor = config.find_factor("payment_status")
+    factor = config.find_factor("customer_satisfaction")
     assert factor is not None
     assert factor.input.editable is True
-    assert factor.input.options == ["正常", "部分逾期", "严重逾期"]
+    assert factor.source == "model"
+    assert config.find_factor("not_registered_field") is None
 
 
-# ── 2. 与 v1.0 硬编码算法一致 ────────────────────────────────────────────
+# ── 2. 因子库计分（四级计算模型折算结果）─────────────────────────────────────
 
 
-def test_dimension_scores_match_legacy_algorithm():
+def test_empty_factors_score_minimum():
+    """未填报因子按各因子最低档计分（客观事实驱动，无记录即低分）。"""
     result = HealthScoreEngine().evaluate(make_customer())
     scores = {d.key: d.score for d in result.dimensions}
-    assert scores == {"relationship": 17, "satisfaction": 20.0, "business": 20, "risk": 25}
-    assert result.total_score == 82
-    assert result.level == "良好"
-    assert result.level_color == "#3b82f6"
+    assert scores["kcr"] == pytest.approx(3.27)
+    assert scores["er"] == pytest.approx(2.22)
+    assert scores["or"] == pytest.approx(0.233333)
+    assert scores["ci"] == 0
+    assert scores["his"] == pytest.approx(1.92)   # 含满意度 8 → 0.63
+    assert scores["risk"] == pytest.approx(4.92)
+    assert scores["svc"] == pytest.approx(0.5, abs=1e-3)
+    assert result.total_score == pytest.approx(13.1, abs=1e-3)
+    assert result.level == "高危"
     assert result.max_score == 100
 
 
-def test_detail_text_matches_legacy_algorithm():
-    result = HealthScoreEngine().evaluate(make_customer())
-    details = {d.key: d.details for d in result.dimensions}
-    assert details["relationship"] == [
-        "合作3年(3-5年)：+7分",
-        "沟通频率「每月」：+5分",
-        "最近联系5天前(≤7天)：+5分",
-    ]
-    assert details["satisfaction"] == ["客户满意度评分 8/10 × 2.5 = 20.0分"]
-    assert details["business"] == [
-        "合同金额100万元(100-500万)：+10分",
-        "回款情况「正常」：+10分",
-    ]
-    assert details["risk"] == ["基础分25分，按风险项扣减", "增长潜力「中」：+2分"]
+def test_maxed_factors_score_100():
+    """60 个因子全部取最高档 → 7 维度各自满分、总分 100、等级健康。"""
+    result = HealthScoreEngine().evaluate(
+        make_customer(custom_fields=MAX_FACTORS, customer_satisfaction=10)
+    )
+    assert result.total_score == pytest.approx(100.0)
+    assert result.level == "健康"
+    assert result.level_color == "#22c55e"
 
 
-def test_risk_dimension_penalties_and_floor():
+def test_kcr_01_options_score():
+    """KCR-01 决策链识别完整度：下拉档位 100%/≥80%/≥60%/≥40%/<40% 对应分值。"""
+    engine = HealthScoreEngine()
+    cases = [("100%", "+2.1分"), ("≥80%", "+1.68分"), ("≥60%", "+1.26分"), ("≥40%", "+0.84分"), ("<40%", "+0.21分")]
+    for value, tail in cases:
+        dim = engine._dimension_score("kcr", make_customer(custom_fields={"kcr_01": value}))
+        assert any(d.startswith("已识别占比") and d.endswith(tail) for d in dim.details)
+
+
+def test_his_01_cumulative_amount_options():
+    """HIS-01 累计合作金额：下拉档位 >5亿/1-5亿/5千万-1亿/1-5千万/<1千万 对应分值。"""
+    engine = HealthScoreEngine()
+    cases = [(">5亿", "+1.4分"), ("1-5亿", "+1.12分"), ("5千万-1亿", "+0.84分"), ("1-5千万", "+0.56分"), ("<1千万", "+0.28分")]
+    for value, tail in cases:
+        dim = engine._dimension_score("his", make_customer(custom_fields={"his_01": value}))
+        assert any(d.startswith("累计合作金额") and d.endswith(tail) for d in dim.details)
+
+
+def test_risk_factors_worst_case_lower_score():
+    """RISK 风险信号因子全取最差档 → 维度分下降（12 满分 → 1.08）。"""
     c = make_customer(
-        risk_signals="重大纠纷",
-        competitor_involvement=True,
-        payment_status="严重逾期",
-        growth_potential="低",
+        custom_fields={
+            "risk_05": "≥2人变动",
+            "risk_06": "下降≥20%",
+            "risk_07": "是且进展顺利",
+            "risk_08": "≥2次或重大投诉",
+            "risk_08b": "高(<60%)",
+            "risk_08c": "危机",
+        }
     )
     dim = next(d for d in HealthScoreEngine().evaluate(c).dimensions if d.key == "risk")
-    assert dim.score == 0  # 25 - 8 - 10 - 7 + 0，下限截断为 0
-    assert dim.details == [
-        "基础分25分，按风险项扣减",
-        "存在风险信号：-8分",
-        "竞品已介入：-10分",
-        "严重逾期：-7分",
-        "增长潜力「低」：+0分",
-    ]
+    assert dim.score == pytest.approx(1.08)
 
 
-def test_normal_payment_adds_no_risk_detail():
-    """omit_detail_on_default：回款正常时风险维度不追加噪音明细。"""
-    dim = next(
-        d for d in HealthScoreEngine().evaluate(make_customer()).dimensions if d.key == "risk"
+def test_alerts_cover_ppt_triggers():
+    """自动预警（字段级可落地部分）：CES/经营风险/竞品POC/客情恶化/关键人变动/互动下降/Champion缺失。"""
+    c = make_customer(
+        custom_fields={
+            "kcr_08": "无",
+            "risk_05": "≥2人变动",
+            "risk_06": "下降≥20%",
+            "risk_07": "是且进展顺利",
+            "risk_08": "≥2次或重大投诉",
+            "risk_08b": "高(<60%)",
+            "risk_08c": "危机",
+        }
     )
-    assert not any("回款" in text for text in dim.details)
+    alerts = {a.id: a.level for a in HealthScoreEngine().evaluate(c).alerts}
+    assert alerts["ces_deterioration"] == "high"
+    assert alerts["customer_business_crisis"] == "high"
+    assert alerts["competitor_poc"] == "high"
+    assert alerts["relationship_deterioration"] == "high"
+    assert alerts["key_person_churn"] == "medium"
+    assert alerts["interaction_decline"] == "medium"
+    assert alerts["champion_missing"] == "medium"
 
 
-def test_no_contact_record_uses_empty_branch():
-    c = make_customer(last_contact_date=None)
-    dim = next(
-        d for d in HealthScoreEngine().evaluate(c).dimensions if d.key == "relationship"
-    )
-    assert "无联系记录：+0分" in dim.details
-
-
-def test_alerts_and_suggestions_order_matches_legacy():
+def test_legacy_alerts_still_work():
+    """保留的高频预警：超90天未联系 / 满意度低 / 竞品介入 / 回款异常 / 风险信号。"""
     c = make_customer(
         last_contact_date=datetime.date.today() - datetime.timedelta(days=120),
         customer_satisfaction=3,
@@ -168,32 +206,29 @@ def test_alerts_and_suggestions_order_matches_legacy():
         risk_signals="预算削减",
     )
     result = HealthScoreEngine().evaluate(c)
-    assert result.risk_alerts == [
-        "超过90天未联系客户，关系存在疏远风险",
-        "客户满意度较低(3/10)，存在流失风险",
-        "竞品已介入，客户存在被挖角风险",
-        "回款状态异常：部分逾期",
-        "存在风险信号：预算削减",
+    assert [a.id for a in result.alerts] == [
+        "stale_contact",
+        "competitor_involved",
+        "payment_abnormal",
+        "low_satisfaction",
+        "risk_signal",
     ]
     assert result.suggestions[0] == "建议尽快安排客户拜访或沟通"
 
 
-def test_alerts_carry_level_for_badge_color():
-    """评审结论 Q5：high=红 / medium=黄 / low=蓝，级别由配置提供。"""
-    c = make_customer(competitor_involvement=True, payment_status="部分逾期")
-    alerts = {a.id: a.level for a in HealthScoreEngine().evaluate(c).alerts}
-    assert alerts["competitor_involved"] == "high"
-    assert alerts["payment_abnormal"] == "medium"
-
-
 def test_opportunity_suggestion_appended_last():
-    c = make_customer(growth_potential="高", customer_satisfaction=8)
+    """机会点建议：钱包份额高+满意度好、成长期+Champion 支持。"""
+    c = make_customer(
+        custom_fields={"his_04": "≥50%", "his_09b": "成长期", "kcr_07": "≥60%支持且无反对"},
+        customer_satisfaction=8,
+    )
     result = HealthScoreEngine().evaluate(c)
-    assert result.suggestions[-1].startswith("该客户增长潜力高")
+    assert any(s.startswith("该客户钱包份额高") for s in result.suggestions)
+    assert any(s.startswith("客户处于成长期") for s in result.suggestions)
 
 
 def test_config_version_returned_in_assessment():
-    assert HealthScoreEngine().evaluate(make_customer()).config_version == "1.0"
+    assert HealthScoreEngine().evaluate(make_customer()).config_version == "2026.08"
 
 
 # ── 3. 改配置即改算法（§11.1 首条验收）────────────────────────────────────

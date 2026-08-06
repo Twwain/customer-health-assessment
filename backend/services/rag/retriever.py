@@ -1,10 +1,10 @@
-"""RAG 检索（SOW §3.3.2）。
+"""RAG 检索。
 
 流程：向量召回（dense）→ 重排（metadata / BGE）→ Top-K。
 支持 ``where`` 过滤（默认只取 canonical，即已审核知识），并按客户行业提升同行业权重。
 
 Embedding 不可用时（缺 Key / 网络）**静默降级为空结果**，调用方据此走规则引擎兜底，
-不抛异常、不影响基础功能（对应 SOW §7 可用性）。
+不抛异常、不影响基础功能（对应  可用性）。
 """
 
 from __future__ import annotations

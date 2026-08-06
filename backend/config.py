@@ -1,16 +1,16 @@
 """应用配置。
 
 - 评分相关：维度 / 因子 / 权重 / 规则等业务配置在 ``backend/scoring_config.yaml``
-  （SOW §3.0 M0：改配置即生效，无需改代码）。
-- LLM 相关：API Key / Base URL / 模型名走 ``.env``（SOW §3.2.3）；
-  Prompt 文案在 ``backend/prompt_templates.yaml``（SOW §7 可维护性：Prompt 外部可配）。
+  。
+- LLM 相关：API Key / Base URL / 模型名走 ``.env``；
+  Prompt 文案在 ``backend/prompt_templates.yaml``。
 """
 
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# .env 仅开发期使用（SOW §7）；未安装 python-dotenv 时静默跳过，只读进程环境变量
+# .env 仅开发期使用；未安装 python-dotenv 时静默跳过，只读进程环境变量
 try:  # pragma: no cover - 依赖是否安装与业务逻辑无关
     from dotenv import load_dotenv
 
@@ -40,7 +40,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# ══════════════════════════ 评分引擎（SOW §3.0）══════════════════════════════
+# ══════════════════════════ 评分引擎══════════════════════════════
 
 # 评分策略：rule_based（配置驱动，默认）/ config（同义）/ ml（预留模型接入）
 SCORING_STRATEGY = os.getenv("SCORING_STRATEGY", "rule_based")
@@ -52,19 +52,20 @@ SCORING_CONFIG_PATH = os.getenv(
 )
 
 
-# ══════════════════════════ LLM 对话（SOW §3.2.3）════════════════════════════
-# 统一走 OpenAI 兼容协议，换供应商只需改 BASE_URL / MODEL / API_KEY（SOW §2.2）。
+# ══════════════════════════ LLM 对话════════════════════════════
+# 统一走大模型兼容协议（/chat/completions），换服务商只需改 BASE_URL / MODEL / API_KEY。
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")
-# 官方 OpenAI 兼容端点（不带 /v1，适配器自行拼接 /chat/completions）
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
-LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")
-# DeepSeek-V4-Flash 正式版 API 已于 2026-07-31 上线（版本号 DeepSeek-V4-Flash-0731）；
-# 官方 API 模型标识为小写 deepseek-v4-flash，该标识始终指向最新版本
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "default")
+# 大模型兼容端点（不带 /v1，适配器自行拼接 /chat/completions）；未配置则视为不可用、自动降级
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# 对话模型标识由 .env 指定；未配置则视为不可用、自动降级
+LLM_MODEL = os.getenv("LLM_MODEL", "")
 
 LLM_TEMPERATURE = _env_float("LLM_TEMPERATURE", 0.3)
-LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 2048)
+# 对话输出 token 上限：作为 prompt_templates.yaml 中各模板 max_tokens 的硬上限
+# （实际生效值 = min(模板 max_tokens, LLM_MAX_TOKENS)），默认与模板对齐为 8000
+LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 8000)
 LLM_TIMEOUT = _env_float("LLM_TIMEOUT", 60.0)
 LLM_CONNECT_TIMEOUT = _env_float("LLM_CONNECT_TIMEOUT", 8.0)
 LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 2)
@@ -80,23 +81,23 @@ LLM_STREAM_USAGE = _env_bool("LLM_STREAM_USAGE", True)
 LLM_TOOLS_ENABLED = _env_bool("LLM_TOOLS_ENABLED", True)
 
 
-# ══════════════════════════ Embedding（SOW §3.3.2）═══════════════════════════
-# 本期固定智谱 GLM embedding-3，同样走 OpenAI 兼容 /embeddings。
+# ══════════════════════════ Embedding═══════════════════════════
+# 向量化走大模型兼容 /embeddings 端点，服务商与模型由 .env 指定。
 
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "zhipu")
-# 优先读 .env.example / README 约定的 LLM_EMBEDDING_*，兼容旧的 EMBEDDING_* 与 ZHIPU_API_KEY
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "default")
+# 优先读 LLM_EMBEDDING_*，兼容旧的 EMBEDDING_* 变量
 EMBEDDING_BASE_URL = (
     os.getenv("LLM_EMBEDDING_BASE_URL")
     or os.getenv("EMBEDDING_BASE_URL")
-    or "https://open.bigmodel.cn/api/paas/v4"
+    or ""
 )
 EMBEDDING_API_KEY = (
     os.getenv("LLM_EMBEDDING_API_KEY")
     or os.getenv("EMBEDDING_API_KEY")
-    or os.getenv("ZHIPU_API_KEY", "")
+    or ""
 )
 EMBEDDING_MODEL = (
-    os.getenv("LLM_EMBEDDING_MODEL") or os.getenv("EMBEDDING_MODEL") or "embedding-3"
+    os.getenv("LLM_EMBEDDING_MODEL") or os.getenv("EMBEDDING_MODEL") or ""
 )
 EMBEDDING_DIM = _env_int("EMBEDDING_DIM", 1024)
 EMBEDDING_BATCH_SIZE = _env_int("EMBEDDING_BATCH_SIZE", 16)
@@ -105,17 +106,17 @@ EMBEDDING_BATCH_SIZE = _env_int("EMBEDDING_BATCH_SIZE", 16)
 EMBEDDING_ENABLED = _env_bool("EMBEDDING_ENABLED", bool(EMBEDDING_API_KEY))
 
 
-# ══════════════════════════ 对话编排（SOW §3.2.1）════════════════════════════
+# ══════════════════════════ 对话编排════════════════════════════
 
 PROMPT_TEMPLATE_PATH = os.getenv(
     "PROMPT_TEMPLATE_PATH",
     os.path.join(BASE_DIR, "prompt_templates.yaml"),
 )
 
-# 多轮上下文窗口：最多带入最近 N 条消息、总字符预算上限（控制 Token 成本，SOW §10）
+# 多轮上下文窗口：最多带入最近 N 条消息、总字符预算上限（控制 Token 成本，）
 CHAT_MAX_CONTEXT_MESSAGES = _env_int("CHAT_MAX_CONTEXT_MESSAGES", 12)
 CHAT_CONTEXT_CHAR_BUDGET = _env_int("CHAT_CONTEXT_CHAR_BUDGET", 8000)
-# 单条用户输入长度上限（安全护栏，SOW §3.2.1）
+# 单条用户输入长度上限（安全护栏，）
 CHAT_MAX_INPUT_CHARS = _env_int("CHAT_MAX_INPUT_CHARS", 4000)
 # 趋势上下文带入的历史评估条数
 CHAT_TREND_POINTS = _env_int("CHAT_TREND_POINTS", 6)
@@ -123,7 +124,15 @@ CHAT_TREND_POINTS = _env_int("CHAT_TREND_POINTS", 6)
 CHAT_DEGRADED_CHUNK_SIZE = _env_int("CHAT_DEGRADED_CHUNK_SIZE", 24)
 
 
-# ══════════════════════════ 知识库 RAG（SOW §3.3）═══════════════════════
+# 异步 PDF 导出任务（内存态）：进程内最多保留的任务数，超出后清理最早完成的
+# ready/error 任务（不误删 running）；并发上限用于防止线程/内存被任务打满；
+# TTL 兜底清理疑似挂死的任务（running 超时同样回收）。均可经环境变量覆盖。
+PDF_JOB_MAX = _env_int("PDF_JOB_MAX", 50)
+PDF_JOB_MAX_CONCURRENT = max(1, _env_int("PDF_JOB_MAX_CONCURRENT", 4))
+PDF_JOB_TTL = max(60, _env_int("PDF_JOB_TTL", 3600))
+
+
+# ══════════════════════════ 知识库 RAG═══════════════════════
 # 向量库：chroma（生产，需 chromadb）/ memory（开发自测，纯内存无需依赖）。
 # 生产环境 chromadb 未安装时自动回退 memory 并打日志，保证基础功能可用。
 KNOWLEDGE_VECTOR_STORE = os.getenv("KNOWLEDGE_VECTOR_STORE", "chroma")
@@ -134,14 +143,14 @@ KNOWLEDGE_COLLECTION = os.getenv("KNOWLEDGE_COLLECTION", "customer_health_kb")
 # 中文按标点分句切片（SentenceWindow 思路）：chunk 大小按中文字符评估
 CHUNK_SIZE = _env_int("CHUNK_SIZE", 480)
 CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 60)
-# 检索：先召回 RAG_RECALL_K 候选，再 Rerank 到 RAG_TOP_K（SOW §3.3.2 Top-K=5）
+# 检索：先召回 RAG_RECALL_K 候选，再 Rerank 到 RAG_TOP_K
 RAG_TOP_K = _env_int("RAG_TOP_K", 5)
 RAG_RECALL_K = _env_int("RAG_RECALL_K", 20)
 # 命中切片窗口扩展：把相邻切片一起拼进上下文，缓解跨切片信息截断（0=关闭）
 RAG_WINDOW = _env_int("RAG_WINDOW", 1)
 RERANKER = os.getenv("RERANKER", "metadata")  # metadata（默认，无依赖）/ bge（本地 CrossEncoder）
 BGE_MODEL = os.getenv("BGE_MODEL", "BAAI/bge-reranker-v2-m3")
-# 检索时优先提升的分类权重（内部规范 / 指标 > 外部趋势，SOW §3.3.2 分类权重）
+# 检索时优先提升的分类权重（内部规范 / 指标 > 外部趋势， 分类权重）
 # key 必须与 models.KNOWLEDGE_CATEGORIES 保持一致
 RAG_CATEGORY_WEIGHTS = {
     "内部规范": 1.3,

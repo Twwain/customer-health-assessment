@@ -4,6 +4,7 @@ import { chat, customers, streamChat } from "../api";
 import type {
   AssessmentResponse,
   AssessmentTrendResponse,
+  ChatEvent,
   ChatMessageItem,
   KnowledgeReference,
   StrategyItem,
@@ -45,6 +46,8 @@ export default function Chat() {
   const [error, setError] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState("AI 对话");
   const [sessionCustomerId, setSessionCustomerId] = useState<number | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportJob, setExportJob] = useState<{ id: string; status: string } | null>(null);
   const [ctx, setCtx] = useState<{ assessment?: AssessmentResponse | null; trend?: AssessmentTrendResponse | null }>({});
   const [trace, setTrace] = useState<KnowledgeReference | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -55,58 +58,11 @@ export default function Chat() {
   const streamRef = useRef<StreamMsg | null>(null);
   const customerIdRef = useRef<number | null>(null);
   const scenarioRef = useRef<string>("free_qa");
-  const lastAutoRef = useRef<string>("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pendingScenario = useRef<Scenario | null>(null);
 
-  // ── 加载会话 ───────────────────────────────────────────────
-  const loadSession = async (id: number) => {
-    try {
-      const s = await chat.getSession(id);
-      setMessages(s.messages);
-      setSessionTitle(s.title || "AI 对话");
-      setSessionCustomerId(s.customer_id);
-      customerIdRef.current = s.customer_id;
-      scenarioRef.current = s.scenario;
-      for (const m of s.messages) if (m.feedback) setFeedbacks((p) => ({ ...p, [m.id]: m.feedback }));
-      if (s.customer_id) fetchCtx(s.customer_id);
-      const auto = (location.state as { autoScenario?: Scenario } | null)?.autoScenario;
-      const key = `${id}:${auto ?? ""}`;
-      if (auto && lastAutoRef.current !== key) {
-        lastAutoRef.current = key;
-        runScenarioEndpoint(auto, s.customer_id);
-      }
-    } catch {
-      setError("会话加载失败");
-    }
-  };
-
-  const fetchCtx = (cid: number) => {
-    customers.assessment(cid).then((a) => setCtx((p) => ({ ...p, assessment: a }))).catch(() => {});
-    customers.trend(cid, 12).then((t) => setCtx((p) => ({ ...p, trend: t }))).catch(() => {});
-  };
-
-  useEffect(() => {
-    // 切换会话前清空上个会话的全部状态，避免旧消息/反馈/溯源闪现
-    streamRef.current = null;
-    setStream(null);
-    setError(null);
-    setTrace(null);
-    setFeedbacks({});
-    setAdopted({});
-    if (!sessionIdNum) {
-      setMessages([]);
-      setCtx({});
-      return;
-    }
-    setMessages([]);
-    setCtx({});
-    loadSession(sessionIdNum);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionIdNum]);
-
   // ── SSE 流式发送 ──────────────────────────────────────────
-  const handleEvent = (ev: { type: string; data: any }) => {
+  const handleEvent = (ev: ChatEvent) => {
     if (ev.type === "done") {
       const msg = ev.data.message as ChatMessageItem;
       streamRef.current = null;
@@ -117,7 +73,7 @@ export default function Chat() {
     if (ev.type === "error") {
       streamRef.current = null;
       setStream(null);
-      setError(ev.data?.message || "生成出错");
+      setError((ev.data.message as string | undefined) || "生成出错");
       return;
     }
     const cur = streamRef.current || {
@@ -131,22 +87,26 @@ export default function Chat() {
     let next: StreamMsg = cur;
     switch (ev.type) {
       case "start":
-        next = { ...cur, scenario: ev.data.scenario, degraded: !!ev.data.degraded };
+        next = { ...cur, scenario: ev.data.scenario as string, degraded: !!ev.data.degraded };
         break;
       case "context":
-        next = { ...cur, assessment: ev.data.assessment, trend: ev.data.trend };
+        next = {
+          ...cur,
+          assessment: ev.data.assessment as AssessmentResponse,
+          trend: ev.data.trend as AssessmentTrendResponse | undefined,
+        };
         break;
       case "delta":
-        next = { ...cur, content: cur.content + ev.data.text };
+        next = { ...cur, content: cur.content + (ev.data.text as string) };
         break;
       case "strategy":
-        next = { ...cur, strategy_items: ev.data.items };
+        next = { ...cur, strategy_items: ev.data.items as StrategyItem[] };
         break;
       case "references":
-        next = { ...cur, references: ev.data.items };
+        next = { ...cur, references: ev.data.items as KnowledgeReference[] };
         break;
       case "warning":
-        next = { ...cur, content: (cur.content ? cur.content + "\n\n" : "") + "> ⚠️ " + ev.data.message };
+        next = { ...cur, content: (cur.content ? cur.content + "\n\n" : "") + "> ⚠️ " + (ev.data.message as string) };
         break;
     }
     streamRef.current = next;
@@ -201,6 +161,39 @@ export default function Chat() {
     });
   };
 
+  // ── 加载会话 ───────────────────────────────────────────────
+  const fetchCtx = (cid: number) => {
+    customers.assessment(cid).then((a) => setCtx((p) => ({ ...p, assessment: a }))).catch(() => {});
+    customers.trend(cid, 12).then((t) => setCtx((p) => ({ ...p, trend: t }))).catch(() => {});
+  };
+
+  const loadSession = (id: number) =>
+    chat
+      .getSession(id)
+      .then((s) => {
+        setMessages(s.messages);
+        setSessionTitle(s.title || "AI 对话");
+        setSessionCustomerId(s.customer_id);
+        customerIdRef.current = s.customer_id;
+        scenarioRef.current = s.scenario;
+        for (const m of s.messages) if (m.feedback) setFeedbacks((p) => ({ ...p, [m.id]: m.feedback }));
+        if (s.customer_id) fetchCtx(s.customer_id);
+      })
+      .catch(() => setError("会话加载失败"));
+
+  useEffect(() => {
+    // 会话切换由路由层 key 重挂载保证状态全新（App.tsx ChatBySession），
+    // 这里只负责加载当前会话，不再手动清空上个会话的状态
+    if (!sessionIdNum) return;
+    const auto = (location.state as { autoScenario?: Scenario } | null)?.autoScenario;
+    // 快捷场景（评估/策略/预警）在加载完成后的异步回调里触发，
+    // 避免在 effect 的同步链路上触发 setState（react-hooks/set-state-in-effect）
+    void loadSession(sessionIdNum).then(() => {
+      if (auto && customerIdRef.current) runScenarioEndpoint(auto, customerIdRef.current);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionIdNum]);
+
   const runQuick = (scenario: Scenario) => {
     if (!sessionIdNum) return;
     if (customerIdRef.current) runScenarioEndpoint(scenario, customerIdRef.current);
@@ -239,9 +232,78 @@ export default function Chat() {
     }
   };
 
-  const exportPdf = () => {
-    if (sessionCustomerId) window.open(`/api/assessment/${sessionCustomerId}/pdf`, "_blank");
-    else alert("该会话未关联客户，无法导出报告");
+  const exportPdf = async () => {
+    if (!sessionCustomerId) {
+      alert("该会话未关联客户，无法导出报告");
+      return;
+    }
+    setExporting(true);
+    setExportJob(null);
+    try {
+      // 默认始终使用 AI 生成；AI 不可用时后端自动降级为规则引擎
+      const job = await customers.pdfJob(sessionCustomerId, true);
+      setExportJob({ id: job.job_id, status: job.status });
+    } catch {
+      alert("导出任务创建失败，请稍后重试");
+      setExporting(false);
+    }
+  };
+
+  // 后台生成：轮询任务状态，成功后切换为「下载报告」
+  useEffect(() => {
+    if (
+      !exportJob ||
+      !sessionCustomerId ||
+      exportJob.status === "ready" ||
+      exportJob.status === "error"
+    ) {
+      return;
+    }
+    const jobId = exportJob.id;
+    const timer = setInterval(async () => {
+      try {
+        const s = await customers.pdfJobStatus(sessionCustomerId, jobId);
+        if (s.status === "ready" || s.status === "error") {
+          clearInterval(timer);
+          setExportJob({ id: jobId, status: s.status });
+          setExporting(false);
+          if (s.status === "error") {
+            alert("报告生成失败：" + (s.error || "未知错误"));
+          }
+        }
+      } catch {
+        clearInterval(timer);
+        setExporting(false);
+        alert("导出任务状态获取失败，请重试");
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [exportJob, sessionCustomerId]);
+
+  const cancelExport = () => {
+    // 仅停止前端轮询与状态，后端任务会在 TTL 内自行回收
+    setExportJob(null);
+    setExporting(false);
+  };
+
+  const downloadPdf = async () => {
+    if (!exportJob || !sessionCustomerId) return;
+    try {
+      const blob = await customers.pdfDownload(sessionCustomerId, exportJob.id);
+      const name = ctx.assessment?.customer_name || `客户${sessionCustomerId}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${name}_客情评估报告.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // 延迟释放，避免个别浏览器在下载开始前就回收 blob URL
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExportJob(null);
+    } catch {
+      alert("报告下载失败，请重试");
+    }
   };
 
   const deleteSession = async () => {
@@ -298,28 +360,48 @@ export default function Chat() {
       {/* 会话头部 */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border bg-surface px-4 py-2.5">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[14px] font-semibold text-ink">{sessionTitle}</div>
+          <div className="truncate text-[15px] font-semibold text-ink">{sessionTitle}</div>
           {sessionCustomerId && (
-            <div className="truncate text-[11.5px] text-muted">
+            <div className="truncate text-[12.5px] text-muted">
               🔗 上下文：客户 #{sessionCustomerId}
             </div>
           )}
         </div>
         <button
-          className="rounded-lg border border-border px-2.5 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
+          className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
           onClick={regenerate}
           disabled={busy || display.filter((m) => m.role === "assistant").length === 0}
         >
           🔄 重新生成
         </button>
+        {exportJob?.status === "ready" ? (
+          <button
+            className="rounded-lg bg-accent px-2.5 py-1.5 text-[13.5px] font-medium text-white transition hover:bg-accent-hover"
+            onClick={downloadPdf}
+          >
+            ⬇️ 下载报告
+          </button>
+        ) : (
+          <>
+            <button
+              className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
+              onClick={exportPdf}
+              disabled={exporting || !sessionCustomerId}
+            >
+              {exporting ? "⏳ 导出中…" : "📄 导出报告"}
+            </button>
+            {exporting && exportJob?.status === "running" && (
+              <button
+                className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-danger hover:text-danger"
+                onClick={cancelExport}
+              >
+                取消
+              </button>
+            )}
+          </>
+        )}
         <button
-          className="rounded-lg border border-border px-2.5 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
-          onClick={exportPdf}
-        >
-          📄 导出报告
-        </button>
-        <button
-          className="rounded-lg border border-border px-2.5 py-1.5 text-[12.5px] text-danger transition hover:border-danger"
+          className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-danger transition hover:border-danger"
           onClick={deleteSession}
         >
           🗑
@@ -348,7 +430,7 @@ export default function Chat() {
             );
           })}
           {error && (
-            <div className="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger">
+            <div className="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[14px] text-danger">
               ⚠️ {error}
             </div>
           )}
@@ -357,7 +439,7 @@ export default function Chat() {
 
       {/* 降级条 */}
       {status?.degraded && (
-        <div className="shrink-0 border-t border-warning/30 bg-warning-soft px-4 py-2 text-[12.5px] text-warning">
+        <div className="shrink-0 border-t border-warning/30 bg-warning-soft px-4 py-2 text-[13.5px] text-warning">
           ⚠️ <b>LLM 服务暂不可用</b>，已自动降级为规则引擎模式：评分、客户管理、PDF 报告不受影响，AI 对话与策略生成将使用兜底回复。
         </div>
       )}
@@ -376,7 +458,7 @@ export default function Chat() {
               ref={inputRef}
               rows={1}
               placeholder="输入消息，或描述你关心的客户与问题…"
-              className="max-h-32 flex-1 resize-none bg-transparent text-[13.5px] text-ink outline-none"
+              className="max-h-32 flex-1 resize-none bg-transparent text-[14.5px] text-ink outline-none"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -385,7 +467,7 @@ export default function Chat() {
               }}
             />
             <button
-              className="rounded-lg bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-hover disabled:opacity-50"
+              className="rounded-lg bg-accent px-3.5 py-1.5 text-[14px] font-medium text-white transition hover:bg-accent-hover disabled:opacity-50"
               onClick={sendMessage}
               disabled={busy}
             >
@@ -404,7 +486,7 @@ export default function Chat() {
 function QuickChip({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
   return (
     <button
-      className="shrink-0 rounded-full border border-border-strong bg-surface px-3 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:bg-surface-2 hover:text-accent disabled:opacity-40"
+      className="shrink-0 rounded-full border border-border-strong bg-surface px-3 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:bg-surface-2 hover:text-accent disabled:opacity-40"
       onClick={onClick}
       disabled={disabled}
     >
@@ -437,7 +519,7 @@ function MessageView({
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-xl rounded-tr-sm bg-ink-2 px-3.5 py-2.5 text-[13.5px] text-white">
+        <div className="max-w-[80%] rounded-xl rounded-tr-sm bg-ink-2 px-3.5 py-2.5 text-[14.5px] text-white">
           {msg.content}
         </div>
       </div>
@@ -445,7 +527,7 @@ function MessageView({
   }
   return (
     <div className="flex gap-2.5">
-      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand/10 text-[15px]">🤖</div>
+      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand/10 text-[16px]">🤖</div>
       <div className="min-w-0 flex-1">
         {assessment && <div className="mb-2"><HealthCard assessment={assessment} trend={trend ?? null} compact onAlertAI={undefined} /></div>}
         {msg.content && (
@@ -467,18 +549,18 @@ function MessageView({
           <ToolBtn active={feedback === "down"} onClick={() => onFeedback("down")} label="👎" />
           <span className="mx-1 h-3.5 w-px bg-border" />
           <button
-            className={`rounded-md px-2 py-1 text-[12px] transition ${adopted ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-surface-2"}`}
+            className={`rounded-md px-2 py-1 text-[13px] transition ${adopted ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-surface-2"}`}
             onClick={onAdopt}
           >
             {adopted ? "✓ 已采纳（proposed）" : "⭐ 采纳策略"}
           </button>
           <button
-            className="rounded-md px-2 py-1 text-[12px] text-ink-2 transition hover:bg-surface-2"
+            className="rounded-md px-2 py-1 text-[13px] text-ink-2 transition hover:bg-surface-2"
             onClick={() => navigator.clipboard?.writeText(msg.content)}
           >
             📋 复制
           </button>
-          {msg.degraded && <span className="ml-auto text-[11px] text-warning">规则引擎兜底</span>}
+          {msg.degraded && <span className="ml-auto text-[12px] text-warning">规则引擎兜底</span>}
         </div>
       </div>
     </div>
@@ -488,7 +570,7 @@ function MessageView({
 function ToolBtn({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
     <button
-      className={`rounded-md px-2 py-1 text-[13px] transition ${active ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-surface-2"}`}
+      className={`rounded-md px-2 py-1 text-[14px] transition ${active ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-surface-2"}`}
       onClick={onClick}
     >
       {label}
@@ -503,28 +585,28 @@ function TraceDrawer({ reference, onClose }: { reference: KnowledgeReference; on
       <div className="overlay-mask" onClick={onClose} />
       <div className="drawer-panel">
         <div className="flex items-center border-b border-border px-4 py-3">
-          <h3 className="flex-1 text-[15px] font-semibold text-ink">📎 知识溯源</h3>
+          <h3 className="flex-1 text-[16px] font-semibold text-ink">📎 知识溯源</h3>
           <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
             ✕
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="rounded-xl border border-border bg-surface-2 p-3">
-            <div className="text-[14px] font-semibold text-ink">{reference.title || "—"}</div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+            <div className="text-[15px] font-semibold text-ink">{reference.title || "—"}</div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[13px] text-muted">
               {reference.category && <span>分类：{reference.category}</span>}
               {reference.score ? <span>相似度：<b className="text-accent">{reference.score.toFixed(2)}</b></span> : null}
             </div>
           </div>
-          <div className="mb-1.5 mt-3 text-[11.5px] text-muted">命中切片原文</div>
-          <div className="rounded-xl border border-border-soft bg-surface p-3 text-[13px] leading-relaxed text-ink-2">{snippet}</div>
-          <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[12px] text-muted">
+          <div className="mb-1.5 mt-3 text-[12.5px] text-muted">命中切片原文</div>
+          <div className="rounded-xl border border-border-soft bg-surface p-3 text-[14px] leading-relaxed text-ink-2">{snippet}</div>
+          <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[13px] text-muted">
             💡 该片段由检索链路召回：metadata 过滤 → dense 向量召回 → Rerank 重排。
           </div>
         </div>
         <div className="flex items-center gap-2 border-t border-border px-4 py-3">
           <span className="mr-auto" />
-          <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={onClose}>
+          <button className="rounded-lg border border-border px-3 py-2 text-[14px] text-ink-2" onClick={onClose}>
             关闭
           </button>
         </div>
@@ -545,7 +627,7 @@ function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (cid
       <div className="overlay-mask" onClick={onClose} />
       <div className="modal-panel">
         <div className="flex items-center border-b border-border px-4 py-3">
-          <h3 className="flex-1 text-[15px] font-semibold text-ink">选择客户</h3>
+          <h3 className="flex-1 text-[16px] font-semibold text-ink">选择客户</h3>
           <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
             ✕
           </button>
@@ -556,20 +638,20 @@ function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (cid
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="搜索客户…"
-            className="mb-3 w-full rounded-lg border border-border-strong px-3 py-2 text-[13px] outline-none focus:border-accent"
+            className="mb-3 w-full rounded-lg border border-border-strong px-3 py-2 text-[14px] outline-none focus:border-accent"
           />
           <div className="max-h-[50vh] space-y-1.5 overflow-y-auto">
             {filtered.map((c) => (
               <button
                 key={c.id}
-                className="flex w-full items-center justify-between rounded-lg border border-border bg-surface px-3 py-2.5 text-left text-[13.5px] transition hover:border-accent"
+                className="flex w-full items-center justify-between rounded-lg border border-border bg-surface px-3 py-2.5 text-left text-[14.5px] transition hover:border-accent"
                 onClick={() => onPick(c.id)}
               >
                 <span className="font-medium text-ink">{c.customer_name}</span>
-                <span className="text-[12px] text-muted">{c.industry || "—"}</span>
+                <span className="text-[13px] text-muted">{c.industry || "—"}</span>
               </button>
             ))}
-            {filtered.length === 0 && <div className="py-6 text-center text-[13px] text-muted">无匹配客户</div>}
+            {filtered.length === 0 && <div className="py-6 text-center text-[14px] text-muted">无匹配客户</div>}
           </div>
         </div>
       </div>
@@ -595,10 +677,10 @@ function WelcomeScreen({
       <div className="w-full max-w-[820px] px-6 py-10">
         <div className="mb-8 flex flex-col items-center text-center">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-[22px]">🤖</div>
-            <h1 className="text-[24px] font-semibold tracking-tight text-ink">你好，我是客情分析助手</h1>
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-[23px]">🤖</div>
+            <h1 className="text-[25px] font-semibold tracking-tight text-ink">你好，我是客情分析助手</h1>
           </div>
-          <p className="mt-2 text-[13.5px] leading-relaxed text-muted">
+          <p className="mt-2 text-[14.5px] leading-relaxed text-muted">
             结合<strong className="font-medium text-ink">量化评估引擎</strong>（因子评分）与<strong className="font-medium text-ink">知识增强引擎</strong>（RAG 检索），帮你分析客户健康度、排查风险、制定可执行策略。
           </p>
         </div>
@@ -610,12 +692,12 @@ function WelcomeScreen({
               className="flex flex-col items-center gap-2.5 rounded-xl border border-border bg-surface p-5 text-center transition hover:border-accent/60 hover:bg-surface-3"
               onClick={() => (e.nav ? onKnowledge() : onPick(e.sc!))}
             >
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft/70 text-[18px]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft/70 text-[19px]">
                 {e.icon}
               </div>
               <div>
-                <div className="text-[14px] font-medium text-ink">{e.title}</div>
-                <div className="mt-1 text-[12.5px] leading-relaxed text-muted">{e.desc}</div>
+                <div className="text-[15px] font-medium text-ink">{e.title}</div>
+                <div className="mt-1 text-[13.5px] leading-relaxed text-muted">{e.desc}</div>
               </div>
             </button>
           ))}

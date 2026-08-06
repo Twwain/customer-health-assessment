@@ -1,7 +1,7 @@
-"""配置驱动的评分策略（SOW §3.0 M0）。
+"""配置驱动的评分策略。
 
 维度、因子、权重、打分规则、预警规则全部来自 ``backend/scoring_config.yaml``。
-默认配置等价于 v1.0 的 4 维度加权算法（关系25 + 满意25 + 价值25 + 风险25 = 100），
+默认配置为 7 维度加权算法（满分 100），
 改配置即可调整算法，无需改代码。
 """
 
@@ -22,15 +22,6 @@ from .rules import (
     render_detail,
     resolve_field,
 )
-
-# 兼容旧代码的维度别名：私有方法名 → 配置中的维度 key
-_LEGACY_DIMENSION_KEYS = {
-    "_relationship_score": "relationship",
-    "_satisfaction_score": "satisfaction",
-    "_business_score": "business",
-    "_risk_score": "risk",
-}
-
 
 class ConfigDrivenStrategy(ScoringStrategy):
     """读取 scoring_config.yaml 计算基础客情分。"""
@@ -135,18 +126,3 @@ class ConfigDrivenStrategy(ScoringStrategy):
             if dim.key == key or dim.name == key:
                 return self._to_schema(evaluate_dimension(dim, c, today))
         raise KeyError(f"scoring_config.yaml 中不存在维度 `{key}`")
-
-    # ── 向后兼容：v1.0 的四个维度私有方法 ──────────────────────────────
-    # 现有调用方（含单元测试）仍可按维度单独取分；维度本身已由配置驱动。
-
-    def _relationship_score(self, c: Customer) -> DimensionScore:
-        return self._dimension_score(_LEGACY_DIMENSION_KEYS["_relationship_score"], c)
-
-    def _satisfaction_score(self, c: Customer) -> DimensionScore:
-        return self._dimension_score(_LEGACY_DIMENSION_KEYS["_satisfaction_score"], c)
-
-    def _business_score(self, c: Customer) -> DimensionScore:
-        return self._dimension_score(_LEGACY_DIMENSION_KEYS["_business_score"], c)
-
-    def _risk_score(self, c: Customer) -> DimensionScore:
-        return self._dimension_score(_LEGACY_DIMENSION_KEYS["_risk_score"], c)

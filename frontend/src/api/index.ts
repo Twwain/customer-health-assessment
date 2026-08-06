@@ -5,6 +5,7 @@ import type {
   AssessmentTrendResponse,
   ChatSessionDetail,
   ChatSessionItem,
+  ChatEvent,
   ChatSessionListResponse,
   ChatTurnResponse,
   CustomerListResponse,
@@ -38,6 +39,26 @@ export const customers = {
     form.append("file", file);
     return http.post("/customers/import", form).then((r) => r.data);
   },
+  importTemplate: () =>
+    http.get<Blob>("/customers/import-template", { responseType: "blob" }).then((r) => r.data),
+  pdfJob: (customerId: number, includeAi: boolean) =>
+    http
+      .post<{ job_id: string; status: string }>(`/assessment/${customerId}/pdf/jobs`, null, {
+        params: { include_ai: includeAi },
+      })
+      .then((r) => r.data),
+  pdfJobStatus: (customerId: number, jobId: string) =>
+    http
+      .get<{ job_id: string; status: string; error?: string }>(
+        `/assessment/${customerId}/pdf/jobs/${jobId}`,
+      )
+      .then((r) => r.data),
+  pdfDownload: (customerId: number, jobId: string) =>
+    http
+      .get<Blob>(`/assessment/${customerId}/pdf/jobs/${jobId}/download`, {
+        responseType: "blob",
+      })
+      .then((r) => r.data),
   industries: () => http.get<string[]>("/customers/industries").then((r) => r.data),
   factorConfig: () =>
     http.get<FactorConfigResponse>("/customers/factor-config").then((r) => r.data),
@@ -113,7 +134,7 @@ export const knowledge = {
 export async function streamChat(
   url: string,
   body: unknown,
-  onEvent: (ev: { type: string; data: any }) => void,
+  onEvent: (ev: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(url, {

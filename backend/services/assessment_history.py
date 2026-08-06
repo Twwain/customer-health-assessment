@@ -1,8 +1,8 @@
-"""评估历史记录服务（SOW §3.5.2 / §5 / §6.3）。
+"""评估历史记录服务。
 
 每次评估落一条 `AssessmentHistory` 快照，用于：
 - 预警趋势箭头（最近两次总分差值）
-- 健康分历史曲线（Recharts）
+- 客情评分历史趋势曲线
 - AI 解读预警时的上下文（"近 3 次评估持续下滑"）
 """
 
@@ -109,7 +109,7 @@ def record_assessment(
 def attach_strategy_snapshot(db: Session, customer_id: int, items: list, commit: bool = True) -> bool:
     """把 AI 生成的策略回写到最近一条评估快照。
 
-    PDF 报告（SOW §3.5.1）与"上次给过什么建议"的追溯都依赖这份快照；
+    PDF 报告与"上次给过什么建议"的追溯都依赖这份快照；
     没有历史记录时静默跳过，不影响对话主流程。
     """
     if not items:

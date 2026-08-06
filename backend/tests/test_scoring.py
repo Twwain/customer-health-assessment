@@ -1,8 +1,21 @@
+"""配置驱动评分引擎端到端测试（7 维度 × 60 因子）。
+
+覆盖：
+1. 默认空因子客户的最低分口径（客观事实驱动，无记录即低分）
+2. 60 因子全取最高档 → 总分 100 / 健康
+3. 代表性因子分档规则、RISK 风险因子扣分
+4. 自动预警触发、机会点建议
+5. 两种引擎（RuleBasedStrategy / HealthScoreEngine）输出一致
+"""
+
 import datetime
+
 import pytest
+
 from models import Customer
-from services.scoring.rule_based import RuleBasedStrategy
+from factories import MAX_FACTORS
 from services.health_score import HealthScoreEngine
+from services.scoring.rule_based import RuleBasedStrategy
 
 
 def base_customer(**overrides):
@@ -18,309 +31,187 @@ def base_customer(**overrides):
     c.risk_signals = None
     c.competitor_involvement = False
     c.growth_potential = "中"
+    c.custom_fields = {}
     for k, v in overrides.items():
         setattr(c, k, v)
     return c
-
 
 def engines():
     return [RuleBasedStrategy(), HealthScoreEngine()]
 
 
-# ── Dimension: relationship ──
+def _dim_score(result, key):
+    return next(d for d in result.dimensions if d.key == key)
 
-@pytest.mark.parametrize("years,expected", [(5, 10), (3, 7), (1, 4), (0.5, 0)])
-def test_cooperation_years_bracket(years, expected):
+
+# ── 总分与等级 ─────────────────────────────────────────────────────────────
+
+
+def test_empty_factors_score_minimum():
     for eng in engines():
-        c = base_customer(cooperation_years=years)
-        dim = eng._relationship_score(c)
-        assert dim.score >= expected  # other parts contribute too
+        result = eng.evaluate(base_customer())
+        assert result.total_score == pytest.approx(13.1)
+        assert result.level == "高危"
+        assert result.max_score == 100
 
 
-@pytest.mark.parametrize("freq,expected", [
-    ("每周", 10), ("双周", 7), ("每月", 5), ("每季度", 3), ("不定期", 1)
-])
-def test_contact_frequency(freq, expected):
+def test_maxed_factors_score_100():
     for eng in engines():
-        c = base_customer(contact_frequency=freq)
-        dim = eng._relationship_score(c)
-        assert any(f"+{expected}分" in d for d in dim.details)
-
-
-@pytest.mark.parametrize("days_ago,expected_min", [(5, 5), (14, 3), (60, 1), (120, 0)])
-def test_last_contact_recency(days_ago, expected_min):
-    for eng in engines():
-        c = base_customer(last_contact_date=datetime.date.today() - datetime.timedelta(days=days_ago))
-        dim = eng._relationship_score(c)
-        # The recency component is at least expected_min
-        pass  # Signal: test passes if no crash
-
-
-def test_last_contact_none():
-    for eng in engines():
-        c = base_customer(last_contact_date=None)
-        dim = eng._relationship_score(c)
-        assert dim.score < 25
-
-
-def test_contact_frequency_unknown_defaults_to_3():
-    for eng in engines():
-        c = base_customer(contact_frequency="unknown")
-        dim = eng._relationship_score(c)
-        # unknown → default 3 in freq_map, so +3 from frequency
-        assert any("+3" in d for d in dim.details)
-
-
-# ── Dimension: satisfaction ──
-
-@pytest.mark.parametrize("rating,expected", [(10, 25), (5, 12.5), (1, 2.5)])
-def test_satisfaction_score(rating, expected):
-    for eng in engines():
-        c = base_customer(customer_satisfaction=rating)
-        dim = eng._satisfaction_score(c)
-        assert dim.score == expected
-
-
-# ── Dimension: business ──
-
-@pytest.mark.parametrize("amount,expected", [(600, 15), (200, 10), (80, 6), (30, 3), (0, 0)])
-def test_contract_amount_bracket(amount, expected):
-    for eng in engines():
-        c = base_customer(contract_amount=amount)
-        dim = eng._business_score(c)
-        assert any(f"+{expected}分" in d for d in dim.details)
-
-
-@pytest.mark.parametrize("status,expected", [("正常", 10), ("部分逾期", 4), ("严重逾期", 0)])
-def test_payment_status_score(status, expected):
-    for eng in engines():
-        c = base_customer(payment_status=status)
-        dim = eng._business_score(c)
-        assert any(str(expected) in d for d in dim.details if "回款" in d)
-
-
-def test_payment_status_unknown_defaults_to_5():
-    for eng in engines():
-        c = base_customer(payment_status="unknown")
-        dim = eng._business_score(c)
-        assert any("+5" in d for d in dim.details if "回款" in d)
-
-
-# ── Dimension: risk ──
-
-def test_risk_no_factors():
-    for eng in engines():
-        c = base_customer(growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 25
-
-
-def test_risk_signals_deduct():
-    for eng in engines():
-        c = base_customer(risk_signals="法律纠纷", growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 17  # 25 - 8
-
-
-@pytest.mark.parametrize("placeholder", ["无", "暂无", "没有", "无风险", "none", "N/A", "-", " "])
-def test_risk_signals_placeholder_no_deduct(placeholder):
-    """占位空值文案（"无"/"暂无"等）视为无风险信号，不扣分也不触发预警。"""
-    for eng in engines():
-        c = base_customer(risk_signals=placeholder, growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 25
-        result = eng.evaluate(c)
-        assert not any("风险信号" in a for a in result.risk_alerts)
-
-
-def test_competitor_deduct():
-    for eng in engines():
-        c = base_customer(competitor_involvement=True, growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 15  # 25 - 10
-
-
-def test_severe_overdue_deduct():
-    for eng in engines():
-        c = base_customer(payment_status="严重逾期", growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 18  # 25 - 7
-
-
-def test_partial_overdue_deduct():
-    for eng in engines():
-        c = base_customer(payment_status="部分逾期", growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 21  # 25 - 4
-
-
-def test_growth_potential_bonus_high():
-    for eng in engines():
-        c = base_customer(growth_potential="高")
-        dim = eng._risk_score(c)
-        # Growth bonus +5 would give 30, but ceiling clamps to 25
-        assert dim.score == 25
-
-
-def test_growth_potential_bonus_medium():
-    for eng in engines():
-        c = base_customer(growth_potential="中")
-        dim = eng._risk_score(c)
-        # Growth bonus +2 would give 27, but ceiling clamps to 25
-        assert dim.score == 25
-
-
-def test_growth_potential_low():
-    for eng in engines():
-        c = base_customer(growth_potential="低")
-        dim = eng._risk_score(c)
-        assert dim.score == 25
-
-
-def test_growth_potential_unknown_defaults_to_0():
-    for eng in engines():
-        c = base_customer(growth_potential="unknown")
-        dim = eng._risk_score(c)
-        assert dim.score == 25
-
-
-def test_all_risks_floor_is_zero():
-    """All risk deductions + low growth → score should be 0, NOT 2.5."""
-    for eng in engines():
-        c = base_customer(
-            risk_signals="重大纠纷",
-            competitor_involvement=True,
-            payment_status="严重逾期",
-            growth_potential="低",
+        result = eng.evaluate(
+            base_customer(custom_fields=MAX_FACTORS, customer_satisfaction=10)
         )
-        dim = eng._risk_score(c)
-        # 25 - 8 - 10 - 7 + 0 = 0, clamped to 0
-        assert dim.score == 0
+        assert result.total_score == pytest.approx(100.0)
+        assert result.level == "健康"
 
 
-def test_risk_score_ceiling_is_25():
-    """Growth bonus should not push score above 25."""
+def test_total_is_sum_of_7_dimensions():
     for eng in engines():
-        c = base_customer(growth_potential="高")
-        dim = eng._risk_score(c)
-        assert dim.score <= 25
-
-
-# ── Total score and level ──
-
-@pytest.mark.parametrize("total,level", [(85, "优秀"), (70, "良好"), (55, "一般"), (54, "风险")])
-def test_level_thresholds(total, level):
-    # Build customer that hits exactly the score
-    # Use satisfaction dimension to control score precisely
-    for eng in engines():
-        c = base_customer(
-            cooperation_years=0,
-            contact_frequency="不定期",
-            last_contact_date=None,
-            customer_satisfaction=0,
-            contract_amount=0,
-            payment_status="严重逾期",
-            risk_signals="X",
-            competitor_involvement=True,
-            growth_potential="低",
-        )
-        # All dims are 0, override with fake to test _level
-        assert eng._level(total)[0] == level
-
-
-def test_total_is_sum_of_4_dimensions():
-    for eng in engines():
-        c = base_customer()
-        result = eng.evaluate(c)
+        result = eng.evaluate(base_customer())
         d_total = sum(d.score for d in result.dimensions)
         assert abs(result.total_score - d_total) < 0.1
 
 
-# ── Risk alerts ──
+def test_level_thresholds_come_from_config():
+    """等级表来自配置：健康80 / 亚健康60 / 风险40 / 高危0。"""
+    config = RuleBasedStrategy().config
+    assert [lv.name for lv in config.levels] == ["健康", "亚健康", "风险", "高危"]
+    assert [lv.min_score for lv in config.levels] == [80, 60, 40, 0]
 
-def test_alert_last_contact_over_90_days():
+
+# ── 分维度计分 ─────────────────────────────────────────────────────────────
+
+
+def test_kcr_dimension_sums_to_30_at_max():
+    c = base_customer(custom_fields={k: v for k, v in MAX_FACTORS.items() if k.startswith("kcr")})
     for eng in engines():
-        c = base_customer(last_contact_date=datetime.date.today() - datetime.timedelta(days=100))
-        result = eng.evaluate(c)
-        assert any("90天" in a for a in result.risk_alerts)
+        dim = _dim_score(eng.evaluate(c), "kcr")
+        assert dim.score == pytest.approx(30.0)
+        assert dim.max_score == 30
 
 
-def test_alert_last_contact_none():
+def test_ci_dimension_is_zero_without_insight_data():
+    """CI（新增维度）：不掌握客户战略/采购决策/价值量化 → 0 分。"""
     for eng in engines():
-        c = base_customer(last_contact_date=None)
-        result = eng.evaluate(c)
-        assert any("90天" in a for a in result.risk_alerts)
+        dim = _dim_score(eng.evaluate(base_customer()), "ci")
+        assert dim.score == 0
+        assert dim.max_score == 9
 
 
-def test_alert_low_satisfaction():
+def test_his_09_satisfaction_brackets():
+    """HIS-09 满意度调研（模型列 1-10）：9/7/6 三档 + 默认低档。"""
     for eng in engines():
-        c = base_customer(customer_satisfaction=3)
-        result = eng.evaluate(c)
-        assert any("满意度" in a for a in result.risk_alerts)
+        for rating, tail in ((10, "+0.9分"), (8, "+0.63分"), (6, "+0.36分"), (3, "+0.09分")):
+            dim = _dim_score(eng.evaluate(base_customer(customer_satisfaction=rating)), "his")
+            assert any(d.startswith("客户满意度") and d.endswith(tail) for d in dim.details)
 
 
-def test_no_alert_satisfaction_5():
+def test_risk_factors_worst_case_lowers_score():
+    """RISK 风险信号因子全取最差档 → 维度分 12 → 1.08。"""
+    c = base_customer(
+        custom_fields={
+            "risk_05": "≥2人变动",
+            "risk_06": "下降≥20%",
+            "risk_07": "是且进展顺利",
+            "risk_08": "≥2次或重大投诉",
+            "risk_08b": "高(<60%)",
+            "risk_08c": "危机",
+        }
+    )
     for eng in engines():
-        c = base_customer(customer_satisfaction=5)
-        result = eng.evaluate(c)
-        assert not any("满意度" in a for a in result.risk_alerts)
+        dim = _dim_score(eng.evaluate(c), "risk")
+        assert dim.score == pytest.approx(1.08)
 
 
-def test_alert_competitor():
+# ── 预警与建议 ─────────────────────────────────────────────────────────────
+
+
+def test_ppt_alerts_trigger():
+    """自动预警（字段级可落地部分）全部触发，级别正确。"""
+    c = base_customer(
+        custom_fields={
+            "kcr_08": "无",
+            "risk_05": "≥2人变动",
+            "risk_06": "下降≥20%",
+            "risk_07": "是且进展顺利",
+            "risk_08": "≥2次或重大投诉",
+            "risk_08b": "高(<60%)",
+            "risk_08c": "危机",
+        }
+    )
     for eng in engines():
-        c = base_customer(competitor_involvement=True)
-        result = eng.evaluate(c)
-        assert any("竞品" in a for a in result.risk_alerts)
+        alerts = {a.id: a.level for a in eng.evaluate(c).alerts}
+        assert alerts["ces_deterioration"] == "high"
+        assert alerts["customer_business_crisis"] == "high"
+        assert alerts["competitor_poc"] == "high"
+        assert alerts["relationship_deterioration"] == "high"
+        assert alerts["key_person_churn"] == "medium"
+        assert alerts["interaction_decline"] == "medium"
+        assert alerts["champion_missing"] == "medium"
 
 
-def test_alert_payment_abnormal():
+def test_legacy_alerts_trigger():
     for eng in engines():
-        c = base_customer(payment_status="部分逾期")
+        c = base_customer(
+            last_contact_date=datetime.date.today() - datetime.timedelta(days=100),
+            customer_satisfaction=3,
+            competitor_involvement=True,
+            payment_status="部分逾期",
+            risk_signals="预算削减",
+        )
         result = eng.evaluate(c)
-        assert any("回款" in a for a in result.risk_alerts)
+        ids = [a.id for a in result.alerts]
+        assert ids == [
+            "stale_contact",
+            "competitor_involved",
+            "payment_abnormal",
+            "low_satisfaction",
+            "risk_signal",
+        ]
+        assert result.suggestions[0] == "建议尽快安排客户拜访或沟通"
 
 
-# ── Suggestions ──
-
-def test_suggestion_high_growth_and_satisfaction():
+def test_no_alerts_on_healthy_customer():
+    c = base_customer(custom_fields=MAX_FACTORS, customer_satisfaction=10)
     for eng in engines():
-        c = base_customer(growth_potential="高", customer_satisfaction=8)
         result = eng.evaluate(c)
-        assert any("增长潜力" in s for s in result.suggestions)
+        assert result.risk_alerts == []
 
 
-def test_no_growth_suggestion_when_growth_not_high():
+def test_opportunity_suggestions():
+    c = base_customer(
+        custom_fields={"his_04": "≥50%", "his_09b": "成长期", "kcr_07": "≥60%支持且无反对"},
+        customer_satisfaction=8,
+    )
     for eng in engines():
-        c = base_customer(growth_potential="中", customer_satisfaction=8)
         result = eng.evaluate(c)
-        assert not any("增长潜力" in s for s in result.suggestions)
+        assert any(s.startswith("该客户钱包份额高") for s in result.suggestions)
+        assert any(s.startswith("客户处于成长期") for s in result.suggestions)
 
 
-# ── Response shape ──
+# ── 响应形状与引擎一致性 ─────────────────────────────────────────────────────
 
-def test_response_has_customer_info():
+
+def test_response_has_seven_dimensions():
     for eng in engines():
-        c = base_customer()
-        result = eng.evaluate(c)
+        result = eng.evaluate(base_customer())
         assert result.customer_id == 1
         assert result.customer_name == "测试客户"
-        assert len(result.dimensions) == 4
+        assert [d.key for d in result.dimensions] == ["kcr", "er", "or", "ci", "his", "risk", "svc"]
 
 
 def test_response_total_score_in_range():
     for eng in engines():
-        c = base_customer()
-        result = eng.evaluate(c)
+        result = eng.evaluate(base_customer())
         assert 0 <= result.total_score <= 100
 
 
 def test_both_engines_produce_same_result():
-    """RuleBasedStrategy and HealthScoreEngine should produce identical output."""
     rule = RuleBasedStrategy()
     health = HealthScoreEngine()
-    c = base_customer()
+    c = base_customer(custom_fields=MAX_FACTORS, customer_satisfaction=10)
     r1 = rule.evaluate(c)
     r2 = health.evaluate(c)
     assert r1.total_score == r2.total_score
     assert r1.level == r2.level
     assert len(r1.risk_alerts) == len(r2.risk_alerts)
+    assert [d.score for d in r1.dimensions] == [d.score for d in r2.dimensions]

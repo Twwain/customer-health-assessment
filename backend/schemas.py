@@ -108,7 +108,7 @@ class OverviewResponse(BaseModel):
 
 
 # ── 因子配置（GET /api/customers/factor-config）─────────────────────────────
-# 前端据此动态渲染客情因子表单，新增因子无需改前端代码（SOW §3.0.2 / §6.2）。
+# 前端据此动态渲染客情因子表单，新增因子无需改前端代码。
 
 
 class FactorInputSpec(BaseModel):
@@ -128,6 +128,7 @@ class FactorConfigItem(BaseModel):
     source: str = Field(default="model", description="model=模型列 / custom_fields=扩展字段")
     source_role: str = Field(default="", description="因子来源角色：销售/研发/市场/HR ...")
     description: str = ""
+    rule_text: str = Field(default="", description="打分规则的人类可读文案（如 ≥100% → 2.1分）")
     rule_type: str = ""
     editable: bool = True
     input: FactorInputSpec
@@ -174,7 +175,7 @@ class FactorUpdateResponse(BaseModel):
     ignored_fields: list[str] = Field(default_factory=list)
 
 
-# ── 评估历史与趋势（SOW §3.5.2 / §6.3）─────────────────────────────────────
+# ── 评估历史与趋势─────────────────────────────────────
 
 
 class AssessmentHistoryItem(BaseModel):
@@ -227,7 +228,7 @@ class AssessmentTrendResponse(BaseModel):
     )
 
 
-# ── AI 对话（SOW §3.2 / §5.1 / §6.1）───────────────────────────────────────
+# ── AI 对话───────────────────────────────────────
 
 
 class StrategyItem(BaseModel):
@@ -332,7 +333,7 @@ class MessageFeedbackResponse(BaseModel):
 
 
 class LLMStatusResponse(BaseModel):
-    """前端顶栏"AI 就绪 / 已降级"状态条数据源（SOW §7 降级可见）。"""
+    """前端 AI 服务状态数据源（Chat 页降级提示条等）。"""
 
     available: bool = False
     degraded: bool = True
@@ -346,7 +347,7 @@ class LLMStatusResponse(BaseModel):
     scenarios: list[str] = Field(default_factory=list)
 
 
-# ════════════════════════ 知识库 RAG（SOW §3.3 / §6.4）═══════════════════════
+# ════════════════════════ 知识库 RAG═══════════════════════
 
 
 class KnowledgeItemResponse(BaseModel):
@@ -411,7 +412,7 @@ class KnowledgeUploadResponse(BaseModel):
 
 
 class KnowledgeUpdateRequest(BaseModel):
-    """仅编辑元数据（正文不可编辑，SOW §2.2）。"""
+    """仅编辑元数据（正文不可编辑，）。"""
 
     title: str | None = None
     category: str | None = None
@@ -436,7 +437,7 @@ class KnowledgeStatusResponse(BaseModel):
     categories: list[str] = Field(default_factory=list)
 
 
-# ── 结构化知识指标（SOW §3.3.1 知识分层：精确数值走 SQLite 精确查询）─────────
+# ── 结构化知识指标─────────
 
 
 class KnowledgeMetricCreate(BaseModel):

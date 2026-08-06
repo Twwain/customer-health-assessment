@@ -1,4 +1,4 @@
-"""知识库接口（SOW §6.4）。
+"""知识库接口。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -192,7 +192,7 @@ def delete_item(item_id: int, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/items/{item_id}/approve", response_model=KnowledgeItemResponse)
 def approve(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemResponse:
-    """审核通过：proposed → canonical（SOW §3.3.1，Q7 无权限校验）。"""
+    """审核通过：proposed → canonical。"""
     item = _svc(db).approve_item(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="知识条目不存在")
@@ -209,7 +209,7 @@ def reindex(
     return KnowledgeReindexResponse(reindexed=count)
 
 
-# ── 结构化知识指标（SOW §3.3.1：精确数值按行业/规模/地域精确查询）─────────────
+# ── 结构化知识指标─────────────
 
 
 @router.get("/metrics", response_model=KnowledgeMetricListResponse)

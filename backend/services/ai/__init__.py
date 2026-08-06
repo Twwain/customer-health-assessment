@@ -1,6 +1,6 @@
-"""AI 服务层（SOW §4.2 services/ai）。
+"""AI 服务层。
 
-- ``llm_adapter``      统一 chat_completion 适配层（OpenAI 兼容，DeepSeek + 智谱）
+- ``llm_adapter``      统一 chat_completion 适配层（大模型兼容协议，服务商可配置）
 - ``prompt_templates`` 场景化 Prompt 模板（外部 YAML 可配）
 - ``guardrails``       输入/输出安全护栏
 - ``context_builder``  把量化评估结果组装成 LLM 上下文

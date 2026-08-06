@@ -1,4 +1,4 @@
-"""AI 对话接口（SOW §6.1）。
+"""AI 对话接口。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -251,7 +251,7 @@ def regenerate(session_id: int, payload: ChatRequest | None = None, db: Session 
         )
         return StreamingResponse(generator, media_type="text/event-stream", headers=SSE_HEADERS)
 
-    content, exclude_id = chat_engine.prepare_regenerate(db, session)
+    content, exclude_id = chat_engine.prepare_regenerate(db, session, scenario=scenario)
     if not content:
         raise HTTPException(status_code=400, detail="没有可重新生成的消息")
     result = chat_engine.complete_turn(
@@ -273,7 +273,7 @@ def regenerate(session_id: int, payload: ChatRequest | None = None, db: Session 
 def message_feedback(
     message_id: int, payload: MessageFeedbackRequest, db: Session = Depends(get_db)
 ):
-    """点赞/点踩，回流策略质量与采纳率（SOW §6.1 / §7 可观测性）。"""
+    """点赞/点踩，回流策略质量与采纳率。"""
     if payload.feedback not in MESSAGE_FEEDBACKS:
         raise HTTPException(status_code=400, detail="feedback 仅支持 up / down / 空")
     try:

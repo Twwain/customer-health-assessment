@@ -1,8 +1,8 @@
-"""策略结构化处理（SOW §3.4 / §5.1 ChatMessage.strategy_items）。
+"""策略结构化处理。
 
 本文件负责两件事：
 1. 从 LLM 输出里剥离 ```json 代码块，解析成结构化策略条目（前端 StrategyItem 直接渲染）；
-2. LLM 不可用时，用规则引擎的预警与建议生成三层降级策略（SOW §7 降级不影响基础功能）。
+2. LLM 不可用时，用规则引擎的预警与建议生成三层降级策略。
 
 M4 接入 LangGraph Agent Loop 后，生成逻辑迁到 graph_builder，
 本文件的**解析与降级**能力仍然复用。
@@ -50,8 +50,9 @@ URGENCY_ALIASES = {
     "低": "low",
 }
 
-# 兼容 ```json / ``` 两种围栏
-_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)
+# 兼容 ```json / ``` 两种围栏；按围栏整体截取后交给 json.loads，
+# 支持嵌套对象（如 {"strategies": [...]}），避免非贪婪匹配截断内层花括号
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 _ALERT_PRIORITY = {
     "high": ("recommended", "high"),
@@ -69,7 +70,7 @@ def _norm_urgency(value: Any) -> str:
 
 
 def normalize_item(raw: dict) -> dict | None:
-    """把任意形态的策略字典规整成 SOW §5.1 约定的字段集。"""
+    """把任意形态的策略字典规整成  约定的字段集。"""
     if not isinstance(raw, dict):
         return None
     title = str(raw.get("title") or raw.get("name") or "").strip()
@@ -95,6 +96,17 @@ def _sort_key(item: dict) -> tuple[int, int]:
     )
 
 
+def _extract_items(payload: object) -> list:
+    """从解析后的 JSON payload 提取策略条目：list 原样返回，dict 兼容多个键名。"""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("strategies", "items", "strategy_items"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+    return []
+
+
 def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
     """返回 ``(展示正文, 结构化策略列表)``。
 
@@ -106,21 +118,14 @@ def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
 
     items: list[dict] = []
     body = text
-    for match in list(_JSON_BLOCK_RE.finditer(text)):
-        snippet = match.group(1)
+    for match in list(_JSON_FENCE_RE.finditer(text)):
+        snippet = match.group(1).strip()
         try:
             payload = json.loads(snippet)
         except json.JSONDecodeError:
             continue
 
-        raw_items: list = []
-        if isinstance(payload, list):
-            raw_items = payload
-        elif isinstance(payload, dict):
-            for key in ("strategies", "items", "strategy_items"):
-                if isinstance(payload.get(key), list):
-                    raw_items = payload[key]
-                    break
+        raw_items = _extract_items(payload)
         if not raw_items:
             continue
 
@@ -129,6 +134,25 @@ def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
             if item:
                 items.append(item)
         body = body.replace(match.group(0), "")
+
+    # 容错：输出被 max_tokens 截断导致围栏未闭合时，尝试解析从最后一个 ```json 到末尾的片段
+    if not items:
+        idx = text.rfind("```json")
+        if idx >= 0:
+            tail = text[idx + 7 :].strip()
+            if tail:
+                try:
+                    payload = json.loads(tail)
+                except json.JSONDecodeError:
+                    payload = None
+                if payload is not None:
+                    raw_items = _extract_items(payload)
+                    for raw in raw_items or []:
+                        item = normalize_item(raw)
+                        if item:
+                            items.append(item)
+                    # 正文同样剔除这段未闭合的代码块尾巴，避免展示残缺 JSON
+                    body = text[:idx].rstrip()
 
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
     items.sort(key=_sort_key)
@@ -185,7 +209,7 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
                 "priority": "long_term",
                 "title": "保持现有服务节奏并持续观察",
                 "urgency": "low",
-                "reason": f"当前健康分 {assessment.total_score}，未触发任何预警规则",
+                "reason": f"当前客情评分 {assessment.total_score}，未触发任何预警规则",
                 "action": "按既定周期回访，关注满意度与回款两项先行指标",
                 "expected_outcome": "维持健康度不下滑",
                 "reference": "规则引擎（LLM 不可用时的兜底建议）",
@@ -205,7 +229,7 @@ _URGENCY_CN = {"high": "高", "medium": "中", "low": "低"}
 
 
 def render_strategies_markdown(items: list[dict]) -> str:
-    """把结构化策略渲染成 Markdown（降级回复与 PDF 报告复用）。"""
+    """把结构化策略渲染成精简 Markdown（降级回复复用，每条一行标题 + 行动）。"""
     if not items:
         return ""
 
@@ -217,20 +241,18 @@ def render_strategies_markdown(items: list[dict]) -> str:
             continue
         lines.append(f"### {_GROUP_TITLES[priority]}")
         for item in group:
-            lines.append(f"{index}. **{item['title']}**（紧急度：{_URGENCY_CN.get(item['urgency'], '中')}）")
-            if item.get("reason"):
-                lines.append(f"   - 原因：{item['reason']}")
-            if item.get("action"):
-                lines.append(f"   - 行动：{item['action']}")
-            if item.get("expected_outcome"):
-                lines.append(f"   - 预期：{item['expected_outcome']}")
+            action = item.get("action") or ""
+            suffix = f"：{action}" if action else ""
+            lines.append(
+                f"{index}. **{item['title']}**（紧急度：{_URGENCY_CN.get(item['urgency'], '中')}）{suffix}"
+            )
             index += 1
         lines.append("")
 
     return "\n".join(lines).strip()
 
 
-# ── M4 Agent Loop 接入（SOW §3.4）────────────────────────────────────────────
+# ── M4 Agent Loop 接入────────────────────────────────────────────
 
 
 def generate(

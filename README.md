@@ -22,7 +22,6 @@
 - [AI 对话与知识库](#ai-对话与知识库)
 - [报告与预警](#报告与预警)
 - [项目结构](#项目结构)
-- [API 概览](#api-概览)
 - [测试](#测试)
 - [部署要点](#部署要点)
 - [降级与可用性](#降级与可用性)
@@ -44,7 +43,7 @@
 |----|------|
 | 后端 | Python FastAPI + SQLAlchemy + SQLite + Uvicorn |
 | 评分 | 配置驱动引擎（`scoring_config.yaml`，维度/因子/权重/阈值见下文「评分模型」） |
-| AI 对话 | OpenAI 兼容适配器（DeepSeek-V4-Flash 对话 / 智谱 GLM embedding-3 向量化）；自包含轻量状态机编排 Agent Loop（检索→推理→自批判→精炼） |
+| AI 对话 | 大模型兼容适配器（对话 / 向量化模型均可配置）；自包含轻量状态机编排 Agent Loop（检索→推理→自批判→精炼） |
 | 知识库 RAG | 解析（md/txt/csv 零依赖；pdf/xlsx/docx lazy import）→ 中文分句 + 滑动窗口切片 → 向量库（Chroma 可选 / InMemory 零依赖回退）→ MetadataReranker（默认）+ BGE Rerank（可选） |
 | PDF | ReportLab + matplotlib（趋势曲线） |
 | 前端 | React 19 + TypeScript + Vite 8 + TailwindCSS v4 + React Router v7；图表为手写 SVG（未用 Recharts，1:1 还原冻结原型） |
@@ -107,8 +106,19 @@ bash deploy.sh
 
 ## 评分模型
 
-4 个维度各 25 分，满分 100 分：关系深度 / 客户满意度 / 商业价值 / 风险水平。
-等级：优秀 ≥85 · 良好 70-84 · 一般 55-69 · 风险 <55。
+7 个维度加权求和，满分 100 分（共 60 个因子）：
+
+| 维度 | 权重 | 因子数 | 数据来源 |
+| --- | --- | --- | --- |
+| KCR 关键客户关系 | 30 | 12 | AR 为主 |
+| ER 普遍客户关系 | 18 | 10 | AR+SR+FR 协同 |
+| OR 组织客户关系 | 14 | 6 | AR+管理层 |
+| CI 客户洞察与业务理解 | 9 | 5 | AR+SR |
+| HIS 历史合作与经营结果 | 12 | 10 | 系统自动抓取 |
+| RISK 竞争态势与风险信号 | 12 | 10 | AR+FR+系统 |
+| SVC 服务与支持健康度 | 5 | 7 | FR+系统 |
+
+等级：健康 ≥80 · 亚健康 60-79 · 风险 40-59 · 高危 <40。
 
 新增因子 = 3 步：① 加客户列或 `custom_fields` ② 在 YAML 注册字段 + 权重 + `input` + `rule` ③ 重启（前端因子表单由 `GET /api/customers/factor-config` 动态渲染）。
 
@@ -116,7 +126,7 @@ bash deploy.sh
 
 - 对话流式输出（SSE），场景化 Prompt 注入量化评估 + 趋势 + 知识上下文；策略以 ```` ```json ```` 结构化块输出，前端 `StrategyItem` 直接渲染。
 - Agent Loop 自批判/精炼；模型可主动调用工具补充信息：客户横向对比（`customer_compare`）与知识库补充检索（`knowledge_search`），输出含知识溯源（📎 可定位原文切片）。工具由 `LLM_TOOLS_ENABLED` 控制，不支持的网关会自动去掉 tools 重试。策略消息支持 ⭐ 采纳标记（当前为前端本地标记，入库沉淀待实现）。
-- 知识检索链路：metadata 过滤 + 分类权重 → dense（智谱 embedding-3）向量召回 → Rerank 重排；命中切片默认扩展相邻 ±1 切片（`RAG_WINDOW`，可关）缓解跨切片截断；结构化指标（行业基准等精确数值）走 SQLite 精确查询，评估时按客户行业注入。
+- 知识检索链路：metadata 过滤 + 分类权重 → dense 向量召回 → Rerank 重排；命中切片默认扩展相邻 ±1 切片（`RAG_WINDOW`，可关）缓解跨切片截断；结构化指标（行业基准等精确数值）走 SQLite 精确查询，评估时按客户行业注入。
 
 ## 报告与预警
 
@@ -150,68 +160,6 @@ frontend/
 Dockerfile / docker-compose.yml / deploy.sh / start.sh / start.bat / .env.example
 ```
 
-## API 概览
-
-所有接口以 `/api` 为前缀。完整交互式文档见运行后的 `GET /api/docs`（Swagger UI）。
-
-### 客户（`/api/customers`）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/customers` | 客户列表（不含分数/等级/趋势，需逐行再请求评估） |
-| GET | `/api/customers/industries` | 行业枚举 |
-| GET | `/api/customers/factor-config` | 因子表单动态配置 |
-| GET | `/api/customers/{id}` | 客户详情 |
-| POST | `/api/customers` | 新建客户 |
-| PUT | `/api/customers/{id}` | 更新客户基础信息 |
-| PUT | `/api/customers/{id}/factors` | 编辑评分因子 |
-| DELETE | `/api/customers/{id}` | 删除客户 |
-| POST | `/api/customers/import` | 批量导入（模板驱动，自动计分） |
-
-### 评估（`/api/assessment`、`/api/customers`）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/assessment/{id}` | 当前评估（分数/等级/维度/预警/趋势） |
-| POST | `/api/assessment/{id}/snapshot` | 写入评估历史快照 |
-| GET | `/api/assessment/{id}/pdf` | 导出 PDF 报告（`?include_ai=true`） |
-| GET | `/api/assessment/all/overview` | 全量概览统计 |
-| GET | `/api/customers/{id}/assessment-history` | 评估历史记录 |
-| GET | `/api/customers/{id}/assessment-trend` | 健康分趋势数据 |
-
-### AI 对话（`/api/chat`）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/chat/sessions` | 创建会话 |
-| GET | `/api/chat/sessions` | 会话列表 |
-| GET | `/api/chat/sessions/{id}` | 会话详情 |
-| DELETE | `/api/chat/sessions/{id}` | 删除会话 |
-| POST | `/api/chat/sessions/{id}/messages` | 发送消息（SSE 流式） |
-| POST | `/api/chat/sessions/{id}/evaluate` | 快捷评估（AI 综合评估结论） |
-| POST | `/api/chat/sessions/{id}/strategy` | 生成策略建议 |
-| POST | `/api/chat/sessions/{id}/alert-analysis` | 预警解读 |
-| POST | `/api/chat/sessions/{id}/regenerate` | 重新生成 |
-| POST | `/api/chat/messages/{id}/feedback` | 消息反馈（赞/踩） |
-| GET | `/api/chat/status` | LLM 可用性状态 |
-
-### 知识库（`/api/knowledge`）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/knowledge/items` | 知识条目列表 |
-| GET | `/api/knowledge/items/{id}` | 条目详情 |
-| POST | `/api/knowledge/search` | 语义检索 |
-| POST | `/api/knowledge/upload` | 上传文档 |
-| PUT | `/api/knowledge/items/{id}` | 编辑元数据 |
-| DELETE | `/api/knowledge/items/{id}` | 删除条目 |
-| POST | `/api/knowledge/items/{id}/approve` | 审核（proposed→canonical） |
-| POST | `/api/knowledge/reindex` | 重新索引 |
-| GET | `/api/knowledge/metrics` | 结构化指标列表 |
-| POST | `/api/knowledge/metrics` | 新增结构化指标 |
-| DELETE | `/api/knowledge/metrics/{id}` | 删除指标 |
-| GET | `/api/knowledge/status` | 知识库状态 |
-
 ## 测试
 
 ```bash
@@ -224,8 +172,9 @@ cd backend && python -m pytest tests/ -v
 
 - **依赖分层**：`requirements.txt`（核心，Python 3.10+ 可直接装，3.12 验证通过）；`requirements-prod.txt`（chromadb / pymupdf / python-docx / FlagEmbedding，Docker 安装，缺失自动回退）。
 - **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；未装自动回退 `memory`（基础功能可用）。
-- **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 微软雅黑 / macOS PingFang / Linux 文泉驿）。
+- **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 雅黑 / macOS PingFang / Linux 文泉驿）。
 - **数据持久化**：挂载 `./data:/app/data`，数据库与向量库落盘。
+- **访问控制**：系统为单租户内部工具，**无内置登录鉴权**；公网 / 云服务器部署时请在前置网关或反向代理层配置访问控制（IP 白名单 / Basic Auth / VPN 等），并将 `.env`、`AGENTS.md`、`docs/` 等敏感文件排除出发布内容。
 
 ## 降级与可用性
 

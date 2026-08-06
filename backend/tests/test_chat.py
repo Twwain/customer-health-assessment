@@ -1,4 +1,4 @@
-"""AI 对话引擎测试（SOW §3.2 M2 / §6.1 / §7 降级）。
+"""AI 对话引擎测试。
 
 覆盖：Prompt 模板加载与热更新、安全护栏、上下文注入、策略结构化解析、
 多轮上下文窗口、LLM 降级兜底、SSE 事件协议、会话与反馈接口。
@@ -245,8 +245,8 @@ def test_context_contains_quantitative_facts(db, customer):
     ctx = context_builder.build_context(db, customer)
     assert ctx.assessment is not None
     assert "示例汽车集团" in ctx.customer_text
-    assert "18.5" in ctx.customer_text          # 基础客情分
-    assert "关系紧密度" in ctx.customer_text
+    assert "12.5" in ctx.customer_text          # 基础客情分（空因子最低分口径）
+    assert "KCR 关键客户关系" in ctx.customer_text
     assert "竞品已介入" in ctx.customer_text
     assert "未检索到相关知识" in ctx.knowledge_text
 
@@ -322,7 +322,8 @@ def test_degraded_strategies_from_rule_engine(db, customer):
 
     markdown = strategy.render_strategies_markdown(items)
     assert "✅ 推荐策略" in markdown
-    assert "原因" in markdown
+    assert "原因：" not in markdown
+    assert "预期：" not in markdown
 
 
 def test_degraded_strategies_for_healthy_customer(db):
@@ -368,7 +369,7 @@ def test_complete_turn_persists_messages(db, customer, fake_llm):
     assert result["degraded"] is False
     assert result["tokens_used"] == 128
     assert result["message"]["content"] == "你好，这是测试回复。"
-    assert result["assessment"]["total_score"] == 18.5
+    assert result["assessment"]["total_score"] == 12.5
 
     messages = db.query(ChatMessage).order_by(ChatMessage.id).all()
     assert [m.role for m in messages] == ["user", "assistant"]
@@ -382,7 +383,7 @@ def test_turn_injects_quantitative_context_into_prompt(db, customer, fake_llm):
     sent = fake_llm.calls[-1]
     assert sent[0].role == "system"
     assert "客情评估智能体" in sent[0].content
-    assert "18.5" in sent[-1].content            # 基础客情分进了本轮 user prompt
+    assert "12.5" in sent[-1].content            # 基础客情分进了本轮 user prompt
     assert "未检索到相关知识" in sent[-1].content  # 防幻觉提示
 
 
@@ -422,7 +423,24 @@ def test_assessment_scenario_records_history(db, customer, fake_llm):
     record = db.query(AssessmentHistory).one()
     assert record.trigger == "ai_assessment"
     assert record.assessed_by == "ai"
-    assert record.total_score == 18.5
+    assert record.total_score == 12.5
+
+
+@pytest.mark.parametrize(
+    ("scenario", "keyword"),
+    [
+        ("assessment", "评估摘要"),
+        ("strategy", "策略摘要"),
+        ("alert_analysis", "风险摘要"),
+    ],
+)
+def test_scenario_summary_hint_appended(db, customer, fake_llm, scenario, keyword):
+    session = chat_engine.create_session(db, customer_id=customer.id, scenario=scenario)
+    result = chat_engine.complete_turn(db, session, content="", scenario=scenario)
+
+    content = result["message"]["content"]
+    assert f"本页面仅显示{keyword}" in content
+    assert "完整报告请点击「导出报告」" in content
 
 
 def test_strategy_scenario_parses_and_snapshots_items(db, customer):
@@ -445,7 +463,7 @@ def test_strategy_scenario_parses_and_snapshots_items(db, customer):
     assert record.strategy_snapshot[0]["title"] == "启动分级评审"
 
 
-# ══════════════════════════ 降级（SOW §7）═══════════════════════════════════
+# ══════════════════════════ 降级═══════════════════════════════════
 
 
 def test_degrades_to_rule_engine_when_llm_unavailable(db, customer, offline_llm):
@@ -455,8 +473,8 @@ def test_degrades_to_rule_engine_when_llm_unavailable(db, customer, offline_llm)
     assert result["degraded"] is True
     content = result["message"]["content"]
     assert "规则引擎兜底结果" in content
-    assert "18.5" in content
-    assert "关系紧密度" in content
+    assert "12.5" in content
+    assert "KCR 关键客户关系" in content
     assert result["warnings"]
 
     stored = db.query(ChatMessage).filter(ChatMessage.role == "assistant").one()
@@ -545,6 +563,31 @@ def test_regenerate_keeps_history_when_last_turn_failed(db, customer, fake_llm):
     assert db.query(ChatMessage).filter(ChatMessage.role == "assistant").count() == assistants_before
 
 
+def test_regenerate_falls_back_to_default_question_without_user_message(db, customer, fake_llm):
+    """快捷场景（如 AI 评估）历史只有 assistant 回复、没有用户提问时，
+    regenerate 用场景默认提问重放，并删除待重生成的那条回复。"""
+    session = chat_engine.create_session(db, customer_id=customer.id)
+    assistant = ChatMessage(session_id=session.id, role="assistant", content="评估结论")
+    db.add(assistant)
+    db.commit()
+
+    content, exclude_id = chat_engine.prepare_regenerate(db, session, scenario="assessment")
+
+    assert content == "请为该客户生成综合评估结论"
+    assert exclude_id == assistant.id
+    assert db.query(ChatMessage).filter(ChatMessage.role == "assistant").count() == 0
+
+
+def test_regenerate_without_messages_returns_empty(db, customer, fake_llm):
+    """会话没有任何消息时，regenerate 返回空、不误删数据。"""
+    session = chat_engine.create_session(db, customer_id=customer.id)
+
+    content, exclude_id = chat_engine.prepare_regenerate(db, session, scenario="assessment")
+
+    assert content == ""
+    assert exclude_id is None
+
+
 def test_set_feedback(db, customer, fake_llm):
     session = chat_engine.create_session(db, customer_id=customer.id)
     result = chat_engine.complete_turn(db, session, content="问题")
@@ -552,7 +595,7 @@ def test_set_feedback(db, customer, fake_llm):
     assert message.feedback == "up"
 
 
-# ══════════════════════════ 接口层（SOW §6.1）═══════════════════════════════
+# ══════════════════════════ 接口层═══════════════════════════════
 
 
 @pytest.fixture()
@@ -628,8 +671,8 @@ def test_send_message_streams_sse(client, customer, fake_llm):
     assert text == "你好，这是测试回复。"
 
     context = next(data for name, data in events if name == "context")
-    assert context["assessment"]["total_score"] == 18.5
-    assert context["trend"]["level"] == "风险"
+    assert context["assessment"]["total_score"] == 12.5
+    assert context["trend"]["level"] == "高危"
 
     done = events[-1][1]
     assert done["degraded"] is False
@@ -645,7 +688,7 @@ def test_send_message_non_stream_returns_json(client, customer, fake_llm):
     body = response.json()
     assert response.status_code == 200
     assert body["message"]["content"] == "你好，这是测试回复。"
-    assert body["assessment"]["level"] == "风险"
+    assert body["assessment"]["level"] == "高危"
 
 
 def test_send_empty_message_rejected(client, customer, fake_llm):
@@ -761,7 +804,7 @@ def test_as_messages_accepts_mixed_input():
     assert [m.role for m in messages] == ["system", "user", "assistant"]
 
 
-# ── OpenAI 兼容协议解析（用假 httpx 驱动真实适配器）─────────────────────────
+# ── 大模型兼容协议解析（用假 httpx 驱动真实适配器）───────────────────────────
 
 
 class _FakeResponse:
@@ -824,11 +867,11 @@ def _adapter(monkeypatch, responses, **kwargs):
     fake = _FakeHttpx(responses)
     monkeypatch.setattr(llm_adapter, "httpx", fake)
     monkeypatch.setattr(llm_adapter.time, "sleep", lambda *_: None)
-    adapter = llm_adapter.OpenAICompatibleAdapter(
-        name="deepseek",
+    adapter = llm_adapter.CompatAdapter(
+        name="test-provider",
         base_url="https://api.test/v1",
         api_key="sk-test",
-        model="deepseek-v4-flash",
+        model="test-model",
         max_retries=kwargs.pop("max_retries", 1),
         retry_backoff=0,
         **kwargs,
@@ -836,13 +879,13 @@ def _adapter(monkeypatch, responses, **kwargs):
     return adapter, fake
 
 
-def test_chat_completion_parses_openai_payload(monkeypatch):
+def test_chat_completion_parses_compat_payload(monkeypatch):
     adapter, fake = _adapter(
         monkeypatch,
         [
             _FakeResponse(
                 json_data={
-                    "model": "deepseek-v4-flash",
+                    "model": "test-model",
                     "choices": [{"message": {"content": "评估结论"}, "finish_reason": "stop"}],
                     "usage": {"total_tokens": 321},
                 }
@@ -935,7 +978,7 @@ def test_embedding_returns_vectors_in_index_order(monkeypatch):
     assert fake.requests[0]["json"]["dimensions"] == 2
 
 
-# ══════════════════════════ M4 Agent Loop（SOW §3.4 / §4.2）═══════════════════
+# ══════════════════════════ M4 Agent Loop═══════════════════
 
 
 def _agent_chunk(document_id=1, item_id=1, title="客户健康度评估方法", category="methodology"):
@@ -945,7 +988,7 @@ def _agent_chunk(document_id=1, item_id=1, title="客户健康度评估方法", 
         item_id=item_id,
         item_title=title,
         category=category,
-        content="关系紧密度衡量客户与团队的日常互动频率与质量。",
+        content="KCR 关键客户关系衡量与客户决策链关键岗位的关系深度与支持度。",
         score=0.91,
         metadata={},
     )
@@ -1011,11 +1054,78 @@ def test_agent_loop_refines_when_missing_strategy_block(db, customer, fake_llm, 
     assert result.text  # 至少返回了文本，不空转
 
 
+class _EmptyThenContentAdapter(FakeAdapter):
+    """前 ``empty_rounds`` 次调用返回空，之后返回预设内容（模拟模型偶发空响应）。"""
+
+    def __init__(self, empty_rounds=1, chunks=None):
+        super().__init__(chunks=chunks or [])
+        self._empty_rounds = empty_rounds
+        self._round = 0
+
+    def stream_chat_completion(self, messages, **kwargs):
+        self.calls.append(list(messages))
+        self.tool_args.append(kwargs.get("tools"))
+        if kwargs.get("on_usage"):
+            kwargs["on_usage"](self.usage)
+        if self._round < self._empty_rounds:
+            self._round += 1
+            return
+        self._round += 1
+        for chunk in self.chunks:
+            yield chunk
+
+
+def test_agent_loop_retries_when_first_draft_empty(db, customer, monkeypatch):
+    """首次生成返回空草稿时自动不带工具重试一次，避免偶发空响应直接失败。"""
+    monkeypatch.setattr(tools, "rag_retrieve", lambda *a, **k: [])
+    payload = (
+        "### ✅ 推荐策略\n1. **高层拜访**\n\n"
+        '```json\n{"strategies": [{"priority": "recommended", "title": "高层拜访", '
+        '"urgency": "high", "reason": "竞品介入", "action": "VP 级拜访", '
+        '"expected_outcome": "稳固关系"}]}\n```'
+    )
+    adapter = _EmptyThenContentAdapter(chunks=[payload])
+    result = generate(
+        "strategy",
+        context_builder.build_context(db, customer),
+        customer,
+        db,
+        adapter=adapter,
+        question="给点建议",
+    )
+
+    assert result.degraded is False
+    assert "高层拜访" in result.text
+    assert any("首次生成返回为空" in w for w in result.warnings)
+    # 重试请求不带工具，避免工具循环吞掉正文
+    assert adapter.tool_args[-1] is None
+
+
+def test_agent_loop_degrades_when_draft_stays_empty(db, customer, monkeypatch):
+    """重试后仍为空时降级为规则引擎，保证策略条目仍然可见。"""
+    monkeypatch.setattr(tools, "rag_retrieve", lambda *a, **k: [])
+    llm_adapter.set_chat_adapter(FakeAdapter(chunks=[]))
+
+    result = generate(
+        "strategy",
+        context_builder.build_context(db, customer),
+        customer,
+        db,
+        adapter=llm_adapter.get_chat_adapter(),
+        question="给点建议",
+    )
+
+    assert result.degraded is True
+    assert result.text
+    assert result.degraded_items
+    assert any("返回空内容" in w for w in result.warnings)
+
+
 def test_generate_uses_real_store_for_references(db, customer, fake_llm):
     store = InMemoryVectorStore()
     store.add(
         ids=["c1"],
-        documents=["关系紧密度衡量客户与团队的日常互动频率与质量，是健康度的核心维度。"],
+        documents=["KCR 关键客户关系衡量与客户决策链关键岗位的关系深度与支持度，是健康度的核心维度。"],
         embeddings=[[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
         metadatas=[{
             "document_id": 1, "item_id": 1, "chunk_index": 0,
@@ -1039,7 +1149,7 @@ def test_generate_uses_real_store_for_references(db, customer, fake_llm):
         customer,
         db,
         adapter=llm_adapter.get_chat_adapter(),
-        question="关系紧密度怎么衡量",
+        question="KCR 关键客户关系怎么衡量",
         embed_func=_embed,
         store=store,
     )
@@ -1103,7 +1213,7 @@ def test_chat_completion_parses_tool_calls(monkeypatch):
         [
             _FakeResponse(
                 json_data={
-                    "model": "deepseek-v4-flash",
+                    "model": "test-model",
                     "choices": [
                         {
                             "message": {
@@ -1277,7 +1387,7 @@ def test_chat_completion_retries_without_tools_on_400(monkeypatch):
             _FakeResponse(status_code=400, text="tools unsupported"),
             _FakeResponse(
                 json_data={
-                    "model": "deepseek-v4-flash",
+                    "model": "test-model",
                     "choices": [{"message": {"content": "正常回答"}, "finish_reason": "stop"}],
                     "usage": {"total_tokens": 12},
                 }

@@ -1,10 +1,10 @@
-"""AI 对话编排（SOW §3.2 M2）。
+"""AI 对话编排。
 
 职责：
 - 会话与消息的持久化（多轮上下文窗口按条数 + 字符预算双重限制）
 - 把量化评估结果注入 Prompt（context_builder），按场景选模板（prompt_templates）
 - 以事件流驱动 SSE 流式输出（首字延迟 < 2s 由 LLM 侧保证，这里不做额外缓冲）
-- LLM 不可用时**自动降级**为规则引擎回复，对话不中断（SOW §7）
+- LLM 不可用时**自动降级**为规则引擎回复，对话不中断
 
 事件协议（SSE ``event:`` 名 → ``data:`` JSON）：
 
@@ -52,6 +52,22 @@ from .tools import MAX_TOOL_ROUNDS, TOOL_SCHEMAS, append_tool_results
 
 DEFAULT_TITLE = "新对话"
 TITLE_MAX_CHARS = 16
+
+# 快捷入口（AI 评估 / 策略 / 预警）没有用户输入时使用的默认提问：
+# 落库展示与「重新生成」重放共用同一份文案
+_DEFAULT_QUICK_QUESTIONS = {
+    "assessment": "请为该客户生成综合评估结论",
+    "strategy": "请为该客户生成客情维护策略建议",
+    "alert_analysis": "请解读该客户当前的风险预警",
+}
+
+# 对话内摘要提示：完整因子明细 / 风险预警 / 策略细则见导出报告
+# （导出 PDF 含分维度因子明细、风险提示与建议、AI 智能策略建议）
+_SCENARIO_SUMMARY_HINTS = {
+    "assessment": "本页面仅显示评估摘要，完整报告请点击「导出报告」。",
+    "strategy": "本页面仅显示策略摘要，完整报告请点击「导出报告」。",
+    "alert_analysis": "本页面仅显示风险摘要，完整报告请点击「导出报告」。",
+}
 
 # M4：走 Agent Loop（检索→推理→自批判→精炼）的场景；其余走直接流式
 AGENT_SCENARIOS = {"assessment", "strategy", "alert_analysis"}
@@ -254,6 +270,10 @@ def run_turn(
     started = time.monotonic()
     scenario = scenario if scenario in SCENARIOS else (session.scenario or DEFAULT_SCENARIO)
     question, hits = guardrails.sanitize_input(content)
+    if not question and persist_user and scenario in ("assessment", "strategy", "alert_analysis"):
+        # 快捷入口（AI 评估 / 策略 / 预警）没有用户输入：落一条默认提问，
+        # 便于历史展示与「重新生成」重放
+        question = _DEFAULT_QUICK_QUESTIONS[scenario]
 
     customer = _resolve_customer(db, session, customer_id)
     if customer and not session.customer_id:
@@ -362,7 +382,7 @@ def run_turn(
                 stream = adapter.stream_chat_completion(
                     messages,
                     temperature=template.temperature,
-                    max_tokens=template.max_tokens,
+                    max_tokens=min(template.max_tokens, config.LLM_MAX_TOKENS),
                     on_usage=_collect_usage,
                     tools=TOOL_SCHEMAS if tools_enabled else None,
                     on_tool_calls=_collect_tool_calls,
@@ -390,7 +410,7 @@ def run_turn(
                     stream = adapter.stream_chat_completion(
                         messages,
                         temperature=template.temperature,
-                        max_tokens=template.max_tokens,
+                        max_tokens=min(template.max_tokens, config.LLM_MAX_TOKENS),
                         on_usage=_collect_usage,
                         tools=None,
                     )
@@ -422,6 +442,10 @@ def run_turn(
     raw_text = "".join(chunks)
     if warnings:
         raw_text = f"{raw_text}\n\n" + "\n\n".join(f"> ⚠️ {w}" for w in warnings)
+    summary_hint = _SCENARIO_SUMMARY_HINTS.get(scenario)
+    if summary_hint and ctx.assessment is not None:
+        # 会话内只展示摘要；完整因子明细 / 风险预警 / 策略细则见导出报告
+        raw_text = raw_text.rstrip() + f"\n\n> 💡 {summary_hint}"
 
     body, items = split_strategy_payload(guardrails.sanitize_output(raw_text))
     if degraded:
@@ -503,7 +527,7 @@ def stream_sse(
 
         exclude_id = None
         if regenerate:
-            content, exclude_id = prepare_regenerate(db, session)
+            content, exclude_id = prepare_regenerate(db, session, scenario=scenario)
             if not content:
                 yield sse(TurnEvent("error", {"message": "没有可重新生成的消息"}))
                 return
@@ -524,12 +548,15 @@ def stream_sse(
         db.close()
 
 
-def prepare_regenerate(db: Session, session: ChatSession) -> tuple[str, int | None]:
+def prepare_regenerate(
+    db: Session, session: ChatSession, scenario: str | None = None
+) -> tuple[str, int | None]:
     """删掉最后一条 assistant 回复，取回最后一条用户提问用于重跑。
 
     仅当最后一条 assistant 回复晚于最后一条用户提问（即它是对该提问的应答）时
     才删除；若上一轮在持久化 assistant 前失败，last_assistant 属于更早的轮次，
-    删除会造成历史消息丢失。
+    删除会造成历史消息丢失。快捷场景（评估/策略/预警）历史上可能没有用户提问，
+    此时按场景兜底一个默认提问用于重放。
     """
     messages = (
         db.query(ChatMessage)
@@ -539,12 +566,19 @@ def prepare_regenerate(db: Session, session: ChatSession) -> tuple[str, int | No
         .all()
     )
     last_user = next((m for m in messages if m.role == "user"), None)
-    if last_user is None:
-        return "", None
     last_assistant = next((m for m in messages if m.role == "assistant"), None)
+    if last_user is None:
+        # 历史上没有用户提问（如快捷评估）：按场景兜底一个默认提问用于重放
+        content = _DEFAULT_QUICK_QUESTIONS.get(scenario or session.scenario or "", "")
+        if content and last_assistant is not None:
+            db.delete(last_assistant)
+            db.commit()
+            return content, last_assistant.id
+        return "", None
     if last_assistant is not None and last_assistant.id > last_user.id:
         db.delete(last_assistant)
         db.commit()
+        return last_user.content, last_user.id
     return last_user.content, last_user.id
 
 

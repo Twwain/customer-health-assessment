@@ -11,7 +11,8 @@ import { getLevels, levelColor, trendMeta, type LevelSpec } from "../lib/ui";
 import { useIsMobile } from "../hooks";
 import { AlertBadge, LevelBadge } from "../components/Badges";
 import { Sparkline, TrendChart } from "../components/Charts";
-import CustomerForm, { BASIC_FIELDS } from "../components/CustomerForm";
+import CustomerForm from "../components/CustomerForm";
+import { BASIC_FIELDS } from "../lib/customerFields";
 
 interface Row {
   customer: CustomerResponse;
@@ -67,8 +68,6 @@ export default function CustomerList() {
   };
 
   const fetchData = () => {
-    setLoading(true);
-    setError(null);
     customers
       .list({ page_size: 200 })
       .then(async (r) => {
@@ -161,7 +160,11 @@ export default function CustomerList() {
           (e instanceof Error ? e.message : "未知错误"),
       );
       // 基本信息已落库时刷新列表同步显示，抽屉保留以便重试因子部分
-      if (basicSaved) fetchData();
+      if (basicSaved) {
+        setLoading(true);
+        setError(null);
+        fetchData();
+      }
     } finally {
       setSaving(false);
     }
@@ -181,18 +184,24 @@ export default function CustomerList() {
   };
 
   return (
-    <div className="mx-auto max-w-[1280px] px-6 py-7">
+    <div
+      className={`mx-auto max-w-[1280px] px-6 py-7 ${
+        factorDrawer && !factorDrawer.readOnly ? "md:pr-[452px]" : ""
+      }`}
+    >
       {/* 页头 */}
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <div className="mr-auto">
           <div className="flex items-center gap-2.5">
             <span className="h-[16px] w-[3px] rounded-full bg-accent" />
-            <h1 className="text-[22px] font-semibold tracking-tight text-ink">客户库</h1>
+            <h1 className="text-[23px] font-semibold tracking-tight text-ink">客户库</h1>
           </div>
-          <div className="mt-0.5 text-[13px] text-muted">量化评估引擎入口 · 编辑客情因子后可一键触发 AI 评估</div>
+          <div className="mt-0.5 text-[14px] text-muted">
+            编辑客情因子 · 保存后自动重算客情评分并写入评估历史，可一键发起 AI 评估
+          </div>
         </div>
         <button
-          className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white transition hover:bg-accent-hover"
+          className="rounded-lg bg-accent px-3 py-2 text-[14px] font-medium text-white transition hover:bg-accent-hover"
           onClick={() => setAddOpen(true)}
         >
           ＋ 添加客户
@@ -206,7 +215,7 @@ export default function CustomerList() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="搜索客户名称 / 行业 / 对接人…"
-          className="max-w-[300px] flex-1 rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+          className="max-w-[300px] flex-1 rounded-lg border border-border-strong bg-surface px-3 py-2 text-[14px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
         />
         <select value={industry} onChange={(e) => setIndustry(e.target.value)} className={selCls}>
           <option value="">全部行业</option>
@@ -231,8 +240,8 @@ export default function CustomerList() {
           <option value="flat">→ 持平</option>
         </select>
         <select value={sort} onChange={(e) => setSort(e.target.value)} className={selCls}>
-          <option value="score_desc">按健康分降序</option>
-          <option value="score_asc">按健康分升序</option>
+          <option value="score_desc">按客情评分降序</option>
+          <option value="score_asc">按客情评分升序</option>
           <option value="delta">按跌幅排序</option>
         </select>
       </div>
@@ -241,7 +250,7 @@ export default function CustomerList() {
       <div className="mb-6 flex flex-wrap items-center gap-x-7 gap-y-2 rounded-xl border border-border bg-surface px-5 py-3">
         <Stat label="客户总数" value={String(stats.total)} />
         <span className="hidden h-7 w-px bg-border sm:block" />
-        <Stat label="平均健康分" value={String(stats.avg)} />
+        <Stat label="平均客情评分" value={String(stats.avg)} />
         <span className="hidden h-7 w-px bg-border sm:block" />
         <Stat label={`风险客户（${stats.riskName}级）`} value={String(stats.risk)} danger />
         <span className="hidden h-7 w-px bg-border sm:block" />
@@ -253,39 +262,46 @@ export default function CustomerList() {
       ) : error ? (
         <div className="py-20 text-center">
           <div className="mb-2 text-danger">数据加载失败</div>
-          <div className="mb-3 text-[13px] text-muted">{error}</div>
-          <button className="rounded-lg bg-accent px-4 py-2 text-[13px] text-white" onClick={fetchData}>
+          <div className="mb-3 text-[14px] text-muted">{error}</div>
+          <button
+            className="rounded-lg bg-accent px-4 py-2 text-[14px] text-white"
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              fetchData();
+            }}
+          >
             重试
           </button>
         </div>
       ) : filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-surface-2 text-[22px]">👥</div>
-          <div className="mt-3 text-[14px] font-medium text-ink-2">没有匹配的客户</div>
-          <div className="mt-1 text-[12.5px] text-muted">试试调整搜索关键词或筛选条件</div>
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-surface-2 text-[23px]">👥</div>
+          <div className="mt-3 text-[15px] font-medium text-ink-2">没有匹配的客户</div>
+          <div className="mt-1 text-[13.5px] text-muted">试试调整搜索关键词或筛选条件</div>
         </div>
       ) : (
         <>
           {/* 桌面表格（无外框，仅行分隔） */}
-          <div className="hidden md:block">
+          <div className="hidden overflow-x-auto md:block">
             {editMode && (
-              <div className="mb-2 flex items-center gap-2 rounded-lg border border-accent/25 bg-accent-soft/50 px-3 py-2 text-[12.5px] text-accent">
+              <div className="mb-2 flex items-center gap-2 rounded-lg border border-accent/25 bg-accent-soft/50 px-3 py-2 text-[13.5px] text-accent">
                 ✏️ 编辑模式已开启：点击任意客户行即可修改其信息，完成后点右上角「完成」退出。
               </div>
             )}
-            <table className="w-full table-fixed border-collapse">
-              <thead className="border-b border-border text-left text-[12px] text-muted">
+            <table className="w-full min-w-[790px] table-fixed border-collapse">
+              <thead className="border-b border-border text-left text-[13px] text-muted">
                 <tr>
-                  <th className="w-[160px] whitespace-nowrap px-4 pb-2.5 font-medium">客户名称</th>
-                  <th className="w-[90px] whitespace-nowrap px-4 pb-2.5 font-medium">对接人</th>
-                  <th className="w-[90px] whitespace-nowrap px-4 pb-2.5 font-medium">行业</th>
-                  <th className="w-[110px] whitespace-nowrap px-4 pb-2.5 font-medium">健康分</th>
-                  <th className="w-[120px] whitespace-nowrap px-4 pb-2.5 font-medium">趋势</th>
-                  <th className="w-[70px] whitespace-nowrap px-4 pb-2.5 font-medium">等级</th>
-                  <th className="w-[280px] whitespace-nowrap px-4 pb-2.5 font-medium">预警</th>
-                  <th className="w-[80px] whitespace-nowrap px-4 pb-2.5 text-right font-medium">
+                  <th className="w-[140px] whitespace-nowrap px-3 pb-2.5 font-medium">客户名称</th>
+                  <th className="w-[80px] whitespace-nowrap px-3 pb-2.5 font-medium">对接人</th>
+                  <th className="w-[80px] whitespace-nowrap px-3 pb-2.5 font-medium">行业</th>
+                  <th className="w-[100px] whitespace-nowrap px-3 pb-2.5 font-medium">客情评分</th>
+                  <th className="w-[100px] whitespace-nowrap px-3 pb-2.5 font-medium">趋势</th>
+                  <th className="w-[70px] whitespace-nowrap px-3 pb-2.5 font-medium">等级</th>
+                  <th className="w-[150px] whitespace-nowrap px-3 pb-2.5 font-medium">预警</th>
+                  <th className="w-[70px] whitespace-nowrap px-3 pb-2.5 text-right font-medium">
                     <button
-                      className={`whitespace-nowrap rounded-md border px-2 py-1 text-[11.5px] font-medium transition ${
+                      className={`whitespace-nowrap rounded-md border px-2 py-1 text-[12.5px] font-medium transition ${
                         editMode
                           ? "border-accent bg-accent text-white"
                           : "border-border text-ink-2 hover:border-accent hover:text-accent"
@@ -298,37 +314,46 @@ export default function CustomerList() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((x) => (
-                  <tr
-                    key={x.customer.id}
-                    className={`group border-b border-border-soft transition last:border-0 hover:bg-surface-3 ${
-                      editMode ? "cursor-pointer" : ""
-                    }`}
-                    onClick={() => {
-                      if (editMode) openFactor(x.customer);
-                    }}
-                  >
-                    <td className="px-4 py-3.5">
-                      <span className="whitespace-nowrap font-medium text-ink">{x.customer.customer_name}</span>
+                {filtered.map((x) => {
+                  const selected = editMode && factorDrawer?.customer.id === x.customer.id;
+                  return (
+                    <tr
+                      key={x.customer.id}
+                      className={`group border-b transition last:border-0 ${
+                        selected ? "border-accent/40 bg-accent-soft" : "border-border-soft hover:bg-accent-soft/50"
+                      } ${editMode ? "cursor-pointer" : ""}`}
+                      style={selected ? { boxShadow: "inset 4px 0 0 var(--color-accent)" } : undefined}
+                      onClick={() => {
+                        if (editMode) openFactor(x.customer);
+                      }}
+                    >
+                    <td className="px-3 py-3.5">
+                      <span
+                        className={`whitespace-nowrap font-medium ${
+                          selected ? "text-accent" : "text-ink group-hover:text-accent"
+                        }`}
+                      >
+                        {x.customer.customer_name}
+                      </span>
                     </td>
-                    <td className="px-4 py-3.5">
-                      <span className="whitespace-nowrap text-[12.5px] text-ink-2">
+                    <td className="px-3 py-3.5">
+                      <span className="whitespace-nowrap text-[13.5px] text-ink-2">
                         {x.customer.contact_person || "—"}
                       </span>
                     </td>
-                    <td className="px-4 py-3.5">
-                      <div className="max-w-[108px] truncate whitespace-nowrap text-[13px] text-ink-2">
+                    <td className="px-3 py-3.5">
+                      <div className="max-w-[108px] truncate whitespace-nowrap text-[14px] text-ink-2">
                         {x.customer.industry || "—"}
                       </div>
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-3 py-3.5">
                       {x.a ? (
                         <ScoreCell score={x.a.total_score} level={x.a.level} />
                       ) : (
-                        <span className="text-[12px] text-muted">计算中…</span>
+                        <span className="text-[13px] text-muted">计算中…</span>
                       )}
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-3 py-3.5">
                       {x.t ? (
                         <button
                           className="group/spark flex items-center rounded-lg px-1 py-0.5 transition hover:bg-surface-2"
@@ -338,32 +363,34 @@ export default function CustomerList() {
                             setTrendDrawer(x.customer);
                           }}
                         >
-                          <Sparkline values={x.t.points.map((p) => p.total_score)} color={levelColor(x.a?.level || "一般")} width={92} height={26} />
-                          <span className="ml-0.5 text-[10px] text-muted opacity-0 transition group-hover/spark:opacity-100">⤢</span>
+                          <Sparkline values={x.t.points.map((p) => p.total_score)} color={x.a?.level ? levelColor(x.a.level) : "#787671"} width={92} height={26} />
+                          <span className="ml-0.5 text-[11px] text-muted opacity-0 transition group-hover/spark:opacity-100">⤢</span>
                         </button>
                       ) : (
-                        <span className="text-[12px] text-muted">—</span>
+                        <span className="text-[13px] text-muted">—</span>
                       )}
                     </td>
-                    <td className="px-4 py-3.5">{x.a ? <LevelBadge grade={x.a.level} size="sm" /> : "—"}</td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-3 py-3.5">{x.a ? <LevelBadge grade={x.a.level} size="sm" /> : "—"}</td>
+                    <td className="px-3 py-3.5">
                       {x.a && x.a.alerts.length > 0 ? (
                         <div className="flex items-center gap-1 overflow-hidden">
                           {x.a.alerts.slice(0, 2).map((al, i) => (
                             <AlertBadge key={i} level={al.level} message={al.message} />
                           ))}
                           {x.a.alerts.length > 2 && (
-                            <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-[2px] text-[11px] text-muted">
+                            <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-[2px] text-[12px] text-muted">
                               +{x.a.alerts.length - 2}
                             </span>
                           )}
                         </div>
                       ) : (
-                        <span className="text-[12px] text-muted">—</span>
+                        <span className="text-[13px] text-muted">—</span>
                       )}
                     </td>
-                  </tr>
-                ))}
+                    <td className="px-3 py-3.5" aria-hidden="true" />
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -375,15 +402,15 @@ export default function CustomerList() {
                 <div className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-[15px] font-semibold text-ink">{x.customer.customer_name}</span>
+                      <span className="truncate text-[16px] font-semibold text-ink">{x.customer.customer_name}</span>
                       {x.a && <LevelBadge grade={x.a.level} size="sm" />}
                     </div>
-                    <div className="mt-0.5 text-[11.5px] text-muted">
+                    <div className="mt-0.5 text-[12.5px] text-muted">
                       {x.customer.industry || "未填写行业"}
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-[19px] font-bold" style={{ color: x.a ? levelColor(x.a.level) : "#787671" }}>
+                    <div className="text-[20px] font-bold" style={{ color: x.a ? levelColor(x.a.level) : "#787671" }}>
                       {x.a ? Math.round(x.a.total_score * 10) / 10 : "—"}
                     </div>
                     {x.t && <TrendArrow trend={x.t} />}
@@ -396,7 +423,7 @@ export default function CustomerList() {
                       title="点击查看趋势详情"
                       onClick={() => setTrendDrawer(x.customer)}
                     >
-                      <Sparkline values={x.t.points.map((p) => p.total_score)} color={levelColor(x.a?.level || "一般")} width={120} height={28} />
+                      <Sparkline values={x.t.points.map((p) => p.total_score)} color={x.a?.level ? levelColor(x.a.level) : "#787671"} width={120} height={28} />
                     </button>
                   </div>
                 )}
@@ -408,14 +435,14 @@ export default function CustomerList() {
                   </div>
                 )}
                 <div className="mt-2.5 flex gap-2">
-                  <button className="flex-1 rounded-lg border border-border py-2 text-[12.5px] text-ink-2" onClick={() => openFactor(x.customer)}>
+                  <button className="flex-1 rounded-lg border border-border py-2 text-[13.5px] text-ink-2" onClick={() => openFactor(x.customer)}>
                     编辑
                   </button>
                 </div>
               </div>
             ))}
           </div>
-          <div className="mt-3 text-[12px] text-muted">
+          <div className="mt-3 text-[13px] text-muted">
             共 {filtered.length} 条
           </div>
         </>
@@ -426,29 +453,30 @@ export default function CustomerList() {
           title={factorDrawer.readOnly ? `客户信息 — ${factorDrawer.customer.customer_name}` : `编辑客户 — ${factorDrawer.customer.customer_name}`}
           onClose={() => setFactorDrawer(null)}
           narrow={factorDrawer.readOnly}
+          lightMask={!factorDrawer.readOnly}
           footer={
             factorDrawer.readOnly ? (
               <>
-                <span className="mr-auto text-[12px] text-muted">
-                  当前基础客情分{" "}
+                <span className="mr-auto text-[13px] text-muted">
+                  当前客情评分{" "}
                   <b className="text-danger">
                     {factorDrawer.customer ? (assess[factorDrawer.customer.id]?.total_score ?? "—") : "—"}
                   </b>
                 </span>
-                <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={() => setFactorDrawer(null)}>
+                <button className="rounded-lg border border-border px-3 py-2 text-[14px] text-ink-2" onClick={() => setFactorDrawer(null)}>
                   关闭
                 </button>
-                <button className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white" onClick={() => evalCustomer(factorDrawer.customer)}>
+                <button className="rounded-lg bg-accent px-3 py-2 text-[14px] font-medium text-white" onClick={() => evalCustomer(factorDrawer.customer)}>
                   ✨ AI 评估
                 </button>
               </>
             ) : (
               <>
-                <span className="mr-auto text-[12px] text-muted">保存后重算基础客情分并写入评估历史</span>
-                <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={() => setFactorDrawer(null)}>
+                <span className="mr-auto whitespace-nowrap text-[13px] text-muted">保存后自动重算评分并写入历史</span>
+                <button className="rounded-lg border border-border px-3 py-2 text-[14px] text-ink-2" onClick={() => setFactorDrawer(null)}>
                   取消
                 </button>
-                <button className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50" onClick={saveFactors} disabled={saving}>
+                <button className="rounded-lg bg-accent px-3 py-2 text-[14px] font-medium text-white disabled:opacity-50" onClick={saveFactors} disabled={saving}>
                   {saving ? "保存中…" : "保存并重新评分"}
                 </button>
               </>
@@ -456,7 +484,7 @@ export default function CustomerList() {
           }
         >
           {factorDrawer.readOnly && (
-            <div className="mb-3 rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 text-[12px] text-warning">
+            <div className="mb-3 rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 text-[13px] text-warning">
               📱 移动端为只读视图。因子编辑请在桌面端完成。
             </div>
           )}
@@ -471,25 +499,25 @@ export default function CustomerList() {
       )}
 
       {trendDrawer && (
-        <Drawer title={`📈 ${trendDrawer.customer_name} — 健康分历史趋势`} onClose={() => setTrendDrawer(null)}>
+        <Drawer title={`📈 ${trendDrawer.customer_name} — 客情评分历史趋势`} onClose={() => setTrendDrawer(null)}>
           <TrendDrawerBody a={assess[trendDrawer.id] ?? undefined} t={trends[trendDrawer.id] ?? undefined} />
         </Drawer>
       )}
 
-      {addOpen && <AddCustomerModal config={config} onClose={() => setAddOpen(false)} onDone={() => { setAddOpen(false); fetchData(); }} />}
+      {addOpen && <AddCustomerModal config={config} onClose={() => setAddOpen(false)} onDone={() => { setAddOpen(false); setLoading(true); setError(null); fetchData(); }} />}
     </div>
   );
 }
 
 const selCls =
-  "rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20";
+  "rounded-lg border border-border-strong bg-surface px-3 py-2 text-[14px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20";
 
 function Stat({ label, value, danger, warning }: { label: string; value: string; danger?: boolean; warning?: boolean }) {
   const color = danger ? "text-danger" : warning ? "text-warning" : "text-ink";
   return (
     <div className="flex items-baseline gap-2">
-      <div className={`text-[20px] font-semibold leading-none ${color}`}>{value}</div>
-      <div className="text-[12px] text-muted">{label}</div>
+      <div className={`text-[21px] font-semibold leading-none ${color}`}>{value}</div>
+      <div className="text-[13px] text-muted">{label}</div>
     </div>
   );
 }
@@ -497,7 +525,7 @@ function Stat({ label, value, danger, warning }: { label: string; value: string;
 function ScoreCell({ score, level }: { score: number; level: string }) {
   const color = levelColor(level);
   return (
-    <span className="whitespace-nowrap text-[16px] font-bold" style={{ color }}>
+    <span className="whitespace-nowrap text-[17px] font-bold" style={{ color }}>
       {Math.round(score * 10) / 10}
     </span>
   );
@@ -506,7 +534,7 @@ function ScoreCell({ score, level }: { score: number; level: string }) {
 function TrendArrow({ trend }: { trend: AssessmentTrendResponse }) {
   const t = trendMeta(trend.latest_score, trend.previous_score);
   return (
-    <span className={`text-[11px] font-medium ${t.cls === "trend-up" ? "text-success" : t.cls === "trend-down" ? "text-danger" : "text-muted"}`}>
+    <span className={`text-[12px] font-medium ${t.cls === "trend-up" ? "text-success" : t.cls === "trend-down" ? "text-danger" : "text-muted"}`}>
       {t.arrow} {t.text}
     </span>
   );
@@ -518,19 +546,25 @@ function Drawer({
   children,
   footer,
   narrow,
+  lightMask,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
   narrow?: boolean;
+  lightMask?: boolean;
 }) {
   return (
     <>
-      <div className="overlay-mask" onClick={onClose} />
+      <div
+        className="overlay-mask"
+        style={lightMask ? { background: "rgba(15, 15, 15, 0.12)" } : undefined}
+        onClick={onClose}
+      />
       <div className={`drawer-panel ${narrow ? "narrow" : ""}`}>
         <div className="flex items-center border-b border-border px-4 py-3">
-          <h3 className="flex-1 truncate text-[15px] font-semibold text-ink">{title}</h3>
+          <h3 className="flex-1 truncate text-[16px] font-semibold text-ink">{title}</h3>
           <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
             ✕
           </button>
@@ -556,12 +590,12 @@ function TrendDrawerBody({
       {a && (
         <div className="mb-3 flex items-center gap-3">
           <div>
-            <div className="text-[20px] font-bold" style={{ color }}>
+            <div className="text-[21px] font-bold" style={{ color }}>
               {Math.round(a.total_score * 10) / 10}
             </div>
             <LevelBadge grade={a.level} size="sm" />
           </div>
-          <div className="text-[12px] text-muted">
+          <div className="text-[13px] text-muted">
             满分 {a.max_score} · 共 {t?.points.length ?? 0} 次评估
           </div>
         </div>
@@ -571,11 +605,11 @@ function TrendDrawerBody({
           <TrendChart trend={t} color={color} width={420} height={180} />
         </div>
       ) : (
-        <div className="rounded-xl border border-border-soft bg-surface-2 p-4 text-[13px] text-muted">暂无趋势数据</div>
+        <div className="rounded-xl border border-border-soft bg-surface-2 p-4 text-[14px] text-muted">暂无趋势数据</div>
       )}
       {history.length > 0 && (
         <div className="mt-3 overflow-hidden rounded-xl border border-border">
-          <table className="w-full text-[12.5px]">
+          <table className="w-full text-[13.5px]">
             <thead className="bg-surface-2 text-muted">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">评估时间</th>
@@ -613,7 +647,7 @@ function TrendDrawerBody({
           </table>
         </div>
       )}
-      <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[12px] text-muted">
+      <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[13px] text-muted">
         曲线基于 AssessmentHistory 全量记录；点击行内任意位置可编辑客户信息。
       </div>
     </div>
@@ -641,58 +675,6 @@ const EMPTY_CUSTOMER: CustomerResponse = {
   updated_at: "",
 };
 
-// 批量导入模板表头：须与 backend/routers/customers.py 的 field_map 保持一致
-const IMPORT_TEMPLATE_HEADERS = [
-  "客户名称",
-  "行业",
-  "对接人",
-  "联系电话",
-  "合作年限",
-  "沟通频率",
-  "最近联系日期",
-  "客户满意度",
-  "合同金额(万元)",
-  "回款情况",
-  "风险信号",
-  "竞品介入",
-  "增长潜力",
-  "备注",
-];
-const IMPORT_TEMPLATE_SAMPLE_MAP: Record<string, string> = {
-  客户名称: "示例科技",
-  行业: "制造业",
-  对接人: "张三",
-  联系电话: "13800000000",
-  备注: "重点跟进客户",
-  合作年限: "3",
-  沟通频率: "每月",
-  最近联系日期: "2026-07-01",
-  满意度评分: "8",
-  合同金额: "500",
-  回款情况: "正常",
-  风险信号: "",
-  竞品介入: "否",
-  增长潜力: "高",
-  交付质量: "良",
-  技术适配度: "高",
-  需求响应时效: "24小时内响应",
-  团队稳定性: "稳定",
-};
-
-// 由配置动态生成模板表头：基础字段 + 各因子 label（与后端导入识别一致）
-const buildTemplateHeaders = (cfg: FactorConfigResponse | null): string[] => {
-  if (!cfg) return IMPORT_TEMPLATE_HEADERS;
-  const base = ["客户名称", "行业", "对接人", "联系电话", "备注"];
-  const labels: string[] = [];
-  for (const dim of cfg.dimensions) {
-    for (const f of dim.factors) {
-      if (f.input.type === "readonly") continue;
-      labels.push(f.label);
-    }
-  }
-  return [...base, ...labels];
-};
-
 function AddCustomerModal({
   config,
   onClose,
@@ -707,19 +689,20 @@ function AddCustomerModal({
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const downloadTemplate = () => {
-    const headers = buildTemplateHeaders(config);
-    const sample = headers.map((h) => IMPORT_TEMPLATE_SAMPLE_MAP[h] ?? "");
-    const csv = "﻿" + [headers.join(","), sample.join(",")].join("\r\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "客户导入模板.csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const downloadTemplate = async () => {
+    try {
+      const blob = await customers.importTemplate();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "客户导入模板.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("模板下载失败，请稍后重试");
+    }
   };
 
   const submitSingle = async () => {
@@ -761,7 +744,7 @@ function AddCustomerModal({
       <div className="overlay-mask" onClick={onClose} />
       <div className="modal-panel">
         <div className="flex items-center border-b border-border px-4 py-3">
-          <h3 className="flex-1 text-[15px] font-semibold text-ink">＋ 添加客户</h3>
+          <h3 className="flex-1 text-[16px] font-semibold text-ink">＋ 添加客户</h3>
           <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
             ✕
           </button>
@@ -776,7 +759,7 @@ function AddCustomerModal({
             <button
               key={item.k}
               onClick={() => setTab(item.k)}
-              className={`rounded-t-lg px-3 py-2 text-[13px] transition ${
+              className={`rounded-t-lg px-3 py-2 text-[14px] transition ${
                 tab === item.k ? "border-b-2 border-accent font-medium text-accent" : "text-muted hover:text-ink-2"
               }`}
             >
@@ -791,7 +774,7 @@ function AddCustomerModal({
               {config ? (
                 <CustomerForm customer={EMPTY_CUSTOMER} config={config} value={draft} onChange={setDraft} />
               ) : (
-                <div className="text-[12.5px] text-muted">因子配置加载中…</div>
+                <div className="text-[13.5px] text-muted">因子配置加载中…</div>
               )}
             </div>
           ) : (
@@ -799,11 +782,11 @@ function AddCustomerModal({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={downloadTemplate}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent"
                 >
                   ⬇️ 下载模板
                 </button>
-                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent">
                   📁 选择文件
                   <input
                     type="file"
@@ -813,7 +796,7 @@ function AddCustomerModal({
                   />
                 </label>
                 {file && (
-                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-surface-2 px-3 py-1.5 text-[12.5px] text-ink-2">
+                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-surface-2 px-3 py-1.5 text-[13.5px] text-ink-2">
                     已选择：{file.name}
                     <button
                       type="button"
@@ -831,12 +814,12 @@ function AddCustomerModal({
 
         <div className="flex items-center gap-2 border-t border-border px-4 py-3">
           <span className="mr-auto" />
-          <button className="rounded-lg border border-border px-3 py-2 text-[13px] text-ink-2" onClick={onClose}>
+          <button className="rounded-lg border border-border px-3 py-2 text-[14px] text-ink-2" onClick={onClose}>
             取消
           </button>
           {tab === "single" ? (
             <button
-              className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50"
+              className="rounded-lg bg-accent px-3 py-2 text-[14px] font-medium text-white disabled:opacity-50"
               onClick={submitSingle}
               disabled={busy || !String(draft.customer_name ?? "").trim()}
             >
@@ -844,7 +827,7 @@ function AddCustomerModal({
             </button>
           ) : (
             <button
-              className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50"
+              className="rounded-lg bg-accent px-3 py-2 text-[14px] font-medium text-white disabled:opacity-50"
               onClick={submitImport}
               disabled={busy || !file}
             >

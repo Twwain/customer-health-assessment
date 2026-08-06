@@ -1,6 +1,9 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_PROD_DEPS: ${INSTALL_PROD_DEPS:-1}
     ports:
       - "80:8000"
     volumes:

@@ -1,6 +1,6 @@
-"""知识库 RAG 服务（SOW §3.3）。
+"""知识库 RAG 服务。
 
-管道：解析 → 中文切片 → 向量化（智谱 GLM embedding-3）→ 向量库（Chroma / 内存）→ 重排 → 检索。
+管道：解析 → 中文切片 → 向量化（大模型兼容协议）→ 向量库（Chroma / 内存）→ 重排 → 检索。
 对外暴露 ``KnowledgeBaseService``（CRUD + 索引编排）与 ``retrieve_knowledge``（检索入口）。
 """
 

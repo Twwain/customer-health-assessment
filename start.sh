@@ -1,5 +1,5 @@
 #!/bin/bash
-# 客情健康度评估系统 - 一键启动
+# 客情评估智能体 - 一键启动
 # 用法: bash start.sh    (Ctrl+C 同时停止前后端)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,7 +17,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 echo "==================================="
-echo "  客情健康度评估系统"
+echo "  客情评估智能体"
 echo "  后端: http://localhost:8000"
 echo "  前端: http://localhost:5173"
 echo "  Ctrl+C 停止所有服务"

@@ -1,10 +1,10 @@
-"""统一 LLM 适配层（SOW §3.2.3 / §2.2）。
+"""统一 LLM 适配层。
 
-只暴露一个 ``chat_completion`` 语义：本期接 DeepSeek-V4-Flash（Chat）+ 智谱 GLM
-embedding-3（Embedding），二者都走 **OpenAI 兼容协议**，因此换供应商只需改
-``.env`` 里的 BASE_URL / MODEL / API_KEY，不改业务代码。
+只暴露一个 ``chat_completion`` 语义：对话与向量化统一走大模型兼容协议
+（/chat/completions 与 /embeddings），换服务商只需改 ``.env`` 里的
+BASE_URL / MODEL / API_KEY，不改业务代码。
 
-可用性约定（SOW §7）：
+可用性约定：
 - 未配置 API Key、缺少 httpx、开关关闭、网络异常、重试耗尽
   → 一律抛 ``LLMUnavailableError``，由上层 ``chat_engine`` 降级为规则引擎回复。
 """
@@ -59,7 +59,7 @@ class ChatResult:
 
 
 def normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
-    """把 OpenAI 响应的 tool_calls 归一化为 {id, name, arguments} 列表。"""
+    """把大模型响应的 tool_calls 归一化为 {id, name, arguments} 列表。"""
     normalized: list[dict[str, Any]] = []
     for tc in raw or []:
         function = tc.get("function") or {}
@@ -81,11 +81,11 @@ def estimate_tokens(text: str) -> int:
     return int(cjk + (len(text) - cjk) / 4)
 
 
-# ── OpenAI 兼容适配器 ───────────────────────────────────────────────────────
+# ── 大模型兼容适配器 ───────────────────────────────────────────────────────
 
 
-class OpenAICompatibleAdapter:
-    """OpenAI 兼容协议客户端（DeepSeek / 智谱 / 任意兼容网关通用）。"""
+class CompatAdapter:
+    """大模型兼容协议客户端（任意兼容网关通用）。"""
 
     def __init__(
         self,
@@ -285,7 +285,7 @@ class OpenAICompatibleAdapter:
         tools: Sequence[dict] | None = None,
         on_tool_calls=None,
     ) -> Iterator[str]:
-        """逐 Token 产出文本增量（SOW §3.2.1 首字延迟 < 2s）。
+        """逐 Token 产出文本增量。
 
         ``on_usage`` 可选回调，流结束时回传 usage 字典（用于 Token 统计）。
         首个增量到达前的错误一律转成 ``LLMUnavailableError``，便于上层降级；
@@ -392,7 +392,7 @@ class OpenAICompatibleAdapter:
     # ── Embedding ───────────────────────────────────────────────────────
 
     def embed(self, texts: Sequence[str], *, dimensions: int | None = None) -> list[list[float]]:
-        """批量向量化（智谱 embedding-3 兼容 OpenAI /embeddings）。"""
+        """批量向量化（大模型兼容 /embeddings 协议）。"""
         self._ensure_available()
         inputs = [t for t in texts]
         if not inputs:
@@ -422,14 +422,14 @@ class _StreamStarted(Exception):
 
 # ── 单例与注入 ──────────────────────────────────────────────────────────────
 
-_chat_adapter: OpenAICompatibleAdapter | None = None
-_embedding_adapter: OpenAICompatibleAdapter | None = None
+_chat_adapter: CompatAdapter | None = None
+_embedding_adapter: CompatAdapter | None = None
 
 
-def get_chat_adapter() -> OpenAICompatibleAdapter:
+def get_chat_adapter() -> CompatAdapter:
     global _chat_adapter
     if _chat_adapter is None:
-        _chat_adapter = OpenAICompatibleAdapter(
+        _chat_adapter = CompatAdapter(
             name=config.LLM_PROVIDER,
             base_url=config.LLM_BASE_URL,
             api_key=config.LLM_API_KEY,
@@ -446,10 +446,10 @@ def get_chat_adapter() -> OpenAICompatibleAdapter:
     return _chat_adapter
 
 
-def get_embedding_adapter() -> OpenAICompatibleAdapter:
+def get_embedding_adapter() -> CompatAdapter:
     global _embedding_adapter
     if _embedding_adapter is None:
-        _embedding_adapter = OpenAICompatibleAdapter(
+        _embedding_adapter = CompatAdapter(
             name=config.EMBEDDING_PROVIDER,
             base_url=config.EMBEDDING_BASE_URL,
             api_key=config.EMBEDDING_API_KEY,

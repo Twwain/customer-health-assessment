@@ -1,4 +1,4 @@
-"""RAG 知识库测试（SOW §3.3 M3 / §6.4）。
+"""RAG 知识库测试。
 
 覆盖：文档解析、中文切片、向量存储（内存）、重排、检索过滤、知识库 CRUD、
 上传→索引→检索→审核→删除→重索引全链路，以及知识上下文注入对话 Prompt。
@@ -28,7 +28,7 @@ from services.rag.vector_store import InMemoryVectorStore, get_vector_store
 METHODOLOGY_MD = """# 客户健康度评估方法论
 
 回款状态为严重逾期时应优先安排回款催收，评估竞品介入风险。
-关系紧密度由合作年限与沟通频率决定。行业基准健康度均值约 72 分。
+KCR 关键客户关系由决策链覆盖度与关键人支持度决定。行业基准健康度均值约 72 分。
 """
 
 TREND_MD = """# 外部行业趋势
@@ -338,7 +338,7 @@ def test_build_knowledge_context_degrades_without_query(db, memory_store, fake_e
     assert refs == []
 
 
-# ══════════════════════════ 接口层（SOW §6.4）═══════════════════════════════
+# ══════════════════════════ 接口层═══════════════════════════════
 
 
 @pytest.fixture()

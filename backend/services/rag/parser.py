@@ -1,4 +1,4 @@
-"""文档解析（SOW §3.3.2）。
+"""文档解析。
 
 支持文本型 PDF / Markdown / TXT / XLSX / CSV / DOCX 的文本抽取。
 重型依赖（PyMuPDF / python-docx）按需 lazy import，缺失时抛出 ``ParseError`` 并提示安装方式；

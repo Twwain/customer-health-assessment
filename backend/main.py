@@ -31,7 +31,7 @@ def _migrate_legacy_data() -> None:
 
 _migrate_legacy_data()
 
-app = FastAPI(title="客情评估智能体", version="3.0.0")
+app = FastAPI(title="客情评估智能体")
 
 # CORS：生产为同源部署，跨域主要面向本地开发（Vite 代理外的直连场景）。
 # allow_origins="*" 与 allow_credentials=True 是浏览器规范禁止的组合，
@@ -54,7 +54,7 @@ app.include_router(knowledge.router, prefix="/api")
 
 @app.get("/api")
 def root():
-    return {"message": "客情健康度评估系统 API"}
+    return {"message": "客情评估智能体 API"}
 
 
 # 生产模式：serve 前端静态文件

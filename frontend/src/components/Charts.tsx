@@ -1,4 +1,5 @@
-import type { AssessmentTrendResponse, DimensionScore, LevelConfigItem } from "../types";
+import { useId } from "react";
+import type { AssessmentTrendResponse, LevelConfigItem } from "../types";
 
 // 图表组件（SVG 自绘，1:1 还原 docs/prototype/app.js 的 SVG 逻辑，确保与冻结基线一致）。
 // 注：recharts 为项目依赖，但手写 SVG 可保证与评审基线像素级一致，避免主题化偏移。
@@ -45,7 +46,7 @@ export function Ring({
         <b style={{ color, fontSize: size * 0.26, lineHeight: 1 }}>
           {Math.round(score * 10) / 10}
         </b>
-        <span style={{ fontSize: 10, color: "#666666" }}>健康分</span>
+        <span style={{ fontSize: 11, color: "#666666" }}>客情评分</span>
       </div>
     </div>
   );
@@ -99,89 +100,6 @@ export function Sparkline({
   );
 }
 
-export function RadarChart({
-  dimensions,
-  color,
-  size = 190,
-  labels,
-}: {
-  dimensions: DimensionScore[];
-  color: string;
-  size?: number;
-  labels?: string[];
-}) {
-  const cx = size / 2;
-  const cy = size / 2 + 4;
-  const R = size / 2 - 34;
-  const ang = [-90, 0, 90, 180].map((a) => (a * Math.PI) / 180);
-  const maxOf = (i: number) => dimensions[i]?.max_score || 25;
-  const pt = (i: number, ratio: number): [number, number] => [
-    cx + Math.cos(ang[i]) * R * ratio,
-    cy + Math.sin(ang[i]) * R * ratio,
-  ];
-
-  const grid = [0.25, 0.5, 0.75, 1]
-    .map((rt) => {
-      const p = [0, 1, 2, 3]
-        .map((i) => pt(i, rt).map((n) => n.toFixed(1)).join(","))
-        .join(" ");
-      return <polygon key={rt} points={p} fill="none" stroke="#E5E5E5" strokeWidth={1} />;
-    });
-  const axes = [0, 1, 2, 3].map((i) => {
-    const p = pt(i, 1);
-    return (
-      <line key={i} x1={cx} y1={cy} x2={p[0].toFixed(1)} y2={p[1].toFixed(1)} stroke="#E5E5E5" strokeWidth={1} />
-    );
-  });
-  const dp = dimensions
-    .map((d, i) => pt(i, Math.max(d.score / maxOf(i), 0.02)).map((n) => n.toFixed(1)).join(","))
-    .join(" ");
-  const dots = dimensions.map((d, i) => {
-    const p = pt(i, Math.max(d.score / maxOf(i), 0.02));
-    return <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r={3} fill={color} />;
-  });
-  const anchors: Array<"middle" | "start" | "end"> = ["middle", "start", "middle", "end"];
-  const dy = [-9, 4, 15, 4];
-  const dx = [0, 8, 0, -8];
-  const labelsEls = dimensions.map((d, i) => {
-    const p = pt(i, 1);
-    const name = labels?.[i] ?? d.name;
-    return (
-      <g key={i}>
-        <text
-          x={(p[0] + dx[i]).toFixed(1)}
-          y={(p[1] + dy[i]).toFixed(1)}
-          textAnchor={anchors[i]}
-          fontSize={10.5}
-          fill="#555555"
-        >
-          {name}
-        </text>
-        <text
-          x={(p[0] + dx[i]).toFixed(1)}
-          y={(p[1] + dy[i] + 12).toFixed(1)}
-          textAnchor={anchors[i]}
-          fontSize={10}
-          fontWeight={700}
-          fill={color}
-        >
-          {Math.round(d.score * 10) / 10}
-        </text>
-      </g>
-    );
-  });
-
-  return (
-    <svg width={size} height={size + 14} viewBox={`0 0 ${size} ${size + 14}`}>
-      {grid}
-      {axes}
-      <polygon points={dp} fill={color} fillOpacity={0.16} stroke={color} strokeWidth={1.8} />
-      {dots}
-      {labelsEls}
-    </svg>
-  );
-}
-
 export function TrendChart({
   trend,
   color,
@@ -193,22 +111,44 @@ export function TrendChart({
   width?: number;
   height?: number;
 }) {
+  const gid = `trend-grad-${useId().replace(/:/g, "")}`;
   const vals = trend.points.map((p) => p.total_score);
-  if (vals.length === 0) return <div style={{ color: "#666666", fontSize: 13 }}>暂无趋势数据</div>;
+  if (vals.length === 0) return <div style={{ color: "#666666", fontSize: 14 }}>暂无趋势数据</div>;
   const labels = trend.points.map((p) => p.label);
-  const padL = 30;
-  const padR = 12;
-  const padT = 12;
-  const padB = 22;
+  const padL = 36;
+  const padR = 14;
+  const padT = 20;
+  const padB = 26;
   const iw = width - padL - padR;
   const ih = height - padT - padB;
   const y = (v: number) => padT + ih - (v / 100) * ih;
   const x = (i: number) => padL + (i / Math.max(vals.length - 1, 1)) * iw;
 
+  // 平滑曲线：Catmull-Rom 转三次贝塞尔
+  const smoothPath = (pts: Array<[number, number]>): string => {
+    if (pts.length < 2) return "";
+    let d = `M ${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(i - 1, 0)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(i + 2, pts.length - 1)];
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+      const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+      const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+    }
+    return d;
+  };
+
+  const pts: Array<[number, number]> = vals.map((v, i) => [x(i), y(v)]);
+  const linePath = smoothPath(pts);
+  const areaPath = `${linePath} L ${x(vals.length - 1).toFixed(1)} ${padT + ih} L ${padL} ${padT + ih} Z`;
   const gridLines = [0, 25, 50, 75, 100].map((v) => (
     <g key={v}>
-      <line x1={padL} y1={y(v)} x2={width - padR} y2={y(v)} stroke="#EFEFEF" strokeWidth={1} />
-      <text x={padL - 6} y={y(v) + 3.5} textAnchor="end" fontSize={9.5} fill="#9C9C9C">
+      <line x1={padL} y1={y(v)} x2={width - padR} y2={y(v)} stroke={v === 0 ? "#E5E5E5" : "#F2F2F2"} strokeWidth={1} />
+      <text x={padL - 7} y={y(v) + 3.5} textAnchor="end" fontSize={10} fill="#9C9C9C">
         {v}
       </text>
     </g>
@@ -216,9 +156,6 @@ export function TrendChart({
 
   const levelLines = (trend.level_lines || []).map((lv: LevelConfigItem) => {
     if (lv.min_score <= 0 || lv.min_score >= 100) return null;
-    const isRisk = lv.name.includes("风险");
-    const isGood = lv.name.includes("良好");
-    const stroke = isRisk ? "#EF4444" : isGood ? "#3B82F6" : "#B5B5B5";
     return (
       <g key={lv.name}>
         <line
@@ -226,51 +163,59 @@ export function TrendChart({
           y1={y(lv.min_score)}
           x2={width - padR}
           y2={y(lv.min_score)}
-          stroke={stroke}
+          stroke={lv.color}
           strokeWidth={1}
-          strokeDasharray="4 3"
-          opacity={isRisk ? 0.5 : 0.35}
+          strokeDasharray="5 4"
+          opacity={0.45}
         />
         <text
           x={width - padR - 2}
           y={y(lv.min_score) - 4}
           textAnchor="end"
-          fontSize={9}
-          fill={stroke}
+          fontSize={10}
+          fill={lv.color}
+          opacity={0.85}
         >
-          {lv.name}线 {lv.min_score}
+          {lv.name} {lv.min_score}
         </text>
       </g>
     );
   });
 
-  const linePts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
-  const area = `${linePts} ${x(vals.length - 1).toFixed(1)},${padT + ih} ${padL},${padT + ih}`;
   const dots = vals.map((v, i) => {
     const last = i === vals.length - 1;
     return (
       <g key={i}>
-        <circle cx={x(i).toFixed(1)} cy={y(v).toFixed(1)} r={3.2} fill="#fff" stroke={color} strokeWidth={2} />
+        <circle cx={x(i).toFixed(1)} cy={y(v).toFixed(1)} r={last ? 4 : 3} fill="#fff" stroke={color} strokeWidth={last ? 2.4 : 1.8} />
         {last && (
-          <text x={x(i).toFixed(1)} y={(y(v) - 10).toFixed(1)} textAnchor="middle" fontSize={11} fontWeight={700} fill={color}>
+          <text x={x(i).toFixed(1)} y={(y(v) - 12).toFixed(1)} textAnchor="middle" fontSize={12} fontWeight={700} fill={color}>
             {v}
           </text>
         )}
       </g>
     );
   });
-  const xl = labels.map((lb, i) => (
-    <text key={i} x={x(i).toFixed(1)} y={height - 6} textAnchor="middle" fontSize={9.5} fill="#666666">
-      {lb}
-    </text>
-  ));
+  const step = vals.length > 6 ? Math.ceil(vals.length / 5) : 1;
+  const xl = labels.map((lb, i) =>
+    i % step === 0 || i === vals.length - 1 ? (
+      <text key={i} x={x(i).toFixed(1)} y={height - 8} textAnchor="middle" fontSize={10} fill="#666666">
+        {lb}
+      </text>
+    ) : null
+  );
 
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="客情评分趋势">
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.22} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
       {gridLines}
       {levelLines}
-      <polygon points={area} fill={color} opacity={0.08} />
-      <polyline points={linePts} fill="none" stroke={color} strokeWidth={2.2} strokeLinejoin="round" />
+      <path d={areaPath} fill={`url(#${gid})`} />
+      <path d={linePath} fill="none" stroke={color} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
       {dots}
       {xl}
     </svg>

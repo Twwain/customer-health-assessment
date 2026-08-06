@@ -1,4 +1,4 @@
-"""向量存储抽象（SOW §3.3.2）。
+"""向量存储抽象。
 
 两种后端：
 - ``ChromaVectorStore``：生产后端，持久化到磁盘，需 ``chromadb``（Docker 环境安装）。

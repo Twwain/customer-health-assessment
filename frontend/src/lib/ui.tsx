@@ -13,10 +13,10 @@ export interface LevelSpec {
 // 默认等级（与后端 scoring_config.yaml 出厂配置一致），仅作兜底；
 // 实际等级以 /api/customers/factor-config 下发的 levels 为准（setLevels 注册）。
 const DEFAULT_LEVELS: LevelSpec[] = [
-  { name: "优秀", min_score: 85, color: "#22C55E" },
-  { name: "良好", min_score: 70, color: "#3B82F6" },
-  { name: "一般", min_score: 55, color: "#EAB308" },
-  { name: "风险", min_score: 0, color: "#EF4444" },
+  { name: "健康", min_score: 80, color: "#22C55E" },
+  { name: "亚健康", min_score: 60, color: "#EAB308" },
+  { name: "风险", min_score: 40, color: "#F97316" },
+  { name: "高危", min_score: 0, color: "#EF4444" },
 ];
 
 let _levels: LevelSpec[] = DEFAULT_LEVELS;
@@ -43,13 +43,13 @@ export function levelColor(grade: string): string {
   const hit = _levels.find((lv) => lv.name === grade);
   if (hit) return hit.color;
   return (
-    { 优秀: "#22C55E", 良好: "#3B82F6", 一般: "#EAB308", 风险: "#EF4444" }[grade] || "#3B82F6"
+    { 健康: "#22C55E", 亚健康: "#EAB308", 风险: "#F97316", 高危: "#EF4444" }[grade] || "#3B82F6"
   );
 }
 
 export function levelClass(grade: string): string {
   return (
-    { 优秀: "lv-excellent", 良好: "lv-good", 一般: "lv-normal", 风险: "lv-risk" }[grade] ||
+    { 健康: "lv-excellent", 亚健康: "lv-good", 风险: "lv-normal", 高危: "lv-risk" }[grade] ||
     "lv-normal"
   );
 }

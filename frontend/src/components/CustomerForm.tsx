@@ -1,13 +1,6 @@
+import { useState } from "react";
 import type { CustomerResponse, FactorConfigItem, FactorConfigResponse } from "../types";
-
-/** 客户基本信息字段（与后端 CustomerUpdate 一致），与客情因子区分开 */
-export const BASIC_FIELDS = [
-  "customer_name",
-  "industry",
-  "contact_person",
-  "contact_phone",
-  "notes",
-] as const;
+import { BASIC_FIELDS } from "../lib/customerFields";
 
 interface CustomerFormProps {
   customer: CustomerResponse;
@@ -38,6 +31,21 @@ function getBase(customer: CustomerResponse, config: FactorConfigResponse): Reco
 export default function CustomerForm({ customer, config, value, onChange, readOnly }: CustomerFormProps) {
   const base = getBase(customer, config);
   const merged: Record<string, unknown> = { ...base, ...value };
+  const enabledDims = config.dimensions.filter((d) => d.enabled);
+  // 客情因子按维度折叠，默认全部收起（60 个因子全展开影响录入体验）
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(enabledDims.map((d) => [d.key, true]))
+  );
+  const allCollapsed = enabledDims.every((d) => collapsed[d.key]);
+  const toggleAll = () => {
+    const next = !allCollapsed;
+    setCollapsed(Object.fromEntries(enabledDims.map((d) => [d.key, next])));
+  };
+  const filledCount = (dim: (typeof enabledDims)[number]) =>
+    dim.factors.filter((f) => {
+      const v = merged[f.field];
+      return v !== undefined && v !== null && v !== "" && v !== false;
+    }).length;
 
   const set = (field: string, v: unknown) => onChange({ ...value, [field]: v });
 
@@ -46,7 +54,7 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
       {/* 区块一：客户基本信息 */}
       <div className="rounded-xl border border-border bg-surface p-3">
         <div className="mb-2.5 flex items-center gap-2">
-          <span className="text-[13.5px] font-semibold text-ink">📇 客户基本信息</span>
+          <span className="text-[14.5px] font-semibold text-ink">📇 客户基本信息</span>
         </div>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
           <BasicField
@@ -96,35 +104,56 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
       {/* 区块二：客情因子信息 */}
       <div className="rounded-xl border border-border bg-surface p-3">
         <div className="mb-2.5 flex items-center gap-2">
-          <span className="text-[13.5px] font-semibold text-ink">🧩 客情因子信息</span>
-          <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[11px] text-muted">维度驱动评分</span>
+          <span className="text-[14.5px] font-semibold text-ink">🧩 客情因子信息</span>
+          <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[12px] text-muted">维度驱动评分</span>
+          <button
+            type="button"
+            onClick={toggleAll}
+            className="ml-auto rounded-lg border border-border bg-surface px-2 py-1 text-[12px] text-ink-2 transition hover:border-accent hover:text-accent"
+          >
+            {allCollapsed ? "全部展开" : "全部收起"}
+          </button>
         </div>
         <div className="divide-y divide-border-soft">
-          {config.dimensions
-            .filter((d) => d.enabled)
-            .map((dim, di) => (
+          {enabledDims.map((dim, di) => {
+            const isOpen = !collapsed[dim.key];
+            const filled = filledCount(dim);
+            return (
               <div key={dim.key} className={di === 0 ? "pb-3" : "py-3"}>
-            <div className="mb-2.5 flex items-center gap-2">
-              <span className="text-[13.5px] font-semibold text-ink">
-                {["①", "②", "③", "④", "⑤", "⑥"][di] ?? "•"} {dim.name}
-              </span>
-              <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[11px] text-muted">
-                维度权重 {dim.max_score} 分
-              </span>
-            </div>
-            <div className="space-y-2.5">
-              {dim.factors.map((f) => (
-                <FactorField
-                  key={f.field}
-                  factor={f}
-                  value={merged[f.field]}
-                  readOnly={readOnly}
-                  onChange={(v) => set(f.field, v)}
-                />
-              ))}
-            </div>
+                <button
+                  type="button"
+                  onClick={() => setCollapsed((s) => ({ ...s, [dim.key]: !s[dim.key] }))}
+                  className="mb-2.5 flex w-full items-center gap-2 text-left"
+                >
+                  <span className={`text-[11px] text-muted transition-transform ${isOpen ? "rotate-90" : ""}`}>▶</span>
+                  <span className="text-[14.5px] font-semibold text-ink">
+                    {["①", "②", "③", "④", "⑤", "⑥", "⑦"][di] ?? "•"} {dim.name}
+                  </span>
+                  <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[12px] text-muted">
+                    维度权重 {dim.max_score} 分
+                  </span>
+                  {filled > 0 && (
+                    <span className="rounded bg-accent-soft px-1.5 py-[1px] text-[12px] text-accent">
+                      已填 {filled}/{dim.factors.length}
+                    </span>
+                  )}
+                </button>
+                {isOpen && (
+                  <div className="space-y-2.5">
+                    {dim.factors.map((f) => (
+                      <FactorField
+                        key={f.field}
+                        factor={f}
+                        value={merged[f.field]}
+                        readOnly={readOnly}
+                        onChange={(v) => set(f.field, v)}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
-            ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -149,10 +178,10 @@ function BasicField({
   wide?: boolean;
 }) {
   const inputCls =
-    "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
+    "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[14px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
   return (
     <div className={wide ? "sm:col-span-2" : ""}>
-      <label className="mb-1 block text-[12.5px] font-medium text-ink-2">{label}</label>
+      <label className="mb-1 block text-[13.5px] font-medium text-ink-2">{label}</label>
       {type === "textarea" ? (
         <textarea
           className={inputCls}
@@ -176,6 +205,18 @@ function BasicField({
   );
 }
 
+/** 因子输入有效性校验：数字/滑杆需在 min-max 范围内。 */
+function validateFactor(factor: FactorConfigItem, value: unknown): string {
+  const t = factor.input.type;
+  if ((t === "number" || t === "slider") && value !== "" && value != null) {
+    const n = Number(value);
+    if (Number.isNaN(n)) return "请输入有效数字";
+    if (factor.input.min != null && n < factor.input.min) return `不能小于 ${factor.input.min}`;
+    if (factor.input.max != null && n > factor.input.max) return `不能大于 ${factor.input.max}`;
+  }
+  return "";
+}
+
 function FactorField({
   factor,
   value,
@@ -188,11 +229,11 @@ function FactorField({
   onChange: (v: unknown) => void;
 }) {
   const inputCls =
-    "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
+    "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[14px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
+  const err = validateFactor(factor, value);
   const label = (
-    <label className="mb-1 block text-[12.5px] font-medium text-ink-2">
+    <label className="mb-1 block text-[13.5px] font-medium text-ink-2">
       {factor.label}
-      {factor.description && <span className="ml-1 text-[11px] font-normal text-muted">{factor.description}</span>}
     </label>
   );
 
@@ -213,13 +254,22 @@ function FactorField({
     control = (
       <input
         type="number"
-        className={inputCls}
+        className={`${inputCls} ${err ? "border-danger focus:border-danger focus:ring-danger/20" : ""}`}
         min={factor.input.min ?? undefined}
         max={factor.input.max ?? undefined}
         step={factor.input.step ?? undefined}
         value={value === "" || value == null ? "" : Number(value)}
         disabled={readOnly}
         onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
+        onBlur={() => {
+          if (value === "" || value == null) return;
+          const n = Number(value);
+          if (Number.isNaN(n)) return;
+          let next = n;
+          if (factor.input.min != null && next < factor.input.min) next = factor.input.min;
+          if (factor.input.max != null && next > factor.input.max) next = factor.input.max;
+          if (next !== n) onChange(next);
+        }}
       />
     );
   } else if (t === "slider" || t === "range") {
@@ -236,18 +286,21 @@ function FactorField({
           disabled={readOnly}
           onChange={(e) => onChange(Number(e.target.value))}
         />
-        <span className="w-12 text-right text-[14px] font-bold text-accent">{num}</span>
-        {factor.input.unit && <span className="text-[12px] text-muted">{factor.input.unit}</span>}
+        <span className="w-12 text-right text-[15px] font-bold text-accent">{num}</span>
+        {factor.input.unit && <span className="text-[13px] text-muted">{factor.input.unit}</span>}
       </div>
     );
   } else if (t === "select") {
+    // 0 视为未选择（customer_satisfaction 清空时后端存 0）
+    const val = String(value ?? "") === "0" ? "" : String(value ?? "");
     control = (
       <select
         className={inputCls}
-        value={String(value ?? "")}
+        value={val}
         disabled={readOnly}
         onChange={(e) => onChange(e.target.value)}
       >
+        <option value="">未选择</option>
         {factor.input.options.map((o) => (
           <option key={o} value={o}>
             {o}
@@ -267,7 +320,7 @@ function FactorField({
     );
   } else if (t === "bool") {
     control = (
-      <label className="flex items-center gap-2 text-[13px] text-ink-2">
+      <label className="flex items-center gap-2 text-[14px] text-ink-2">
         <input
           type="checkbox"
           className="h-4 w-4 rounded border-border accent-accent"
@@ -294,7 +347,9 @@ function FactorField({
   return (
     <div>
       {label}
+      {factor.description && <div className="mb-1 text-[12px] text-muted">{factor.description}</div>}
       {control}
+      {err && <div className="mt-1 text-[12px] text-danger">{err}</div>}
     </div>
   );
 }

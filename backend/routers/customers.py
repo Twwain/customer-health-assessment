@@ -1,7 +1,8 @@
 import datetime
 import io
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from urllib.parse import quote
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
 from sqlalchemy import Boolean, Date, DateTime, Float, Integer, func, or_
 from sqlalchemy.orm import Session
 from config import SCORING_STRATEGY
@@ -26,6 +27,138 @@ from services.scoring.config_loader import FactorConfig
 import openpyxl
 
 router = APIRouter(prefix="/customers", tags=["客情信息"])
+
+_RULE_COMPARATORS = {"gte": "≥", "gt": ">", "lte": "≤", "lt": "<", "eq": "="}
+
+
+def _rule_text(f: FactorConfig) -> str:
+    """把打分规则转成前端可读文案（如「≥100% → 2.1分；…；其他 → 0.21分」）。"""
+    rule = f.rule
+    params = rule.params
+    unit = f.input.unit or ""
+
+    def _bracket_text(b) -> str:
+        """把单个 bracket 的比较条件拼成文案，支持区间（gte + lt 同时出现）。"""
+        parts = []
+        for comp in _RULE_COMPARATORS:
+            if comp in b:
+                parts.append(f"{_RULE_COMPARATORS[comp]}{b[comp]}")
+        return "且".join(parts) if parts else ""
+
+    if rule.type == "threshold":
+        parts = []
+        for b in params.get("brackets", []):
+            text = _bracket_text(b)
+            if text:
+                parts.append(f"{text}{unit} → {b.get('score')}分")
+        default = params.get("default") or {}
+        if "score" in default:
+            parts.append(f"其他 → {default.get('score')}分")
+        return "；".join(parts)
+    if rule.type == "mapping":
+        return "；".join(f"{k} → {v}分" for k, v in (params.get("map") or {}).items())
+    if rule.type == "days_since":
+        parts = []
+        for b in params.get("brackets", []):
+            text = _bracket_text(b)
+            if text:
+                parts.append(f"{text}天 → {b.get('score')}分")
+        empty = params.get("empty") or {}
+        if "score" in empty:
+            parts.append(f"未填写 → {empty.get('score')}分")
+        return "；".join(parts)
+    if rule.type == "linear":
+        multiplier = params.get("multiplier", 1)
+        offset = params.get("offset", 0)
+        text = f"得分 = 值 × {multiplier} + {offset}"
+        clamp = params.get("clamp") or {}
+        if clamp.get("min") is not None or clamp.get("max") is not None:
+            text += f"（上限 {clamp.get('max', '—')} / 下限 {clamp.get('min', '—')}）"
+        return text
+    if rule.type == "penalty":
+        return f"条件「{params.get('when', 'truthy')}」命中时 {params.get('score', 0)} 分"
+    if rule.type == "constant":
+        return f"固定 {params.get('score', 0)} 分"
+    return ""
+
+
+def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
+    """构造导入模板工作簿：基础字段 + 因子列（下拉引用隐藏「选项源」工作表）。"""
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    base = ["客户名称", "行业", "对接人", "联系电话", "备注"]
+    headers = list(base)
+    factor_cols: list[tuple[int, list[str]]] = []
+    for dim in config.dimensions:
+        for f in dim.factors:
+            if f.input.type == "readonly" or not f.input.options:
+                continue
+            factor_cols.append((len(headers) + 1, list(f.input.options)))
+            headers.append(f.label)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "客户导入模板"
+    ws.append(headers)
+
+    # 示例行：因子列填第一个可选项，方便用户对照填写
+    sample = ["示例科技有限公司", "制造业", "张三", "13800000000", "重点跟进客户"]
+    for _, options in factor_cols:
+        sample.append(options[0] if options else "")
+    ws.append(sample)
+
+    # 因子列下拉校验：可选项写入隐藏的「选项源」工作表，下拉直接引用该区域。
+    # 相比内联公式（"a,b,c"），引用区域不受 Excel 255 字符公式上限约束，
+    # 选项含逗号/引号也不会破坏公式（allow_blank：留空按未填写处理）。
+    opt_ws = wb.create_sheet("选项源")
+    opt_ws.sheet_state = "hidden"
+    for idx, (col, options) in enumerate(factor_cols, start=1):
+        for row, opt in enumerate(options, start=1):
+            opt_ws.cell(row=row, column=idx, value=opt)
+        dv = DataValidation(
+            type="list",
+            formula1=f"'选项源'!${get_column_letter(idx)}$1:${get_column_letter(idx)}${len(options)}",
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle="无效选项",
+            error="请从下拉列表中选择有效选项",
+        )
+        ws.add_data_validation(dv)
+        letter = get_column_letter(col)
+        dv.add(f"{letter}2:{letter}1048576")
+
+    for i in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 22
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf, headers
+
+
+# 注意：本路由必须声明在 `/{customer_id}` 之前，否则会被当成客户 ID 解析
+@router.get("/import-template")
+def download_import_template():
+    """下载 Excel 导入模板：因子列带数据校验下拉框（可选项来自 scoring_config.yaml）。
+
+    与 `POST /api/customers/import` 的表头识别一致：基础字段 + 各因子 label；
+    下拉可选项即因子 input.options，避免手填非法枚举值。
+    """
+    config = load_scoring_config()
+    buf, _ = _build_import_workbook(config)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="import-template.xlsx"; '
+                f"filename*=UTF-8''{quote('客户导入模板.xlsx')}"
+            )
+        },
+    )
 
 
 @router.get("", response_model=CustomerListResponse)
@@ -98,7 +231,7 @@ def list_industries(db: Session = Depends(get_db)):
 def get_factor_config():
     """返回当前因子配置（来自 scoring_config.yaml），供前端动态渲染因子表单。
 
-    SOW §3.0.2 / §6.2：新增因子只需在配置里注册，前后端均无需改代码。
+    ：新增因子只需在配置里注册，前后端均无需改代码。
     """
     config = load_scoring_config()
     return FactorConfigResponse(
@@ -122,6 +255,7 @@ def get_factor_config():
                         source=f.source,
                         source_role=f.source_role,
                         description=f.description,
+                        rule_text=_rule_text(f),
                         rule_type=f.rule.type,
                         editable=f.input.editable,
                         input=FactorInputSpec(

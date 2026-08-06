@@ -1,4 +1,4 @@
-"""评估历史与趋势测试（SOW §3.5.2 / §6.3）。"""
+"""评估历史与趋势测试。"""
 
 import datetime
 
@@ -58,10 +58,10 @@ def test_record_assessment_writes_snapshot(db, customer):
     record = assessment_history.record_assessment(db, customer, assessed_by="pytest")
     assert record is not None
     assert record.customer_id == customer.id
-    assert record.total_score == 18.5           # 与原型 hero 数据一致
-    assert record.level == "风险"
+    assert record.total_score == 12.5           # 空因子最低分口径（仅满意度 3 → 0.09）
+    assert record.level == "高危"
     assert record.assessed_by == "pytest"
-    assert len(record.dimensions) == 4
+    assert len(record.dimensions) == 7
     assert record.risk_alerts
 
 
@@ -69,19 +69,22 @@ def test_factor_snapshot_covers_all_registered_factors(db, customer):
     record = assessment_history.record_assessment(db, customer)
     snapshot = record.factor_snapshot
     for field in (
-        "cooperation_years",
-        "contact_frequency",
-        "last_contact_date",
         "customer_satisfaction",
-        "contract_amount",
-        "payment_status",
-        "risk_signals",
-        "competitor_involvement",
-        "growth_potential",
-        "delivery_quality",      # 预留的 custom_fields 因子也会入快照
+        "kcr_01",
+        "kcr_03b",
+        "er_01",
+        "or_01",
+        "ci_01",
+        "his_01",
+        "his_09b",
+        "risk_01",
+        "risk_08b",
+        "risk_08c",
+        "svc_01",
+        "svc_06b",               # 新增 custom_fields 因子也会入快照
     ):
         assert field in snapshot
-    assert isinstance(snapshot["last_contact_date"], str)  # 日期已序列化
+    assert snapshot["kcr_01"] is None  # 未填报的 custom_fields 因子以 None 入快照
 
 
 def test_unchanged_assessment_is_not_duplicated(db, customer):
@@ -102,7 +105,7 @@ def test_changed_factor_creates_new_record(db, customer):
     db.commit()
     record = assessment_history.record_assessment(db, customer, trigger="factor_update")
     assert record is not None
-    assert record.total_score > 18.5
+    assert record.total_score > 12.5
     assert db.query(AssessmentHistory).count() == 2
 
 
@@ -123,7 +126,7 @@ def test_trend_arrow_up_after_improvement(db, customer):
     assert trend.points[0].total_score < trend.points[1].total_score
     # 快照时间戳统一为 UTC（database.utcnow），标签也应按 UTC 日期断言
     assert trend.points[0].label == datetime.datetime.now(datetime.UTC).strftime("%m-%d")
-    assert "关系紧密度" in trend.points[0].dimensions
+    assert "KCR 关键客户关系" in trend.points[0].dimensions
 
 
 def test_trend_arrow_down_after_deterioration(db, customer):
@@ -151,13 +154,13 @@ def test_trend_without_history_falls_back_to_live_score(db, customer):
     trend = assessment_history.build_trend(db, customer)
     assert trend.points == []
     assert trend.latest_score == get_scoring_strategy().evaluate(customer).total_score
-    assert trend.level == "风险"
+    assert trend.level == "高危"
 
 
 def test_trend_level_lines_exclude_zero_threshold(db, customer):
     trend = assessment_history.build_trend(db, customer)
-    assert [lv.name for lv in trend.level_lines] == ["优秀", "良好", "一般"]
-    assert [lv.min_score for lv in trend.level_lines] == [85, 70, 55]
+    assert [lv.name for lv in trend.level_lines] == ["健康", "亚健康", "风险"]
+    assert [lv.min_score for lv in trend.level_lines] == [80, 60, 40]
 
 
 def test_history_is_ordered_desc_and_limited(db, customer):
@@ -171,7 +174,7 @@ def test_history_is_ordered_desc_and_limited(db, customer):
     assert records[0].total_score > records[1].total_score
 
 
-# ── 新增模型可用性（SOW §5）────────────────────────────────────────────────
+# ── 新增模型可用性────────────────────────────────────────────────
 
 
 def test_chat_models_persist_and_cascade(db, customer):

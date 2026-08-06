@@ -95,3 +95,4 @@ frontend/lint_out.txt
 # Local docs (not for git)
 docs/
 AGENTS.md
+CHANGELOG.md

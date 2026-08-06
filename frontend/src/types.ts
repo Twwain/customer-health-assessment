@@ -74,6 +74,7 @@ export interface FactorConfigItem {
   source: string;
   source_role: string;
   description: string;
+  rule_text: string;
   rule_type: string;
   editable: boolean;
   input: FactorInputSpec;
@@ -287,5 +288,5 @@ export interface KnowledgeStatusResponse {
 
 export interface ChatEvent {
   type: string;
-  data: any;
+  data: Record<string, unknown>;
 }

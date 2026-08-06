@@ -1,11 +1,11 @@
 """数据模型。
 
-v1.0 只有 Customer；v3.0 按 SOW §5 扩展出对话、评估历史与知识库三组模型：
+早期只有 Customer；后续按  扩展出对话、评估历史与知识库三组模型：
 
 - 对话：ChatSession / ChatMessage
 - 评估历史：AssessmentHistory（支撑预警趋势箭头与历史曲线）
 - 知识库：KnowledgeDocument / KnowledgeChunk / KnowledgeItem / KnowledgeMetric
-  （SOW §3.3.1 知识分层：叙事文本进向量库，精确数值进 SQLite）
+  
 """
 
 import datetime
@@ -71,7 +71,7 @@ class Customer(Base):
     )
 
 
-# ══════════════════════════ 评估历史（SOW §3.5.2 / §5）══════════════════════
+# ══════════════════════════ 评估历史══════════════════════
 
 
 class AssessmentHistory(Base):
@@ -102,7 +102,7 @@ class AssessmentHistory(Base):
 Index("ix_assessment_history_customer_time", AssessmentHistory.customer_id, AssessmentHistory.assessed_at)
 
 
-# ══════════════════════════ AI 对话（SOW §3.2 / §5）═════════════════════════
+# ══════════════════════════ AI 对话═════════════════════════
 
 
 class ChatSession(Base):
@@ -150,7 +150,7 @@ class ChatMessage(Base):
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 
-# ══════════════════════════ 知识库（SOW §3.3 / §5）══════════════════════════
+# ══════════════════════════ 知识库══════════════════════════
 
 
 class KnowledgeDocument(Base):
@@ -225,7 +225,7 @@ class KnowledgeItem(Base):
 
 
 class KnowledgeMetric(Base):
-    """结构化知识指标（SOW §3.3.1 知识分层）。
+    """结构化知识指标。
 
     行业基准值、续约率、客户画像统计等**精确数值**不进向量库，
     评估时按行业 / 规模 / 地域精确查询，避免语义检索造成数值漂移。

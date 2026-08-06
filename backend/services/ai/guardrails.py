@@ -1,4 +1,4 @@
-"""对话安全护栏（SOW §3.2.1 安全护栏 / §7 安全）。
+"""对话安全护栏。
 
 两个方向：
 - **入向**：用户输入落库与送 LLM 前，脱敏密码/密钥/身份证/银行卡等敏感串，
@@ -28,7 +28,7 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
             re.IGNORECASE,
         ),
     ),
-    # OpenAI / DeepSeek 风格密钥
+    # 主流大模型风格密钥
     ("api_key", re.compile(r"\b(sk-[A-Za-z0-9_\-]{12,})\b")),
     # 身份证（18 位）
     ("id_card", re.compile(r"\b(\d{17}[\dXx])\b")),

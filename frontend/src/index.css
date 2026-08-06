@@ -93,15 +93,15 @@ button { font-family: inherit; cursor: pointer; }
 @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5 } 30% { transform: translateY(-5px); opacity: 1 } }
 
 /* Markdown 渲染（轻量） */
-.md { font-size: 14px; line-height: 1.85; color: var(--color-ink); }
+.md { font-size: 15px; line-height: 1.85; color: var(--color-ink); }
 .md p { margin: 0 0 10px; }
-.md h4 { margin: 18px 0 9px; font-size: 14.5px; font-weight: 600; color: var(--color-ink); }
+.md h4 { margin: 18px 0 9px; font-size: 15.5px; font-weight: 600; color: var(--color-ink); }
 .md ol, .md ul { margin: 0 0 10px; padding-left: 22px; }
 .md li { margin-bottom: 6px; }
 .md strong { color: var(--color-ink); font-weight: 600; }
 .md code {
   background: var(--color-surface-2); border: 1px solid var(--color-border-soft);
-  padding: 1px 5px; border-radius: 4px; font-size: 12.5px;
+  padding: 1px 5px; border-radius: 4px; font-size: 13.5px;
 }
 .md blockquote {
   margin: 0 0 10px; padding: 6px 12px;
