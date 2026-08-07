@@ -7,7 +7,7 @@ LLM 不可用时，对话不返回错误页，而是用**量化评估引擎**的
 
 from __future__ import annotations
 
-from .context_builder import TREND_LABEL, ChatContext
+from .context_builder import TREND_LABEL, ChatContext, fmt_score
 from .strategy import build_degraded_strategies, render_strategies_markdown
 
 DEGRADED_BANNER = "> ⚠️ **AI 服务当前不可用，以下为规则引擎兜底结果**（不含知识增强与 AI 推理，恢复后可点「🔄 重新生成」）"
@@ -19,7 +19,7 @@ def _score_line(ctx: ChatContext) -> str:
     a = ctx.assessment
     if not a:
         return "当前会话未关联客户，无法给出量化结果。"
-    line = f"**{a.customer_name}** 当前客情评分 **{a.total_score} / {a.max_score}**，等级「{a.level}」。"
+    line = f"**{a.customer_name}** 当前客情评分 **{fmt_score(a.total_score)} / {fmt_score(a.max_score)}**，等级「{a.level}」。"
     t = ctx.trend
     if t and t.previous_score is not None:
         line += f"较上次评估 {t.delta:+.1f} 分（{TREND_LABEL.get(t.trend, t.trend)}）。"
@@ -32,7 +32,7 @@ def _dimension_lines(ctx: ChatContext) -> list[str]:
         return []
     lines = ["", "### 📊 维度明细"]
     for d in a.dimensions:
-        lines.append(f"- **{d.name}** {d.score}/{d.max_score}")
+        lines.append(f"- **{d.name}** {fmt_score(d.score)}/{fmt_score(d.max_score)}")
     return lines
 
 
@@ -53,7 +53,7 @@ def _trend_lines(ctx: ChatContext) -> list[str]:
     t = ctx.trend
     if not t or not t.points:
         return ["", "### 📈 趋势判断", "- 暂无历史评估记录，本次为首个数据点"]
-    series = " → ".join(f"{p.label} {p.total_score}" for p in t.points)
+    series = " → ".join(f"{p.label} {fmt_score(p.total_score)}" for p in t.points)
     judgement = {
         "up": "较上次回升，短期向好",
         "down": "较上次下滑，需关注",

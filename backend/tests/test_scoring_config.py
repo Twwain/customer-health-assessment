@@ -263,7 +263,7 @@ def test_algorithm_changes_with_config_only(tmp_path):
     assert result.max_score == 100
     assert result.level == "通过"
     assert [d.name for d in result.dimensions] == ["客户满意度"]
-    assert result.dimensions[0].details == ["满意度 8 × 10 = 80.0分"]
+    assert result.dimensions[0].details == ["满意度 8 × 10 = 80分"]
 
 
 def test_level_thresholds_come_from_config(tmp_path):

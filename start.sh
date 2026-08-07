@@ -24,7 +24,12 @@ echo "  Ctrl+C 停止所有服务"
 echo "==================================="
 
 cd "$SCRIPT_DIR/backend"
-python -m uvicorn main:app --port 8000 &
+# 优先用项目 venv 的 python（裸 python 可能解析到无依赖的旧系统 Python）；
+# Windows venv 在 Scripts/，Linux/macOS venv 在 bin/
+PY="$SCRIPT_DIR/backend/.venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="$SCRIPT_DIR/backend/.venv/bin/python"
+[ -f "$PY" ] || PY="python"
+"$PY" -m uvicorn main:app --port 8000 &
 BACKEND_PID=$!
 
 cd "$SCRIPT_DIR/frontend"

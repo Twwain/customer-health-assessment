@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 
-:: Kill old processes that might hold the ports
+::: Kill old processes that might hold the ports
 taskkill /f /im python.exe 2>nul
 taskkill /f /im node.exe 2>nul
 timeout /t 2 /nobreak >nul
@@ -15,13 +15,16 @@ echo   Close this window to stop all
 echo ===================================
 echo.
 
-:: Start backend in a new window, with correct working directory
-start "Backend" /d "%~dp0backend" cmd /k "python -m uvicorn main:app --port 8000"
+::: Start backend in a new window, with correct working directory
+::: Prefer project venv python (bare "python" may resolve to an old system Python without deps)
+set "PY=python"
+if exist "%~dp0backend\.venv\Scripts\python.exe" set "PY=%~dp0backend\.venv\Scripts\python.exe"
+start "Backend" /d "%~dp0backend" cmd /k ""%PY%" -m uvicorn main:app --port 8000"
 
-:: Small delay to let backend start
+::: Small delay to let backend start
 timeout /t 3 /nobreak >nul
 
-:: Start frontend in a new window, with correct working directory
+::: Start frontend in a new window, with correct working directory
 start "Frontend" /d "%~dp0frontend" cmd /k "npx vite --host 0.0.0.0 --port 5173"
 
 echo.

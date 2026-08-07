@@ -19,13 +19,18 @@ from reportlab.platypus import (
     Table,
     TableStyle,
     Image as RLImage,
+    KeepTogether,
 )
 
 from schemas import AssessmentTrendResponse
 
 
 class _StrategyMixin:
-    """AI 策略建议 + 知识溯源：三层分组卡片与来源列表。"""
+    """推荐策略 + 参考依据：三层分组卡片与来源列表。
+
+    对外展示口径：不在报告中暴露内部引擎状态；降级产出的规则建议同样是
+    可执行的推荐策略。
+    """
 
     _GROUP_TITLES = {
         "recommended": "推荐策略",
@@ -36,74 +41,79 @@ class _StrategyMixin:
     _URGENCY_COLOR = {"high": "#C62828", "medium": "#DD5B00", "low": "#666666"}
     _PRIORITY_ORDER = ("recommended", "alternative", "long_term")
 
-    def _ai_strategy_section(self, strategy_items, references, degraded, ai_error) -> list:
-        elements = [
-            Spacer(1, 0.5 * cm),
-            self._section_header("四", "AI 智能策略建议"),
-            Spacer(1, 0.25 * cm),
-        ]
-        if degraded:
-            elements.append(Paragraph(
-                f'<font color="{self.WARNING.hexval()}"><b>⚠ 当前 LLM 暂不可用，以下为规则引擎兜底建议。</b></font>',
-                self.styles["BodyCN"],
-            ))
-            elements.append(Spacer(1, 0.2 * cm))
-        if ai_error:
-            elements.append(Paragraph(
-                f'<font color="{self.DANGER.hexval()}">{ai_error}</font>',
-                self.styles["SmallCN"],
-            ))
-            elements.append(Spacer(1, 0.2 * cm))
-
+    def _ai_strategy_section(self, strategy_items, references) -> list:
+        header = self._section_header("四", "推荐策略")
         if not strategy_items:
-            elements.append(Paragraph(
-                "本次评估未生成策略建议，可结合「风险提示与建议」制定下一步动作。",
-                self.styles["BodyCN"],
-            ))
-            return elements
+            return [
+                Spacer(1, 0.5 * cm),
+                KeepTogether([
+                    header,
+                    Spacer(1, 0.25 * cm),
+                    Paragraph(
+                        "本次评估未生成策略建议，可结合「风险排查」中的改进建议制定跟进计划。",
+                        self.styles["BodyCN"],
+                    ),
+                ]),
+            ]
 
+        elements = [Spacer(1, 0.5 * cm)]
+        header_pending = True
         for priority in self._PRIORITY_ORDER:
             group = [i for i in strategy_items if (i.get("priority") or "recommended") == priority]
             if not group:
                 continue
             mark = "●" if priority == "recommended" else "○" if priority == "alternative" else "·"
-            elements.append(Paragraph(
+            title_p = Paragraph(
                 f'<font color="{self.BRAND.hexval()}">{mark}</font> '
                 f'<b>{self._GROUP_TITLES.get(priority, priority)}</b>',
                 ParagraphStyle(f"Grp_{priority}", fontName=self.FONT_NAME, fontSize=12.5,
                               leading=19, textColor=self.INK, spaceBefore=10, spaceAfter=5),
+            )
+            # 章节标题 / 分组标题与首张卡片绑定，卡片本身不跨页拆分
+            lead = [header, Spacer(1, 0.25 * cm)] if header_pending else []
+            header_pending = False
+            elements.append(KeepTogether(
+                lead + [title_p, self._strategy_card(group[0]), Spacer(1, 0.28 * cm)]
             ))
-            for item in group:
-                elements.append(self._strategy_card(item))
-                elements.append(Spacer(1, 0.28 * cm))
+            for item in group[1:]:
+                elements.append(KeepTogether([self._strategy_card(item), Spacer(1, 0.28 * cm)]))
 
         if references:
-            elements.append(Spacer(1, 0.3 * cm))
-            elements.append(Paragraph(
-                f'<font color="{self.BRAND.hexval()}">▍</font> <b>知识溯源</b>',
-                ParagraphStyle("RefTitle", fontName=self.FONT_NAME, fontSize=12,
-                              leading=18, textColor=self.INK),
-            ))
             ref_lines = []
             for i, ref in enumerate(references, 1):
                 title = ref.get("title") or ref.get("item_title") or "未命名知识"
                 category = ref.get("category") or ""
-                score = ref.get("score")
-                score_txt = f" · 相似度 {score:.2f}" if isinstance(score, (int, float)) else ""
                 cat_txt = f"（{category}）" if category else ""
-                ref_lines.append(f"{i}. 《{title}》{cat_txt}{score_txt}")
-            elements.append(Paragraph(
-                "<br/>".join(ref_lines),
-                ParagraphStyle("RefBody", fontName=self.FONT_NAME, fontSize=9.5,
-                              leading=15, textColor=self.INK_2),
-            ))
+                ref_lines.append(f"{i}. 《{title}》{cat_txt}")
+            elements.append(Spacer(1, 0.3 * cm))
+            elements.append(KeepTogether([
+                Paragraph(
+                    f'<font color="{self.BRAND.hexval()}">▍</font> <b>参考依据</b>',
+                    ParagraphStyle("RefTitle", fontName=self.FONT_NAME, fontSize=12,
+                                  leading=18, textColor=self.INK),
+                ),
+                Paragraph(
+                    "<br/>".join(ref_lines),
+                    ParagraphStyle("RefBody", fontName=self.FONT_NAME, fontSize=9.5,
+                                  leading=15, textColor=self.INK_2),
+                ),
+            ]))
         return elements
+
+    @staticmethod
+    def _external_text(text: str) -> str:
+        """对外口径：策略字段中的内部实现措辞替换为中性表述。"""
+        return (
+            (text or "")
+            .replace("规则引擎（LLM 不可用时的兜底建议）", "内置评估规则")
+            .replace("规则引擎", "评估规则")
+        )
 
     def _strategy_card(self, item: dict):
         urgency = item.get("urgency") or "medium"
         urg_cn = self._URGENCY_CN.get(urgency, "中")
         urg_hex = self._URGENCY_COLOR.get(urgency, "#DD5B00")
-        title = item.get("title") or "（未命名策略）"
+        title = self._external_text(item.get("title")) or "（未命名策略）"
         rows = [
             Paragraph(
                 f'<b>{title}</b>'
@@ -113,18 +123,18 @@ class _StrategyMixin:
                               leading=16, textColor=self.INK),
             ),
         ]
-        for label, key in (("原因", "reason"), ("行动", "action"), ("预期", "expected_outcome")):
-            val = item.get(key)
+        for label, key in (("原因", "reason"), ("行动", "action"), ("预期成效", "expected_outcome")):
+            val = self._external_text(item.get(key) or "")
             if val:
                 rows.append(Paragraph(
                     f'<font color="#666666">{label}：</font>{val}',
                     ParagraphStyle(f"Str_{key}", fontName=self.FONT_NAME, fontSize=9.5,
                                   leading=15, textColor=self.INK_2),
                 ))
-        ref = item.get("reference")
+        ref = self._external_text(item.get("reference") or "")
         if ref:
             rows.append(Paragraph(
-                f'<font color="#666666">📎 来源：{ref}</font>',
+                f'<font color="#666666">参考：{ref}</font>',
                 ParagraphStyle("StrRef", fontName=self.FONT_NAME, fontSize=9,
                               leading=14, textColor=self.MUTED),
             ))
@@ -146,38 +156,42 @@ class _TrendMixin:
     """客情评分趋势：matplotlib 曲线 + 等级带/参考线 + 趋势摘要。"""
 
     def _trend_section_pdf(self, trend: AssessmentTrendResponse | None) -> list:
-        elements = [
-            Spacer(1, 0.5 * cm),
-            self._section_header("五", "客情评分趋势"),
-            Spacer(1, 0.25 * cm),
-        ]
+        header = self._section_header("五", "客情评分趋势")
         if not trend or len(trend.points) < 2:
-            elements.append(Paragraph(
-                "当前仅有一次评估记录，暂无可对比的趋势曲线。持续评估后将自动生成历史趋势。",
-                self.styles["BodyCN"],
-            ))
-            return elements
+            return [
+                Spacer(1, 0.5 * cm),
+                KeepTogether([
+                    header,
+                    Spacer(1, 0.25 * cm),
+                    Paragraph(
+                        "当前仅有一次评估记录，暂无可对比的趋势曲线。持续评估后将自动生成历史趋势。",
+                        self.styles["BodyCN"],
+                    ),
+                ]),
+            ]
+        content: list = []
         try:
-            elements.append(self._render_trend_chart(trend))
+            content.append(self._render_trend_chart(trend))
         except Exception:
-            elements.append(Paragraph("趋势曲线生成失败，已略去图示。", self.styles["SmallCN"]))
+            content.append(Paragraph("趋势曲线生成失败，已略去图示。", self.styles["SmallCN"]))
         trend_cn = {"up": "↑ 上升", "down": "↓ 下降", "flat": "→ 持平"}
         delta_txt = f"{trend.delta:+.1f}" if trend.previous_score is not None else "—"
-        elements.append(Spacer(1, 0.2 * cm))
-        elements.append(Paragraph(
+        content.append(Spacer(1, 0.2 * cm))
+        content.append(Paragraph(
             f'趋势：<b>{trend_cn.get(trend.trend, trend.trend)}</b>（较上次 {delta_txt} 分）',
             self.styles["BodyCN"],
         ))
         if trend.level_lines:
             lines = " / ".join(
-                f"{lv.name} {lv.min_score}分" for lv in trend.level_lines if lv.min_score > 0
+                f"{lv.name} {lv.min_score:g}分" for lv in trend.level_lines if lv.min_score > 0
             )
             if lines:
-                elements.append(Paragraph(
+                content.append(Paragraph(
                     f'<font color="#666666">等级参考线：{lines}</font>',
                     self.styles["SmallCN"],
                 ))
-        return elements
+        # 标题 + 曲线 + 摘要整体不跨页
+        return [Spacer(1, 0.5 * cm), KeepTogether([header, Spacer(1, 0.25 * cm)] + content)]
 
     def _render_trend_chart(self, trend: AssessmentTrendResponse):
         import matplotlib
@@ -202,7 +216,8 @@ class _TrendMixin:
             if hi <= 0 or lo >= 100:
                 continue
             ax.axhspan(lo, hi, color=hexc, alpha=0.05)
-        brand_hex = self.BRAND.hexval()
+        # reportlab 的 hexval() 返回 0xRRGGBB，matplotlib 只认 #RRGGBB
+        brand_hex = f"#{self.BRAND.hexval()[2:]}"
         ax.plot(range(len(ys)), ys, marker="o", color=brand_hex, linewidth=2.2,
                 markersize=4.5, markerfacecolor="white", markeredgecolor=brand_hex, markeredgewidth=1.4)
         ax.fill_between(range(len(ys)), ys, min(ys) - 2, color=brand_hex, alpha=0.07)

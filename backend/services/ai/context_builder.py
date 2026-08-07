@@ -56,6 +56,15 @@ def _fmt_date(value) -> str:
     return str(value or "未记录")
 
 
+def fmt_score(value: float) -> str:
+    """分数展示口径：最多两位小数并去尾零（0.233333→0.23，30.0→30）。
+
+    与 ``rules._stringify`` 的浮点约定一致，对话回复与 LLM 上下文统一走这里。
+    不用 :g——有效数字超 6 位会退化为科学计数法（1234567.8→1.23457e+06）。
+    """
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
 def _customer_profile(c: Customer, today: datetime.date) -> str:
     """客户基础信息。刻意不含联系电话等个人隐私字段。"""
     lines = [
@@ -89,12 +98,12 @@ def _customer_profile(c: Customer, today: datetime.date) -> str:
 def _assessment_section(a: AssessmentResponse) -> str:
     lines = [
         "## 量化评估引擎输出（基础客情分）",
-        f"- 总分：{a.total_score} / {a.max_score}，等级「{a.level}」，评分配置版本 {a.config_version or 'n/a'}",
+        f"- 总分：{fmt_score(a.total_score)} / {fmt_score(a.max_score)}，等级「{a.level}」，评分配置版本 {a.config_version or 'n/a'}",
         "- 维度明细：",
     ]
     # 只注入维度得分，不逐条罗列因子明细（60 个因子的明细会让结论淹没在数据里）
     for d in a.dimensions:
-        lines.append(f"  - {d.name}：{d.score}/{d.max_score}")
+        lines.append(f"  - {d.name}：{fmt_score(d.score)}/{fmt_score(d.max_score)}")
 
     if a.alerts:
         lines.append("- 规则引擎预警：")
@@ -116,7 +125,7 @@ def _trend_section(t: AssessmentTrendResponse | None) -> str:
     if not t or not t.points:
         return "## 历史趋势\n暂无历史评估记录，无法判断走势（本次为首次评估）。"
 
-    series = " → ".join(f"{p.label} {p.total_score}" for p in t.points)
+    series = " → ".join(f"{p.label} {fmt_score(p.total_score)}" for p in t.points)
     lines = [
         "## 历史趋势",
         f"- 最近 {len(t.points)} 次评估：{series}",
@@ -146,7 +155,7 @@ def build_alert_context(
     if trend and trend.points:
         low = min(p.total_score for p in trend.points)
         high = max(p.total_score for p in trend.points)
-        lines.append(f"- 历史区间：最低 {low} 分、最高 {high} 分，当前 {trend.latest_score} 分")
+        lines.append(f"- 历史区间：最低 {fmt_score(low)} 分、最高 {fmt_score(high)} 分，当前 {fmt_score(trend.latest_score)} 分")
 
     return "\n".join(lines)
 

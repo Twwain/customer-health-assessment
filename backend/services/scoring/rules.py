@@ -68,11 +68,29 @@ def _stringify(value: Any) -> str:
         return ""
     if isinstance(value, bool):
         return "是" if value else "否"
+    if isinstance(value, float):
+        # 展示口径：小数最多保留两位并去尾零（0.233333→0.23，80.0→80）；
+        # 不用 :g——有效数字超 6 位会退化为科学计数法（1234567.8→1.23457e+06）
+        return f"{value:.2f}".rstrip("0").rstrip(".")
     if isinstance(value, datetime.datetime):
         return value.strftime("%Y-%m-%d %H:%M")
     if isinstance(value, datetime.date):
         return value.isoformat()
     return str(value)
+
+
+def first_condition_field(condition: Condition) -> tuple[str, str]:
+    """取条件树第一个叶子条件的 (field, source)。
+
+    用于复合条件（all/any）预警文案的 {value} 取值：顶层无 field 时向下找。
+    """
+    if condition.field:
+        return condition.field, condition.source
+    for child in condition.children:
+        field_name, source = first_condition_field(child)
+        if field_name:
+            return field_name, source
+    return "", "model"
 
 
 def render_detail(template: str, **kwargs: Any) -> str:

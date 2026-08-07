@@ -19,6 +19,7 @@ from .rules import (
     DimensionResult,
     evaluate_condition,
     evaluate_dimension,
+    first_condition_field,
     render_detail,
     resolve_field,
 )
@@ -77,7 +78,9 @@ class ConfigDrivenStrategy(ScoringStrategy):
         for rule in config.alerts:
             if not evaluate_condition(rule.when, c, today):
                 continue
-            value = resolve_field(c, rule.when.field, rule.when.source) if rule.when.field else None
+            # 复合条件（all/any）顶层无 field，向下取第一个叶子字段供 {value} 渲染
+            field_name, source = first_condition_field(rule.when)
+            value = resolve_field(c, field_name, source) if field_name else None
             alerts.append(
                 AlertItem(
                     id=rule.id,

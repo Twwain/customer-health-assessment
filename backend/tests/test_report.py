@@ -182,8 +182,6 @@ def test_pdf_with_ai_strategies(db, customer, fake_llm):
         strategy_items=report.strategy_items,
         references=report.references,
         trend=report.trend,
-        degraded=report.degraded,
-        ai_error=report.error,
     )
     assert _pdf_starts_ok(pdf)
 
@@ -196,8 +194,6 @@ def test_pdf_offline_degraded_note(db, customer, offline_llm):
         strategy_items=report.strategy_items,
         references=report.references,
         trend=report.trend,
-        degraded=report.degraded,
-        ai_error=report.error,
     )
     assert _pdf_starts_ok(pdf)
 
@@ -258,16 +254,40 @@ def _collect_flow_text(flows) -> str:
     return "".join(texts)
 
 
-def test_pdf_cover_shows_industry_and_config_version(db, customer):
-    """封面展示真实行业与评分配置版本，不再硬编码占位符。"""
+def test_factor_status_text_strips_score_suffix():
+    """PDF 维度卡的因子明细：去得分后缀与基准值，统一为「名称：现状」。"""
+    f = PdfReportGenerator._factor_status_text
+    # 数值型（已填写）：基准不展示
+    assert f("已识别占比 92%（100%）：+0.21分") == "已识别占比：92%"
+    assert f("产品线覆盖 4 条（≥6条）：+0.0分") == "产品线覆盖：4 条"
+    assert f("90天内主动分享 5 次（≥3次）：+0.32分") == "90天内主动分享：5 次"
+    # 档级描述是现状的一部分，保留
+    assert f("客户满意度 3/10（较低）：+0.09分") == "客户满意度：3/10（较低）"
+    # 定性（「」→ 冒号；空值 → 未填写）
+    assert f("年均合作金额趋势「下降」：+0.14分") == "年均合作金额趋势：下降"
+    assert f("经济决策者识别度「」：+0分") == "经济决策者识别度：未填写"
+    # 数值型未填写 → 未填写
+    assert f("已识别占比 %（100%）：+0.21分") == "已识别占比：未填写"
+    assert f("90天内主动分享 次（≥3次）：+0.32分") == "90天内主动分享：未填写"
+    assert f("客情等级均值 （≥2）：+0.21分") == "客情等级均值：未填写"
+    # 模板 "{value} 次" 空值残留双空格
+    assert f("半年培训赋能  次（≥4次）：+0.135分") == "半年培训赋能：未填写"
+    assert f("半年培训赋能 4 次（≥4次）：+0.14分") == "半年培训赋能：4 次"
+    assert f("") == ""
+
+
+def test_pdf_cover_shows_customer_industry_and_date(db, customer):
+    """封面展示客户名称、行业与评估日期（不展示内部模型版本）。"""
     assessment = build_report_data(db, customer, include_ai=False).assessment
     gen = PdfReportGenerator()
 
     cover = gen._cover(assessment, industry=customer.industry)
     text = _collect_flow_text(cover)
 
+    assert customer.customer_name in text
     assert customer.industry in text
-    assert assessment.config_version in text
+    assert "评估日期" in text
+    assert "评估模型" not in text
 
 
 def test_pdf_with_trend_chart(db, customer):
@@ -292,6 +312,10 @@ def test_pdf_with_trend_chart(db, customer):
     assert len(report.trend.points) >= 2
 
     gen = PdfReportGenerator()
+    # 直接渲染趋势图：防止异常被章节内 try/except 吞掉而漏图（如 hexval 颜色格式问题）
+    img = gen._render_trend_chart(report.trend)
+    assert img is not None
+
     pdf = gen.generate(
         report.assessment,
         strategy_items=report.strategy_items,

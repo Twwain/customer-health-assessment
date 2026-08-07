@@ -71,6 +71,8 @@ class PdfReportGenerator(
     SUCCESS_SOFT = HexColor("#E4F4E8")
     WARNING = HexColor("#DD5B00")
     WARNING_SOFT = HexColor("#FAEDE1")
+    INFO = HexColor("#0075DE")
+    INFO_SOFT = HexColor("#E4F0FB")
 
     # 兜底色板：仅在评分配置加载失败时使用（正常路径以 scoring_config.yaml 的 levels 为准）
     COLORS = {
@@ -294,8 +296,6 @@ class PdfReportGenerator(
         strategy_items: list[dict] | None = None,
         references: list[dict] | None = None,
         trend: AssessmentTrendResponse | None = None,
-        degraded: bool = False,
-        ai_error: str | None = None,
     ) -> bytes:
         with self._gen_lock:
             buf = io.BytesIO()
@@ -306,12 +306,12 @@ class PdfReportGenerator(
                 onPage=self._on_page,
             )
             story = []
-            story.extend(self._cover(a, degraded=degraded, has_strategy=bool(strategy_items), industry=industry))
+            story.extend(self._cover(a, industry=industry))
             story.append(PageBreak())
-            story.extend(self._overview(a))
+            story.extend(self._overview(a, trend))
             story.extend(self._dimension_detail(a))
             story.extend(self._alerts(a))
-            story.extend(self._ai_strategy_section(strategy_items, references, degraded, ai_error))
+            story.extend(self._ai_strategy_section(strategy_items, references))
             story.extend(self._trend_section_pdf(trend))
             story.extend(self._footer())
             doc.build(story)

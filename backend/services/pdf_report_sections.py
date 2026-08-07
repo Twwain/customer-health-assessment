@@ -6,37 +6,31 @@
 
 from __future__ import annotations
 
+import re
+
 from reportlab.lib.colors import HexColor, white
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
-from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, Spacer, Table, TableStyle, KeepTogether
 from reportlab.platypus.flowables import HRFlowable
 
-from schemas import AssessmentResponse
+from schemas import AssessmentResponse, AssessmentTrendResponse
 
 
 class _CoverMixin:
-    """封面：品牌条 + 客户元信息 + 综合评分 + AI 参与标记。"""
+    """封面：品牌条 + 客户元信息 + 综合评分 + 结论速览。
+
+    对外展示口径：不出现 AI/规则引擎等内部实现措辞。
+    """
 
     def _cover(
         self,
         a: AssessmentResponse,
         *,
-        degraded: bool = False,
-        has_strategy: bool = False,
         industry: str = "",
     ) -> list:
         color = self._color_for(a.level, self.BRAND)
-        if degraded:
-            ai_mark = f'<font color="{self.WARNING.hexval()}"><b>●</b></font>'
-            ai_text = "AI 未参与：服务暂不可用，本报告由规则引擎兜底生成"
-        elif has_strategy:
-            ai_mark = f'<font color="{self.SUCCESS.hexval()}"><b>●</b></font>'
-            ai_text = "AI 已参与：策略建议与知识溯源由 AI 生成"
-        else:
-            ai_mark = f'<font color="{self.MUTED.hexval()}"><b>○</b></font>'
-            ai_text = "本次报告未包含 AI 策略建议"
         meta_rows = [
             [
                 Paragraph("客户名称", self.styles["MetaLabel"]),
@@ -47,8 +41,8 @@ class _CoverMixin:
             [
                 Paragraph("评估日期", self.styles["MetaLabel"]),
                 Paragraph(a.assessed_at.strftime("%Y年%m月%d日"), self.styles["MetaValue"]),
-                Paragraph("报告版本", self.styles["MetaLabel"]),
-                Paragraph(a.config_version or "—", self.styles["MetaValue"]),
+                "",
+                "",
             ],
         ]
         meta = Table(meta_rows, colWidths=[2.6 * cm, 5.6 * cm, 2.6 * cm, 5.6 * cm])
@@ -62,6 +56,7 @@ class _CoverMixin:
             ("TOPPADDING", (0, 0), (-1, -1), 9),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
             ("LINEBELOW", (0, 0), (-1, 0), 0.5, self.BORDER_SOFT),
+            ("SPAN", (1, 1), (-1, 1)),
         ]))
         return [
             HRFlowable(width="100%", thickness=0.5 * cm, color=self.BRAND),
@@ -82,40 +77,124 @@ class _CoverMixin:
                 ParagraphStyle("CoverScore", fontName=self.FONT_NAME, fontSize=30,
                               leading=40, alignment=TA_CENTER, textColor=color),
             ),
-            Spacer(1, 1.2 * cm),
+            Spacer(1, 0.6 * cm),
             Paragraph(
-                f"{ai_mark}　{ai_text}",
-                ParagraphStyle("CoverAI", fontName=self.FONT_NAME, fontSize=10.5,
-                              leading=16, alignment=TA_CENTER, textColor=self.MUTED),
+                f'<font color="{color.hexval()}"><b>{self._cover_brief(a)}</b></font>',
+                ParagraphStyle("CoverBrief", fontName=self.FONT_NAME, fontSize=11.5,
+                              leading=18, alignment=TA_CENTER, textColor=color),
             ),
-            Spacer(1, 0.5 * cm),
-            Paragraph(f"生成时间：{self._now_str()}", self.styles["CoverSubtitle"]),
+            Spacer(1, 1.2 * cm),
+            Paragraph(f"报告生成时间：{self._now_str()}", self.styles["CoverSubtitle"]),
             Spacer(1, 1 * cm),
         ]
 
+    def _cover_brief(self, a: AssessmentResponse) -> str:
+        """封面一句话结论速览（确定性文案，不依赖 AI）。"""
+        n_alerts = len(a.alerts) if a.alerts else len(a.risk_alerts)
+        n_high = sum(1 for x in (a.alerts or []) if x.level == "high")
+        if self._level_is_risky(a):
+            if n_alerts:
+                high_txt = f"，其中高优先级 {n_high} 项" if n_high else ""
+                return f"发现 {n_alerts} 项风险信号{high_txt}，建议重点跟进"
+            return "客情评分已落入风险区间，建议主动排查、重点跟进"
+        if n_alerts:
+            return f"发现 {n_alerts} 项风险信号，整体可控，建议按计划跟进"
+        return "客情状态良好，未发现明显风险信号"
+
 
 class _OverviewMixin:
-    """综合评分：大数字 + 等级标尺（分数游标 + 等级色块 + 区间标注）。"""
+    """综合评分：大数字 + 等级标尺（分数游标 + 等级色块 + 区间标注）+ 评估结论。"""
 
-    def _overview(self, a: AssessmentResponse) -> list:
+    def _overview(self, a: AssessmentResponse, trend: AssessmentTrendResponse | None = None) -> list:
         color = self._color_for(a.level)
         pct = min(100, max(0, a.total_score / max(a.max_score, 1) * 100))
         bar_w = 15 * cm
         elements = [
-            self._section_header("一", "综合评分"),
-            Spacer(1, 0.7 * cm),
-            Paragraph(
-                f'<font color="{color.hexval()}"><b>{a.level}</b></font>'
-                f'<font color="#94a3b8" size="18">　</font>'
-                f'<font color="{color.hexval()}"><b>{a.total_score:.1f}</b></font>'
-                f'<font color="#94a3b8" size="14"> 分</font>',
-                ParagraphStyle("HeroLine", fontName=self.FONT_NAME, fontSize=30,
-                              leading=40, alignment=TA_CENTER, textColor=color),
-            ),
-            Spacer(1, 0.2 * cm),
+            KeepTogether([
+                self._section_header("一", "综合评分"),
+                Spacer(1, 0.7 * cm),
+                Paragraph(
+                    f'<font color="{color.hexval()}"><b>{a.level}</b></font>'
+                    f'<font color="#94a3b8" size="18">　</font>'
+                    f'<font color="{color.hexval()}"><b>{a.total_score:.1f}</b></font>'
+                    f'<font color="#94a3b8" size="14"> 分</font>',
+                    ParagraphStyle("HeroLine", fontName=self.FONT_NAME, fontSize=30,
+                                  leading=40, alignment=TA_CENTER, textColor=color),
+                ),
+                Spacer(1, 0.2 * cm),
+            ]),
         ]
         elements.extend(self._build_level_scale(a, color, bar_w, pct))
+        elements.append(KeepTogether([self._build_conclusion_card(a, trend)]))
+        elements.append(Spacer(1, 0.4 * cm))
         return elements
+
+    def _build_conclusion_card(self, a: AssessmentResponse, trend: AssessmentTrendResponse | None):
+        """评估结论卡：左侧红色竖条 + 浅灰底（沿用 DESIGN 引用块样式），分点呈现。"""
+        rows = [[Paragraph(
+            '<font color="#E60012"><b>评估结论</b></font>',
+            ParagraphStyle("ConclTitle", fontName=self.FONT_NAME, fontSize=11.5,
+                          leading=17, textColor=self.BRAND, spaceAfter=2),
+        )]]
+        for label, html in self._conclusion_points(a, trend):
+            # 符号只用中文字体确认有的（●/○/▲/·），▸/✓/⚠ 在 msyh 下会缺字成方框
+            rows.append([Paragraph(
+                f'<font color="#E60012" size="9">●</font> <b>{label}</b>'
+                f'<font color="#333333">　{html}</font>',
+                ParagraphStyle("ConclItem", fontName=self.FONT_NAME, fontSize=10.5,
+                              leading=17, textColor=self.INK_2, spaceAfter=4),
+            )])
+        card = Table(rows, colWidths=[16.4 * cm])
+        card.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), self.SURFACE_2),
+            ("BOX", (0, 0), (-1, -1), 1, self.BORDER),
+            ("ROUNDEDCORNERS", [8, 8, 8, 8]),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, self.BRAND),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        return card
+
+    def _conclusion_points(self, a: AssessmentResponse, trend: AssessmentTrendResponse | None) -> list[tuple[str, str]]:
+        """评估结论要点：总体评价 / 维度表现 / 风险排查 / 环比趋势 / 综合研判。"""
+        color = self._color_for(a.level)
+        points: list[tuple[str, str]] = [(
+            "总体评价",
+            f"综合客情评分 <b>{a.total_score:.1f}</b> 分（满分 {a.max_score:.0f}），"
+            f'健康等级 <font color="{color.hexval()}"><b>「{a.level}」</b></font>',
+        )]
+        dims = [d for d in a.dimensions if d.max_score > 0]
+        if len(dims) >= 2:
+            strongest = max(dims, key=lambda d: d.score / d.max_score)
+            weakest = min(dims, key=lambda d: d.score / d.max_score)
+            if strongest is not weakest:
+                points.append((
+                    "维度表现",
+                    f"「{strongest.name}」最佳（得分率 {strongest.score / strongest.max_score * 100:.0f}%）；"
+                    f"「{weakest.name}」相对薄弱（得分率 {weakest.score / weakest.max_score * 100:.0f}%），"
+                    "可作为后续改进重点",
+                ))
+        n_alerts = len(a.alerts) if a.alerts else len(a.risk_alerts)
+        n_high = sum(1 for x in (a.alerts or []) if x.level == "high")
+        if n_alerts:
+            high_txt = f"，其中高优先级 <b>{n_high}</b> 项" if n_high else ""
+            points.append(("风险排查", f"共发现 <b>{n_alerts}</b> 项风险信号{high_txt}"))
+        else:
+            points.append(("风险排查", "未发现明显风险信号"))
+        if trend is not None and trend.previous_score is not None:
+            if trend.trend == "flat":
+                points.append(("环比趋势", f"较上次评估（{trend.previous_score:.1f} 分）基本持平"))
+            else:
+                verb = "上升" if trend.trend == "up" else "下降"
+                points.append(("环比趋势", f"较上次评估（{trend.previous_score:.1f} 分）{verb} {abs(trend.delta):.1f} 分"))
+        if self._level_is_risky(a):
+            points.append(("综合研判", "客情已处于风险区间，建议参照「推荐策略」尽快制定并落实跟进计划"))
+        else:
+            points.append(("综合研判", "客情整体可控，建议按「推荐策略」持续巩固，并关注潜在风险信号"))
+        return points
 
     def _build_level_scale(
         self, a: AssessmentResponse, color: HexColor, bar_w, pct: float
@@ -222,27 +301,52 @@ class _OverviewMixin:
 
 
 class _DimensionMixin:
-    """分维度明细：得分占比总览表 + 逐维度因子明细卡。"""
+    """分维度明细：得分占比总览表 + 逐维度因子明细卡。
+
+    强弱一眼可辨：占比条与得分按「得分率 → 等级色」着色（复用评分配置等级区间），
+    低于亚健康线的维度在卡片标题处标记「需关注」。
+    """
+
+    def _ratio_level_color(self, ratio: float) -> HexColor:
+        """得分率 → 等级色（等级区间连续，取首个 pct <= hi 的档）。"""
+        pct = max(0.0, min(100.0, ratio * 100))
+        fallback = self.MUTED
+        for name, lo, hi, color in self._levels():
+            try:
+                c = HexColor(color)
+            except Exception:
+                continue
+            fallback = c
+            if pct <= hi:
+                return c
+        return fallback
+
+    def _ratio_needs_attention(self, ratio: float) -> bool:
+        """得分率低于「亚健康」线（等级配置倒数第二档下限）视为需关注。"""
+        levels = self._levels()
+        line = levels[-2][1] if len(levels) >= 2 else 60
+        return ratio * 100 < line
 
     def _dimension_detail(self, a: AssessmentResponse) -> list:
-        elements = [
-            self._section_header("二", "分维度得分明细"),
-            Spacer(1, 0.3 * cm),
-            Paragraph(
-                "先看各维度得分占比总览，再逐维度展开因子打分明细。",
-                self.styles["SmallCN"],
-            ),
-            Spacer(1, 0.4 * cm),
-        ]
-        score_color = self._color_for(a.level, self.BRAND)
         name_w, bar_w, score_w = 4.8 * cm, 9.2 * cm, 3.2 * cm
-        elements.append(self._build_dimension_summary(a, score_color, name_w, bar_w, score_w))
-        elements.append(Spacer(1, 0.6 * cm))
-        elements.extend(self._dimension_cards(a, score_color))
+        elements = [
+            KeepTogether([
+                self._section_header("二", "分维度得分明细"),
+                Spacer(1, 0.3 * cm),
+                Paragraph(
+                    "占比条按得分率着色（绿=健康，橙=亚健康，红=偏弱），低于亚健康线的维度标记「需关注」。",
+                    self.styles["SmallCN"],
+                ),
+                Spacer(1, 0.4 * cm),
+                self._build_dimension_summary(a, name_w, bar_w, score_w),
+            ]),
+            Spacer(1, 0.6 * cm),
+        ]
+        elements.extend(self._dimension_cards(a))
         return elements
 
     def _build_dimension_summary(
-        self, a: AssessmentResponse, score_color: HexColor, name_w, bar_w, score_w
+        self, a: AssessmentResponse, name_w, bar_w, score_w
     ) -> Table:
         """维度得分占比总览表（每维度一行：名称 + 占比条 + 得分/满分）。"""
         head = ParagraphStyle("SumHead", fontName=self.FONT_NAME, fontSize=9,
@@ -255,13 +359,14 @@ class _DimensionMixin:
         for d in a.dimensions:
             pct = d.score / d.max_score
             clamped = max(0.02, min(0.98, pct))
+            dim_color = self._ratio_level_color(pct)
             bar = Table(
                 [["", ""]],
                 colWidths=[bar_w * clamped, bar_w * (1 - clamped)],
                 rowHeights=[0.34 * cm],
             )
             bar.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (0, 0), score_color),
+                ("BACKGROUND", (0, 0), (0, 0), dim_color),
                 ("BACKGROUND", (1, 0), (1, 0), self.SURFACE_2),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
@@ -273,12 +378,13 @@ class _DimensionMixin:
                     textColor=self.INK)),
                 bar,
                 Paragraph(
-                    f'<b>{d.score:.1f}</b> / {d.max_score:.0f}',
+                    f'<font color="{dim_color.hexval()}"><b>{d.score:.1f}</b></font>'
+                    f'<font color="#666666"> / {d.max_score:.0f}</font>',
                     ParagraphStyle("SumScore", fontName=self.FONT_NAME, fontSize=10,
                                   leading=14, textColor=self.INK_2),
                 ),
             ])
-        summary = Table(summary_rows, colWidths=[name_w, bar_w, score_w])
+        summary = Table(summary_rows, colWidths=[name_w, bar_w, score_w], repeatRows=1)
         summary_cmds = [
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("BACKGROUND", (0, 0), (-1, 0), self.SURFACE_2),
@@ -295,11 +401,45 @@ class _DimensionMixin:
         summary.setStyle(TableStyle(summary_cmds))
         return summary
 
-    def _dimension_cards(self, a: AssessmentResponse, score_color: HexColor) -> list:
-        """逐维度因子明细卡（两列排布，压缩纵向长度）。"""
+    # 因子明细的得分后缀（模板统一以 "：+{score}分" 结尾）
+    _SCORE_SUFFIX = re.compile(r"：\s*[+\-]?\d+(?:\.\d+)?\s*分$")
+    # 定性因子现状写法「X」
+    _QUALITATIVE = re.compile(r"^(.+?)「(.*)」$")
+    # 基准值括注（内容含数字/比较符，如 （100%）（≥3次）（>5亿）），对外不展示；
+    # 档级描述（如（较低）（良好））是现状的一部分，予以保留
+    _BENCHMARK_NOTE = re.compile(r"（[^（）]*[0-9≥≤><][^（）]*）$")
+    # 去掉基准后只剩单位的视为未填写
+    _UNIT_ONLY = {"", "%", "次", "天", "条", "人", "家", "万元"}
+
+    @classmethod
+    def _factor_status_text(cls, detail: str) -> str:
+        """因子明细对外口径：去得分后缀与基准值，统一为「名称：现状」。
+
+        模板原始形态：定性 "名称「现状」"；数值 "名称 现状（基准）"
+        （因子名不含空格，按首个空格切分名称与现状）。
+        """
+        text = cls._SCORE_SUFFIX.sub("", detail or "").strip()
+        m = cls._QUALITATIVE.match(text)
+        if m:
+            return f"{m.group(1)}：{m.group(2) or '未填写'}"
+        label, sep, rest = text.partition(" ")
+        if not sep:
+            return text
+        rest = cls._BENCHMARK_NOTE.sub("", rest.strip()).rstrip()  # 空值时模板残留双空格
+        if rest in cls._UNIT_ONLY:
+            return f"{label}：未填写"
+        return f"{label}：{rest}"
+
+    def _dimension_cards(self, a: AssessmentResponse) -> list:
+        """逐维度因子明细卡（两列排布，压缩纵向长度）；得分按得分率着色，薄弱维度标记「需关注」。"""
         elements: list = []
         for d in a.dimensions:
-            details = d.details or []
+            pct = d.score / d.max_score if d.max_score else 0
+            dim_color = self._ratio_level_color(pct)
+            title_html = f"<b>{d.name}</b>"
+            if self._ratio_needs_attention(pct):
+                title_html += '<font size="8" color="#DD5B00">　▲ 需关注</font>'
+            details = [self._factor_status_text(x) for x in (d.details or [])]
             half = (len(details) + 1) // 2
             left_items = details[:half]
             right_items = details[half:]
@@ -307,9 +447,9 @@ class _DimensionMixin:
             right = "<br/>".join(f'<font color="#333333">· {x}</font>' for x in right_items) or ""
             card_data = [
                 [
-                    Paragraph(f"<b>{d.name}</b>", self.styles["CardTitle"]),
+                    Paragraph(title_html, self.styles["CardTitle"]),
                     Paragraph(
-                        f'<font color="{score_color.hexval()}"><b>{d.score:.1f}</b></font>'
+                        f'<font color="{dim_color.hexval()}"><b>{d.score:.1f}</b></font>'
                         f'<font color="#666666"> / {d.max_score:.0f} 分</font>',
                         self.styles["CardScore"],
                     ),
@@ -331,94 +471,154 @@ class _DimensionMixin:
                 ("ROUNDEDCORNERS", [8, 8, 8, 8]),
                 ("LINEBELOW", (0, 0), (-1, 0), 0.5, self.BORDER_SOFT),
             ]))
-            elements.append(card)
-            elements.append(Spacer(1, 0.4 * cm))
+            # 卡片不可跨页拆分（卡头与明细必须在同一页）
+            elements.append(KeepTogether([card, Spacer(1, 0.4 * cm)]))
         return elements
 
 
 class _AlertMixin:
-    """风险提示与改进建议：红块 / 绿块。"""
+    """风险排查：计数小结 + 结构化排查表（级别徽章 + 排查发现）+ 改进建议绿块。"""
+
+    _LEVEL_LABEL = {"high": "高", "medium": "中", "low": "低"}
 
     def _alerts(self, a: AssessmentResponse) -> list:
-        elements = [
-            Spacer(1, 0.5 * cm),
-            self._section_header("三", "风险提示与建议"),
-            Spacer(1, 0.3 * cm),
-        ]
+        elements = [Spacer(1, 0.5 * cm)]
+        header = self._section_header("三", "风险排查")
 
+        items = self._normalize_alerts(a)
         risky = self._level_is_risky(a)
-        if risky:
-            elements.append(Paragraph(
-                f'<font color="{self.DANGER.hexval()}"><b>当前等级「{a.level}」· 客情评分 {a.total_score:.1f} 分，'
-                f'已落入高风险区间，需重点跟进。</b></font>',
-                self.styles["BodyCN"],
-            ))
-        else:
-            elements.append(Paragraph(
-                f'<font color="{self.SUCCESS.hexval()}"><b>当前等级「{a.level}」· 客情评分 {a.total_score:.1f} 分，整体可控。</b></font>',
-                self.styles["BodyCN"],
-            ))
-        elements.append(Spacer(1, 0.3 * cm))
-
-        if a.risk_alerts:
-            alert_items = [
+        if items:
+            counts = {"high": 0, "medium": 0, "low": 0}
+            for level, _ in items:
+                counts[level] = counts.get(level, 0) + 1
+            seg = " · ".join(
+                f"{self._LEVEL_LABEL[k]} {counts[k]} 项"
+                for k in ("high", "medium", "low")
+                if counts.get(k)
+            )
+            # 标题与小结绑定，避免孤行标题落在页尾
+            elements.append(KeepTogether([
+                header,
+                Spacer(1, 0.3 * cm),
                 Paragraph(
-                    f'<font color="#C62828"><b>⚠ {alert}</b></font>',
-                    ParagraphStyle("AlertItem", fontName=self.FONT_NAME, fontSize=10.5,
-                                  leading=17, textColor=self.DANGER, spaceAfter=4),
-                )
-                for alert in a.risk_alerts
-            ]
-            elements.append(self._build_alert_block(alert_items))
+                    f"本次排查共发现 <b>{len(items)}</b> 项风险信号（{seg}）。",
+                    self.styles["BodyCN"],
+                ),
+            ]))
+            elements.append(Spacer(1, 0.2 * cm))
+            elements.append(self._build_alert_table(items))
+            if risky:
+                elements.append(Spacer(1, 0.25 * cm))
+                elements.append(Paragraph(
+                    f'<font color="{self.DANGER.hexval()}"><b>当前等级「{a.level}」'
+                    f"（{a.total_score:.1f} 分）已落入高风险区间，以上风险需优先处置。</b></font>",
+                    self.styles["BodyCN"],
+                ))
         elif risky:
-            elements.append(Paragraph(
-                f'<font color="{self.DANGER.hexval()}"><b>⚠ 暂未触发具体预警规则，但评分已落入「{a.level}」区间，'
-                f'建议主动排查：竞品介入、关键人变动、互动频次、回款与满意度。</b></font>',
-                self.styles["BodyCN"],
-            ))
+            elements.append(KeepTogether([
+                header,
+                Spacer(1, 0.3 * cm),
+                Paragraph(
+                    f'<font color="{self.DANGER.hexval()}"><b>▲ 暂未触发具体预警规则，但评分已落入「{a.level}」区间，'
+                    f'建议主动排查：竞品介入、关键人变动、互动频次、回款与满意度。</b></font>',
+                    self.styles["BodyCN"],
+                ),
+            ]))
         else:
-            elements.append(Paragraph(
-                f'<font color="{self.SUCCESS.hexval()}"><b>✓</b></font> 目前未发现明显风险信号，客情状态良好。',
-                self.styles["BodyCN"],
-            ))
+            elements.append(KeepTogether([
+                header,
+                Spacer(1, 0.3 * cm),
+                Paragraph(
+                    f'<font color="{self.SUCCESS.hexval()}"><b>●</b></font> 本次排查未发现明显风险信号，客情状态良好。',
+                    self.styles["BodyCN"],
+                ),
+            ]))
 
         elements.append(Spacer(1, 0.5 * cm))
         if a.suggestions:
             sugg_items = [
                 Paragraph(
-                    f'<font color="#1AAE39"><b>· {s}</b></font>',
+                    f'<font color="#1AAE39" size="9"><b>●</b></font> <font color="#333333">{s}</font>',
                     ParagraphStyle("SuggItem", fontName=self.FONT_NAME, fontSize=10.5,
-                                  leading=17, textColor=self.SUCCESS, spaceAfter=4),
+                                  leading=17, textColor=self.INK_2, spaceAfter=4),
                 )
                 for s in a.suggestions
             ]
-            elements.append(self._build_suggestion_block(sugg_items))
+            # 建议块整体不跨页
+            elements.append(KeepTogether([self._build_suggestion_block(sugg_items)]))
         return elements
 
-    def _build_alert_block(self, alert_items: list) -> Table:
-        """风险提示红块：标题行 + 预警条目列表。"""
-        block = Table(
+    @staticmethod
+    def _normalize_alerts(a: AssessmentResponse) -> list[tuple[str, str]]:
+        """结构化预警优先；仅有纯文本 risk_alerts 时按中级别兜底。"""
+        if a.alerts:
+            return [
+                (x.level if x.level in _AlertMixin._LEVEL_LABEL else "medium", x.message)
+                for x in a.alerts
+            ]
+        return [("medium", m) for m in a.risk_alerts]
+
+    def _level_badge(self, level: str) -> Table:
+        """级别徽章：语义色 12% 底 + 同色文字（沿用 DESIGN 徽章规则）。"""
+        fg, bg = {
+            "high": (self.DANGER, self.DANGER_SOFT),
+            "medium": (self.WARNING, self.WARNING_SOFT),
+            "low": (self.INFO, self.INFO_SOFT),
+        }.get(level, (self.WARNING, self.WARNING_SOFT))
+        badge = Table(
             [[Paragraph(
-                '<font color="#C62828"><b>风险提示</b></font>',
-                ParagraphStyle("AlertTitle", fontName=self.FONT_NAME, fontSize=12,
-                              leading=17, textColor=self.DANGER, spaceAfter=4),
-            )]] + [[item] for item in alert_items],
-            colWidths=[16.4 * cm],
+                f'<font color="{fg.hexval()}"><b>{self._LEVEL_LABEL.get(level, "中")}</b></font>',
+                ParagraphStyle(f"Badge_{level}", fontName=self.FONT_NAME, fontSize=9,
+                              leading=13, alignment=TA_CENTER),
+            )]],
+            colWidths=[1.5 * cm],
+            rowHeights=[0.46 * cm],
+            hAlign="LEFT",
         )
-        block.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), self.DANGER_SOFT),
-            ("BOX", (0, 0), (-1, -1), 1, HexColor("#C6282840")),
+        badge.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), bg),
             ("ROUNDEDCORNERS", [8, 8, 8, 8]),
-            ("LEFTPADDING", (0, 0), (-1, -1), 14),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
-            ("TOPPADDING", (0, 0), (-1, -1), 10),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-            ("LINEBELOW", (0, 0), (-1, 0), 0.5, HexColor("#C6282822")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ]))
-        return block
+        return badge
+
+    def _build_alert_table(self, items: list[tuple[str, str]]) -> Table:
+        """排查表：级别 | 排查发现，hairline 分隔的无外框行列表风格。"""
+        head = ParagraphStyle("AlertHead", fontName=self.FONT_NAME, fontSize=9,
+                              leading=13, textColor=self.MUTED)
+        rows = [[Paragraph("<b>级别</b>", head), Paragraph("<b>排查发现</b>", head)]]
+        for level, message in items:
+            rows.append([
+                self._level_badge(level),
+                Paragraph(
+                    f'<font color="#333333">{message}</font>',
+                    ParagraphStyle("AlertMsg", fontName=self.FONT_NAME, fontSize=10,
+                                  leading=16, textColor=self.INK_2),
+                ),
+            ])
+        table = Table(rows, colWidths=[2.2 * cm, 14.2 * cm], repeatRows=1)
+        cmds = [
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BACKGROUND", (0, 0), (-1, 0), self.SURFACE_2),
+            ("BOX", (0, 0), (-1, -1), 1, self.BORDER),
+            ("ROUNDEDCORNERS", [8, 8, 8, 8]),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, self.BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]
+        for r in range(1, len(rows) - 1):
+            cmds.append(("LINEBELOW", (0, r), (-1, r), 0.5, self.BORDER_SOFT))
+        table.setStyle(TableStyle(cmds))
+        return table
 
     def _build_suggestion_block(self, items: list) -> Table:
-        """改进建议绿块：标题行 + 建议条目列表。"""
+        """改进建议：白卡 + 左侧绿色竖条 + hairline 边框（与策略卡同一卡片语言，不用绿底块）。"""
         block = Table(
             [[Paragraph(
                 '<font color="#1AAE39"><b>改进建议</b></font>',
@@ -428,20 +628,21 @@ class _AlertMixin:
             colWidths=[16.4 * cm],
         )
         block.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), self.SUCCESS_SOFT),
-            ("BOX", (0, 0), (-1, -1), 1, HexColor("#1AAE3940")),
+            ("BACKGROUND", (0, 0), (-1, -1), white),
+            ("BOX", (0, 0), (-1, -1), 1, self.BORDER),
             ("ROUNDEDCORNERS", [8, 8, 8, 8]),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, self.SUCCESS),
             ("LEFTPADDING", (0, 0), (-1, -1), 14),
             ("RIGHTPADDING", (0, 0), (-1, -1), 14),
             ("TOPPADDING", (0, 0), (-1, -1), 10),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-            ("LINEBELOW", (0, 0), (-1, 0), 0.5, HexColor("#1AAE3922")),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, self.BORDER_SOFT),
         ]))
         return block
 
 
 class _FooterMixin:
-    """页脚：评分模型说明 + 生成时间。"""
+    """页脚：评估方法说明 + 免责语 + 生成时间（对外口径）。"""
 
     def _footer(self) -> list:
         model_line1, model_line2 = self._model_description()
@@ -450,7 +651,7 @@ class _FooterMixin:
             HRFlowable(width="100%", thickness=0.6, color=self.BRAND),
             Spacer(1, 0.35 * cm),
             Paragraph(
-                '<font color="#E60012"><b>评分模型说明</b></font>',
+                '<font color="#E60012"><b>评估方法说明</b></font>',
                 ParagraphStyle("FooterTitle", fontName=self.FONT_NAME, fontSize=9,
                               leading=14, textColor=self.BRAND),
             ),
@@ -459,7 +660,7 @@ class _FooterMixin:
             Paragraph(model_line2, self.styles["SmallCN"]),
             Spacer(1, 0.25 * cm),
             Paragraph(
-                f"本报告由客情评估智能体自动生成 · {self._now_str()}",
+                f"本报告基于评估日可得信息生成，供决策参考 · {self._now_str()}",
                 self.styles["SmallCN"],
             ),
         ]

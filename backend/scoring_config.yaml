@@ -753,7 +753,7 @@ dimensions:
             "5千万-1亿": 0.84
             "1-5千万": 0.56
             "<1千万": 0.28
-          detail: "累计合作金额 {value} 万元（>5亿）：+{score}分"
+          detail: "累计合作金额 {value}（>5亿）：+{score}分"
           default_score: 0.28
 
       - field: his_02

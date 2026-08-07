@@ -87,8 +87,6 @@ def _run_pdf_job(job_id: str, customer_id: int, include_ai: bool, bind) -> None:
             strategy_items=report.strategy_items,
             references=report.references,
             trend=report.trend,
-            degraded=report.degraded,
-            ai_error=report.error,
             industry=customer.industry or "",
         )
         with _pdf_jobs_lock:
@@ -201,8 +199,6 @@ def download_pdf(
         strategy_items=report.strategy_items,
         references=report.references,
         trend=report.trend,
-        degraded=report.degraded,
-        ai_error=report.error,
         industry=customer.industry or "",
     )
 
