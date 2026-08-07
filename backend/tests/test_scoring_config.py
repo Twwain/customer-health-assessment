@@ -110,6 +110,15 @@ def test_find_factor_prefers_editable_definition():
     assert config.find_factor("not_registered_field") is None
 
 
+def test_dimension_factors_carry_parsed_sub_dimension():
+    """评估结果的因子明细应携带从描述解析出的二级维度（供 PDF/前端分组）。"""
+    strategy = ConfigDrivenStrategy()
+    resp = strategy.evaluate(make_customer())
+    kcr = next(d for d in resp.dimensions if d.key == "kcr")
+    subs = {f.sub_dimension for f in kcr.factors}
+    assert "决策链覆盖度" in subs
+
+
 # ── 2. 因子库计分（四级计算模型折算结果）─────────────────────────────────────
 
 

@@ -58,12 +58,25 @@ class CustomerListResponse(BaseModel):
     page_size: int
 
 
+class FactorScoreItem(BaseModel):
+    """维度内单个因子的结构化评分明细。"""
+
+    field: str = ""
+    label: str = ""
+    sub_dimension: str = Field(default="", description="二级维度（来自因子描述）")
+    detail: str = ""
+    score: float = 0
+
+
 class DimensionScore(BaseModel):
     key: str = Field(default="", description="维度标识（来自 scoring_config.yaml）")
     name: str
     score: float
     max_score: float
     details: list[str]
+    factors: list[FactorScoreItem] = Field(
+        default_factory=list, description="维度内因子结构化明细（含二级维度，供 PDF 分组展示）"
+    )
 
 
 class AlertItem(BaseModel):
@@ -128,6 +141,7 @@ class FactorConfigItem(BaseModel):
     source: str = Field(default="model", description="model=模型列 / custom_fields=扩展字段")
     source_role: str = Field(default="", description="因子来源角色：销售/研发/市场/HR ...")
     description: str = ""
+    sub_dimension: str = Field(default="", description="因子所属二级维度（来自因子描述标注）")
     rule_text: str = Field(default="", description="打分规则的人类可读文案（如 ≥100% → 2.1分）")
     rule_type: str = ""
     editable: bool = True

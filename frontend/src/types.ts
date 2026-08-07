@@ -74,6 +74,7 @@ export interface FactorConfigItem {
   source: string;
   source_role: string;
   description: string;
+  sub_dimension: string;
   rule_text: string;
   rule_type: string;
   editable: boolean;

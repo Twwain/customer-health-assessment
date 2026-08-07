@@ -1,13 +1,16 @@
 import datetime
 import io
+import logging
 from typing import Any
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
 from sqlalchemy import Boolean, Date, DateTime, Float, Integer, func, or_
 from sqlalchemy.orm import Session
+
 from config import SCORING_STRATEGY
 from database import get_db
 from models import AssessmentHistory, Customer
+
 from schemas import (
     CustomerCreate,
     CustomerUpdate,
@@ -23,8 +26,14 @@ from schemas import (
 )
 from services import assessment_history
 from services.scoring import get_scoring_strategy, load_scoring_config
-from services.scoring.config_loader import FactorConfig
+from services.scoring.config_loader import (
+    FactorConfig,
+    strip_sub_dimension_annotation,
+    sub_dimension_of,
+)
 import openpyxl
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/customers", tags=["客情信息"])
 
@@ -254,7 +263,8 @@ def get_factor_config():
                         weight=f.weight,
                         source=f.source,
                         source_role=f.source_role,
-                        description=f.description,
+                        description=strip_sub_dimension_annotation(f.description),
+                        sub_dimension=sub_dimension_of(f.description),
                         rule_text=_rule_text(f),
                         rule_type=f.rule.type,
                         editable=f.input.editable,
@@ -482,8 +492,10 @@ def delete_customer(customer_id: int, db: Session = Depends(get_db)):
     customer = db.query(Customer).filter(Customer.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="客户不存在")
+    name = customer.customer_name
     db.delete(customer)
     db.commit()
+    logger.info("删除客户 id=%s name=%s（级联清理评估历史与聊天会话）", customer_id, name)
     return {"ok": True}
 
 

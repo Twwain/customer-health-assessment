@@ -6,7 +6,11 @@
   Prompt 文案在 ``backend/prompt_templates.yaml``。
 """
 
+import logging
 import os
+
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,6 +44,63 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _load_secret_key() -> bytes | None:
+    """加载密钥解密的 Fernet 密钥：优先 CH_SECRET_KEY 环境变量，其次密钥文件。
+
+    密钥文件路径取 SECRET_KEY_FILE；路径缺失时回退到仓库内默认 ./.ch_secret
+    与容器固定挂载点 /run/secrets/ch_secret（兼容本地开发与 compose 默认挂载）。
+    文件缺失或不可读返回 None（调用方按“未加密”处理，不阻断启动）。
+    """
+    env_key = os.getenv("CH_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key.encode()
+    candidates: list[str] = []
+    configured = os.getenv("SECRET_KEY_FILE", "").strip()
+    if configured:
+        if os.path.exists(configured) and not os.path.isfile(configured):
+            logger.warning(
+                "配置的密钥文件路径存在但不是普通文件（可能被 Docker 挂载成了目录）: %s",
+                configured,
+            )
+        candidates.append(configured)
+    candidates.extend(("./.ch_secret", "/run/secrets/ch_secret"))
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    return f.read().strip()
+        except OSError as exc:
+            logger.warning("读取密钥文件失败（%s）: %s", exc, path)
+    return None
+
+
+def _decrypt_env(raw: str, name: str = "") -> str:
+    """支持 enc: 前缀的加密值（Fernet）。非加密值或解密失败时原样返回。
+
+    解密失败（密钥缺失 / 密钥错误）会记 warning，方便部署时排查。
+    """
+    if not raw.startswith("enc:"):
+        return raw
+    key = _load_secret_key()
+    if key is None:
+        logger.warning(
+            "检测到 enc: 前缀配置，但未找到 Fernet 密钥，%s将按原样使用",
+            f"「{name}」" if name else "该密钥",
+        )
+        return raw
+    try:
+        from cryptography.fernet import Fernet
+
+        return Fernet(key).decrypt(raw[4:].encode()).decode()
+    except Exception as exc:  # noqa: BLE001 - 解密失败统一走“原样返回”降级
+        logger.warning(
+            "enc: 配置解密失败，%s将按原样使用: %s",
+            f"「{name}」" if name else "该密钥",
+            exc,
+        )
+        return raw
+
+
 # ══════════════════════════ 评分引擎══════════════════════════════
 
 # 评分策略：rule_based（配置驱动，默认）/ config（同义）/ ml（预留模型接入）
@@ -58,7 +119,7 @@ SCORING_CONFIG_PATH = os.getenv(
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "default")
 # 大模型兼容端点（不带 /v1，适配器自行拼接 /chat/completions）；未配置则视为不可用、自动降级
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_API_KEY = _decrypt_env(os.getenv("LLM_API_KEY", ""), "LLM_API_KEY")
 # 对话模型标识由 .env 指定；未配置则视为不可用、自动降级
 LLM_MODEL = os.getenv("LLM_MODEL", "")
 
@@ -91,10 +152,11 @@ EMBEDDING_BASE_URL = (
     or os.getenv("EMBEDDING_BASE_URL")
     or ""
 )
-EMBEDDING_API_KEY = (
+EMBEDDING_API_KEY = _decrypt_env(
     os.getenv("LLM_EMBEDDING_API_KEY")
     or os.getenv("EMBEDDING_API_KEY")
-    or ""
+    or "",
+    "EMBEDDING_API_KEY",
 )
 EMBEDDING_MODEL = (
     os.getenv("LLM_EMBEDDING_MODEL") or os.getenv("EMBEDDING_MODEL") or ""

@@ -288,3 +288,13 @@ def test_factor_config_includes_rule_text(client):
     kcr = next(d for d in dims if d["key"] == "kcr")
     kcr_01 = next(f for f in kcr["factors"] if f["field"] == "kcr_01")
     assert "100% → 2.1分" in kcr_01["rule_text"]
+
+
+def test_factor_config_includes_sub_dimension(client):
+    """factor-config 应下发 sub_dimension，且 description 已移除“二级维度”标注。"""
+    resp = client.get("/api/customers/factor-config")
+    assert resp.status_code == 200
+    kcr = next(d for d in resp.json()["dimensions"] if d["key"] == "kcr")
+    kcr_01 = next(f for f in kcr["factors"] if f["field"] == "kcr_01")
+    assert kcr_01["sub_dimension"] == "决策链覆盖度"
+    assert "二级维度" not in kcr_01["description"]

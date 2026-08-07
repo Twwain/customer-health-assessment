@@ -9,7 +9,7 @@ import type {
 } from "../types";
 import { getLevels, levelColor, trendMeta, type LevelSpec } from "../lib/ui";
 import { useIsMobile } from "../hooks";
-import { AlertBadge, LevelBadge } from "../components/Badges";
+import { LevelBadge } from "../components/Badges";
 import { Sparkline, TrendChart } from "../components/Charts";
 import CustomerForm from "../components/CustomerForm";
 import { BASIC_FIELDS } from "../lib/customerFields";
@@ -46,9 +46,8 @@ export default function CustomerList() {
   const [factorDrawer, setFactorDrawer] = useState<{ customer: CustomerResponse; readOnly: boolean } | null>(null);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
-  const [trendDrawer, setTrendDrawer] = useState<CustomerResponse | null>(null);
+  const [deleting, setDeleting] = useState<number | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
 
   const enrich = async (list: CustomerResponse[]) => {
     // 并发请求每个客户的评分与趋势；内层 promise 必须返回给 Promise.all，
@@ -173,13 +172,38 @@ export default function CustomerList() {
   const evalCustomer = async (c: CustomerResponse) => {
     try {
       const s = await chat.createSession({
-        title: `${c.customer_name} · AI 评估`,
+        title: `${c.customer_name} · 综合评估`,
         customer_id: c.id,
         scenario: "assessment",
       });
       navigate(`/chat/${s.id}`, { state: { autoScenario: "assessment" } });
     } catch {
       alert("创建评估会话失败");
+    }
+  };
+
+  const deleteCustomer = async (c: CustomerResponse) => {
+    if (deleting !== null) return;
+    if (!window.confirm(`确定删除客户「${c.customer_name}」吗？此操作不可恢复。`)) return;
+    setDeleting(c.id);
+    try {
+      await customers.remove(c.id);
+      setFactorDrawer(null);
+      setRows((prev) => prev.filter((x) => x.id !== c.id));
+      setAssess((prev) => {
+        const next = { ...prev };
+        delete next[c.id];
+        return next;
+      });
+      setTrends((prev) => {
+        const next = { ...prev };
+        delete next[c.id];
+        return next;
+      });
+    } catch (e) {
+      alert("删除失败：" + (e instanceof Error ? e.message : "未知错误"));
+    } finally {
+      setDeleting(null);
     }
   };
 
@@ -284,52 +308,32 @@ export default function CustomerList() {
         <>
           {/* 桌面表格（无外框，仅行分隔） */}
           <div className="hidden overflow-x-auto md:block">
-            {editMode && (
-              <div className="mb-2 flex items-center gap-2 rounded-lg border border-accent/25 bg-accent-soft/50 px-3 py-2 text-[13.5px] text-accent">
-                ✏️ 编辑模式已开启：点击任意客户行即可修改其信息，完成后点右上角「完成」退出。
-              </div>
-            )}
-            <table className="w-full min-w-[790px] table-fixed border-collapse">
-              <thead className="border-b border-border text-left text-[13px] text-muted">
+            <table className="w-full min-w-[640px] table-fixed border-collapse">
+              <thead className="border-b border-border text-left text-[15px] text-muted">
                 <tr>
                   <th className="w-[140px] whitespace-nowrap px-3 pb-2.5 font-medium">客户名称</th>
                   <th className="w-[80px] whitespace-nowrap px-3 pb-2.5 font-medium">对接人</th>
                   <th className="w-[80px] whitespace-nowrap px-3 pb-2.5 font-medium">行业</th>
                   <th className="w-[100px] whitespace-nowrap px-3 pb-2.5 font-medium">客情评分</th>
-                  <th className="w-[100px] whitespace-nowrap px-3 pb-2.5 font-medium">趋势</th>
-                  <th className="w-[70px] whitespace-nowrap px-3 pb-2.5 font-medium">等级</th>
-                  <th className="w-[150px] whitespace-nowrap px-3 pb-2.5 font-medium">预警</th>
-                  <th className="w-[70px] whitespace-nowrap px-3 pb-2.5 text-right font-medium">
-                    <button
-                      className={`whitespace-nowrap rounded-md border px-2 py-1 text-[12.5px] font-medium transition ${
-                        editMode
-                          ? "border-accent bg-accent text-white"
-                          : "border-border text-ink-2 hover:border-accent hover:text-accent"
-                      }`}
-                      onClick={() => setEditMode((v) => !v)}
-                    >
-                      {editMode ? "完成" : "编辑"}
-                    </button>
-                  </th>
+                  <th className="w-[130px] whitespace-nowrap px-3 pb-2.5 font-medium">趋势</th>
+                  <th className="w-[80px] whitespace-nowrap px-3 pb-2.5 font-medium">等级</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((x) => {
-                  const selected = editMode && factorDrawer?.customer.id === x.customer.id;
+                  const selected = factorDrawer?.customer.id === x.customer.id;
                   return (
                     <tr
                       key={x.customer.id}
                       className={`group border-b transition last:border-0 ${
                         selected ? "border-accent/40 bg-accent-soft" : "border-border-soft hover:bg-accent-soft/50"
-                      } ${editMode ? "cursor-pointer" : ""}`}
+                      } cursor-pointer`}
                       style={selected ? { boxShadow: "inset 4px 0 0 var(--color-accent)" } : undefined}
-                      onClick={() => {
-                        if (editMode) openFactor(x.customer);
-                      }}
+                      onClick={() => openFactor(x.customer)}
                     >
                     <td className="px-3 py-3.5">
                       <span
-                        className={`whitespace-nowrap font-medium ${
+                        className={`whitespace-nowrap text-[16px] font-medium ${
                           selected ? "text-accent" : "text-ink group-hover:text-accent"
                         }`}
                       >
@@ -337,12 +341,12 @@ export default function CustomerList() {
                       </span>
                     </td>
                     <td className="px-3 py-3.5">
-                      <span className="whitespace-nowrap text-[13.5px] text-ink-2">
+                      <span className="whitespace-nowrap text-[15.5px] text-ink-2">
                         {x.customer.contact_person || "—"}
                       </span>
                     </td>
                     <td className="px-3 py-3.5">
-                      <div className="max-w-[108px] truncate whitespace-nowrap text-[14px] text-ink-2">
+                      <div className="max-w-[108px] truncate whitespace-nowrap text-[16px] text-ink-2">
                         {x.customer.industry || "—"}
                       </div>
                     </td>
@@ -355,39 +359,14 @@ export default function CustomerList() {
                     </td>
                     <td className="px-3 py-3.5">
                       {x.t ? (
-                        <button
-                          className="group/spark flex items-center rounded-lg px-1 py-0.5 transition hover:bg-surface-2"
-                          title="点击查看趋势详情"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setTrendDrawer(x.customer);
-                          }}
-                        >
-                          <Sparkline values={x.t.points.map((p) => p.total_score)} color={x.a?.level ? levelColor(x.a.level) : "#787671"} width={92} height={26} />
-                          <span className="ml-0.5 text-[11px] text-muted opacity-0 transition group-hover/spark:opacity-100">⤢</span>
-                        </button>
-                      ) : (
-                        <span className="text-[13px] text-muted">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-3.5">{x.a ? <LevelBadge grade={x.a.level} size="sm" /> : "—"}</td>
-                    <td className="px-3 py-3.5">
-                      {x.a && x.a.alerts.length > 0 ? (
-                        <div className="flex items-center gap-1 overflow-hidden">
-                          {x.a.alerts.slice(0, 2).map((al, i) => (
-                            <AlertBadge key={i} level={al.level} message={al.message} />
-                          ))}
-                          {x.a.alerts.length > 2 && (
-                            <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-[2px] text-[12px] text-muted">
-                              +{x.a.alerts.length - 2}
-                            </span>
-                          )}
+                        <div className="flex items-center px-1 py-0.5">
+                          <Sparkline values={x.t.points.map((p) => p.total_score)} color={x.a?.level ? levelColor(x.a.level) : "#787671"} width={120} height={34} />
                         </div>
                       ) : (
                         <span className="text-[13px] text-muted">—</span>
                       )}
                     </td>
-                    <td className="px-3 py-3.5" aria-hidden="true" />
+                    <td className="px-3 py-3.5">{x.a ? <LevelBadge grade={x.a.level} size="md" /> : "—"}</td>
                     </tr>
                   );
                 })}
@@ -418,20 +397,7 @@ export default function CustomerList() {
                 </div>
                 {x.t && (
                   <div className="mt-2 flex justify-center">
-                    <button
-                      className="rounded-lg px-1 py-0.5 transition hover:bg-surface-2"
-                      title="点击查看趋势详情"
-                      onClick={() => setTrendDrawer(x.customer)}
-                    >
-                      <Sparkline values={x.t.points.map((p) => p.total_score)} color={x.a?.level ? levelColor(x.a.level) : "#787671"} width={120} height={28} />
-                    </button>
-                  </div>
-                )}
-                {x.a && x.a.alerts.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {x.a.alerts.slice(0, 2).map((al, i) => (
-                      <AlertBadge key={i} level={al.level} message={al.message} />
-                    ))}
+                    <Sparkline values={x.t.points.map((p) => p.total_score)} color={x.a?.level ? levelColor(x.a.level) : "#787671"} width={120} height={28} />
                   </div>
                 )}
                 <div className="mt-2.5 flex gap-2">
@@ -454,6 +420,16 @@ export default function CustomerList() {
           onClose={() => setFactorDrawer(null)}
           narrow={factorDrawer.readOnly}
           lightMask={!factorDrawer.readOnly}
+          headerAction={
+            <button
+              type="button"
+              className="ml-2 shrink-0 rounded-lg border border-danger/40 px-2 py-1 text-[12.5px] font-medium text-danger transition hover:border-danger hover:bg-danger/10 disabled:opacity-50"
+              onClick={() => deleteCustomer(factorDrawer.customer)}
+              disabled={saving || deleting !== null}
+            >
+              {deleting === factorDrawer.customer.id ? "删除中…" : "删除"}
+            </button>
+          }
           footer={
             factorDrawer.readOnly ? (
               <>
@@ -495,12 +471,16 @@ export default function CustomerList() {
             onChange={setDraft}
             readOnly={factorDrawer.readOnly}
           />
-        </Drawer>
-      )}
-
-      {trendDrawer && (
-        <Drawer title={`📈 ${trendDrawer.customer_name} — 客情评分历史趋势`} onClose={() => setTrendDrawer(null)}>
-          <TrendDrawerBody a={assess[trendDrawer.id] ?? undefined} t={trends[trendDrawer.id] ?? undefined} />
+          <div className="mt-3 rounded-xl border border-border bg-surface p-3">
+            <div className="mb-2.5 flex items-center gap-2">
+              <span className="text-[14.5px] font-semibold text-ink">📈 客情评分历史趋势</span>
+            </div>
+            <TrendDrawerBody
+              a={assess[factorDrawer.customer.id] ?? undefined}
+              t={trends[factorDrawer.customer.id] ?? undefined}
+              width={factorDrawer.readOnly ? 334 : 384}
+            />
+          </div>
         </Drawer>
       )}
 
@@ -525,7 +505,7 @@ function Stat({ label, value, danger, warning }: { label: string; value: string;
 function ScoreCell({ score, level }: { score: number; level: string }) {
   const color = levelColor(level);
   return (
-    <span className="whitespace-nowrap text-[17px] font-bold" style={{ color }}>
+    <span className="whitespace-nowrap text-[18px] font-bold" style={{ color }}>
       {Math.round(score * 10) / 10}
     </span>
   );
@@ -547,6 +527,7 @@ function Drawer({
   footer,
   narrow,
   lightMask,
+  headerAction,
 }: {
   title: string;
   onClose: () => void;
@@ -554,6 +535,7 @@ function Drawer({
   footer?: React.ReactNode;
   narrow?: boolean;
   lightMask?: boolean;
+  headerAction?: React.ReactNode;
 }) {
   return (
     <>
@@ -565,6 +547,7 @@ function Drawer({
       <div className={`drawer-panel ${narrow ? "narrow" : ""}`}>
         <div className="flex items-center border-b border-border px-4 py-3">
           <h3 className="flex-1 truncate text-[16px] font-semibold text-ink">{title}</h3>
+          {headerAction}
           <button className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-surface-2" onClick={onClose}>
             ✕
           </button>
@@ -579,12 +562,13 @@ function Drawer({
 function TrendDrawerBody({
   a,
   t,
+  width = 384,
 }: {
   a?: AssessmentResponse;
   t?: AssessmentTrendResponse;
+  width?: number;
 }) {
   const color = a ? levelColor(a.level) : "var(--color-primary)";
-  const history = t ? [...t.points].reverse() : [];
   return (
     <div>
       {a && (
@@ -601,55 +585,10 @@ function TrendDrawerBody({
         </div>
       )}
       {t ? (
-        <div className="overflow-x-auto rounded-xl border border-border-soft bg-surface-2 p-3">
-          <TrendChart trend={t} color={color} width={420} height={180} />
-        </div>
+        <TrendChart trend={t} color={color} width={width} height={180} />
       ) : (
         <div className="rounded-xl border border-border-soft bg-surface-2 p-4 text-[14px] text-muted">暂无趋势数据</div>
       )}
-      {history.length > 0 && (
-        <div className="mt-3 overflow-hidden rounded-xl border border-border">
-          <table className="w-full text-[13.5px]">
-            <thead className="bg-surface-2 text-muted">
-              <tr>
-                <th className="px-3 py-2 text-left font-medium">评估时间</th>
-                <th className="px-3 py-2 text-right font-medium">总分</th>
-                <th className="px-3 py-2 text-right font-medium">变化</th>
-                <th className="px-3 py-2 text-left font-medium">等级</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((p, i) => {
-                const d = i < history.length - 1 ? +(history[i + 1].total_score - p.total_score).toFixed(1) : null;
-                return (
-                  <tr key={i} className="border-t border-border-soft">
-                    <td className="px-3 py-2 text-ink-2">{p.label}</td>
-                    <td className="px-3 py-2 text-right font-medium" style={{ color: levelColor(p.level) }}>
-                      {p.total_score}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {d == null ? (
-                        "—"
-                      ) : (
-                        <span className={d > 0 ? "text-success" : d < 0 ? "text-danger" : "text-muted"}>
-                          {d > 0 ? "+" : ""}
-                          {d}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <LevelBadge grade={p.level} size="sm" />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[13px] text-muted">
-        曲线基于 AssessmentHistory 全量记录；点击行内任意位置可编辑客户信息。
-      </div>
     </div>
   );
 }

@@ -775,6 +775,8 @@ def test_status_endpoint_reports_degraded(client, offline_llm):
 
 
 def test_adapter_unavailable_without_api_key(monkeypatch):
+    # adapter 先检查 BASE_URL 再检查 API Key，mock 一个有效地址让测试不依赖本机 .env
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://localhost:9999/v1")
     monkeypatch.setattr(config, "LLM_API_KEY", "")
     llm_adapter.reset_adapters()
     adapter = llm_adapter.get_chat_adapter()

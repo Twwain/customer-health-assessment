@@ -32,6 +32,11 @@ const EP: Record<Scenario, string> = {
   strategy: "strategy",
   alert_analysis: "alert-analysis",
 };
+const SCENE_LABEL: Record<Scenario, string> = {
+  assessment: "综合评估",
+  strategy: "策略建议",
+  alert_analysis: "风险排查",
+};
 
 export default function Chat() {
   const { sessionId } = useParams();
@@ -200,6 +205,13 @@ export default function Chat() {
     else setPickerOpen(true);
   };
 
+  const streamLabel = (scenario?: string) => {
+    if (scenario && scenario in SCENE_LABEL) {
+      return `正在生成${SCENE_LABEL[scenario as Scenario]}…`;
+    }
+    return "思考中…";
+  };
+
   const sendMessage = () => {
     const text = inputRef.current?.value.trim();
     if (!text || !sessionIdNum) return;
@@ -317,12 +329,12 @@ export default function Chat() {
     }
   };
 
-  const handlePick = (cid: number) => {
+  const handlePick = (c: { id: number; customer_name: string }) => {
     const sc = pendingScenario.current || "assessment";
     pendingScenario.current = null;
     setPickerOpen(false);
     chat
-      .createSession({ title: `客户评估`, customer_id: cid, scenario: sc })
+      .createSession({ title: `${c.customer_name} · ${SCENE_LABEL[sc]}`, customer_id: c.id, scenario: sc })
       .then((s) => navigate(`/chat/${s.id}`, { state: { autoScenario: sc } }))
       .catch(() => alert("创建会话失败"));
   };
@@ -421,6 +433,7 @@ export default function Chat() {
                 assessment={isStream ? (stream as StreamMsg)?.assessment : ctx.assessment}
                 trend={isStream ? (stream as StreamMsg)?.trend : ctx.trend}
                 streaming={isStream}
+                streamHint={isStream ? streamLabel((stream as StreamMsg)?.scenario) : undefined}
                 feedback={feedbacks[mid] || ""}
                 adopted={!!adopted[mid]}
                 onTrace={setTrace}
@@ -500,6 +513,7 @@ function MessageView({
   assessment,
   trend,
   streaming,
+  streamHint,
   feedback,
   adopted,
   onTrace,
@@ -510,6 +524,7 @@ function MessageView({
   assessment?: AssessmentResponse | null;
   trend?: AssessmentTrendResponse | null;
   streaming?: boolean;
+  streamHint?: string;
   feedback: string;
   adopted: boolean;
   onTrace: (r: KnowledgeReference) => void;
@@ -529,15 +544,20 @@ function MessageView({
     <div className="flex gap-2.5">
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand/10 text-[16px]">🤖</div>
       <div className="min-w-0 flex-1">
-        {assessment && <div className="mb-2"><HealthCard assessment={assessment} trend={trend ?? null} compact onAlertAI={undefined} /></div>}
-        {msg.content && (
+        {assessment && <div className="mb-2"><HealthCard assessment={assessment} trend={trend ?? null} compact showTrendButton={false} onAlertAI={undefined} /></div>}
+        {msg.content ? (
           <div className="md-text rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5">
             <div className="md">
               {renderMarkdown(msg.content)}
               {streaming && <span className="cursor-blink ml-0.5" />}
             </div>
           </div>
-        )}
+        ) : streaming ? (
+          <div className="md-text rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5 text-[14.5px] text-muted">
+            <span className="cursor-blink mr-1" />
+            {streamHint ?? "思考中…"}
+          </div>
+        ) : null}
         {msg.strategy_items && msg.strategy_items.length > 0 && (
           <div className="mt-2">
             <StrategyList items={msg.strategy_items} references={msg.references} onTrace={onTrace} />
@@ -615,7 +635,7 @@ function TraceDrawer({ reference, onClose }: { reference: KnowledgeReference; on
   );
 }
 
-function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (cid: number) => void }) {
+function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (c: { id: number; customer_name: string }) => void }) {
   const [list, setList] = useState<{ id: number; customer_name: string; industry: string }[]>([]);
   const [q, setQ] = useState("");
   useEffect(() => {
@@ -645,7 +665,7 @@ function CustomerPicker({ onClose, onPick }: { onClose: () => void; onPick: (cid
               <button
                 key={c.id}
                 className="flex w-full items-center justify-between rounded-lg border border-border bg-surface px-3 py-2.5 text-left text-[14.5px] transition hover:border-accent"
-                onClick={() => onPick(c.id)}
+                onClick={() => onPick(c)}
               >
                 <span className="font-medium text-ink">{c.customer_name}</span>
                 <span className="text-[13px] text-muted">{c.industry || "—"}</span>

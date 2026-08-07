@@ -31,32 +31,29 @@ class _CoverMixin:
         industry: str = "",
     ) -> list:
         color = self._color_for(a.level, self.BRAND)
+        # 客户信息：白底 + 发丝线分隔，标签在上、值在下（与前端「客户基本信息」卡片一致）
         meta_rows = [
             [
                 Paragraph("客户名称", self.styles["MetaLabel"]),
-                Paragraph(f"<b>{a.customer_name}</b>", self.styles["MetaValue"]),
                 Paragraph("所属行业", self.styles["MetaLabel"]),
-                Paragraph(industry or "—", self.styles["MetaValue"]),
+                Paragraph("评估日期", self.styles["MetaLabel"]),
             ],
             [
-                Paragraph("评估日期", self.styles["MetaLabel"]),
-                Paragraph(a.assessed_at.strftime("%Y年%m月%d日"), self.styles["MetaValue"]),
-                "",
-                "",
+                Paragraph(f"<b>{a.customer_name}</b>", self.styles["MetaValue"]),
+                Paragraph(f"<b>{industry or '—'}</b>", self.styles["MetaValue"]),
+                Paragraph(f"<b>{a.assessed_at.strftime('%Y年%m月%d日')}</b>", self.styles["MetaValue"]),
             ],
         ]
-        meta = Table(meta_rows, colWidths=[2.6 * cm, 5.6 * cm, 2.6 * cm, 5.6 * cm])
+        meta = Table(meta_rows, colWidths=[5.6 * cm, 5.6 * cm, 5.2 * cm])
         meta.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), self.SURFACE_2),
             ("BOX", (0, 0), (-1, -1), 1, self.BORDER),
             ("ROUNDEDCORNERS", [8, 8, 8, 8]),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 12),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-            ("TOPPADDING", (0, 0), (-1, -1), 9),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
             ("LINEBELOW", (0, 0), (-1, 0), 0.5, self.BORDER_SOFT),
-            ("SPAN", (1, 1), (-1, 1)),
         ]))
         return [
             HRFlowable(width="100%", thickness=0.5 * cm, color=self.BRAND),
@@ -199,7 +196,7 @@ class _OverviewMixin:
     def _build_level_scale(
         self, a: AssessmentResponse, color: HexColor, bar_w, pct: float
     ) -> list:
-        """综合评分下方的等级标尺：分数游标 + 等级色块 + 区间标注。"""
+        """综合评分下方的等级标尺：等级色块 + 区间标注（无游标小字）。"""
         elements: list = []
         level_ranges = self._levels()
         total_span = level_ranges[-1][2] - level_ranges[0][1] + 1 if level_ranges else 100
@@ -207,38 +204,6 @@ class _OverviewMixin:
         range_pcts = [max(0.02, (hi - lo + 1) / total_span) for _, lo, hi in level_order]
         pct_sum = sum(range_pcts)
         range_pcts = [rp / pct_sum for rp in range_pcts]
-        indicator_pct = max(2, min(98, pct)) / 100
-        score_w = 1.8 * cm
-        left_w = bar_w * indicator_pct - score_w / 2
-        right_w = bar_w - left_w - score_w
-        if left_w < 0:
-            left_w = 0
-            right_w = bar_w - score_w
-        if right_w < 0:
-            right_w = 0
-            score_w = bar_w - left_w
-
-        marker = Table(
-            [[
-                "",
-                Paragraph(
-                    f'<font color="{color.hexval()}"><b>{a.total_score:.1f}</b></font>',
-                    ParagraphStyle("Marker", fontName=self.FONT_NAME, fontSize=9,
-                                  leading=13, alignment=TA_CENTER),
-                ),
-                "",
-            ]],
-            colWidths=[left_w, score_w, right_w],
-            hAlign="CENTER",
-        )
-        marker.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        elements.append(marker)
 
         scale_row_cells = []
         for lvl_name, lo, hi in level_order:
@@ -331,7 +296,7 @@ class _DimensionMixin:
         name_w, bar_w, score_w = 4.8 * cm, 9.2 * cm, 3.2 * cm
         elements = [
             KeepTogether([
-                self._section_header("二", "分维度得分明细"),
+                self._section_header("三", "分维度得分明细"),
                 Spacer(1, 0.3 * cm),
                 Paragraph(
                     "占比条按得分率着色（绿=健康，橙=亚健康，红=偏弱），低于亚健康线的维度标记「需关注」。",
@@ -431,7 +396,7 @@ class _DimensionMixin:
         return f"{label}：{rest}"
 
     def _dimension_cards(self, a: AssessmentResponse) -> list:
-        """逐维度因子明细卡（两列排布，压缩纵向长度）；得分按得分率着色，薄弱维度标记「需关注」。"""
+        """逐维度因子明细卡：按二级维度分组展示；得分按得分率着色，薄弱维度标记「需关注」。"""
         elements: list = []
         for d in a.dimensions:
             pct = d.score / d.max_score if d.max_score else 0
@@ -439,28 +404,53 @@ class _DimensionMixin:
             title_html = f"<b>{d.name}</b>"
             if self._ratio_needs_attention(pct):
                 title_html += '<font size="8" color="#DD5B00">　▲ 需关注</font>'
-            details = [self._factor_status_text(x) for x in (d.details or [])]
-            half = (len(details) + 1) // 2
-            left_items = details[:half]
-            right_items = details[half:]
-            left = "<br/>".join(f'<font color="#333333">· {x}</font>' for x in left_items) or "暂无明细"
-            right = "<br/>".join(f'<font color="#333333">· {x}</font>' for x in right_items) or ""
-            card_data = [
-                [
-                    Paragraph(title_html, self.styles["CardTitle"]),
-                    Paragraph(
-                        f'<font color="{dim_color.hexval()}"><b>{d.score:.1f}</b></font>'
-                        f'<font color="#666666"> / {d.max_score:.0f} 分</font>',
-                        self.styles["CardScore"],
-                    ),
-                ],
-                [
-                    Paragraph(left, self.styles["CardDetail"]),
-                    Paragraph(right, self.styles["CardDetail"]),
-                ],
+            header_row = [
+                Paragraph(title_html, self.styles["CardTitle"]),
+                Paragraph(
+                    f'<font color="{dim_color.hexval()}"><b>{d.score:.1f}</b></font>'
+                    f'<font color="#666666"> / {d.max_score:.0f} 分</font>',
+                    self.styles["CardScore"],
+                ),
             ]
-            card = Table(card_data, colWidths=[8.6 * cm, 8.6 * cm], hAlign="LEFT")
-            card.setStyle(TableStyle([
+            factors = getattr(d, "factors", None) or []
+            if factors:
+                grouped = True
+                # 按二级维度分组（保持配置中的因子顺序）
+                groups: dict[str, list] = {}
+                order: list[str] = []
+                for f in factors:
+                    sub = f.sub_dimension or "其他"
+                    if sub not in groups:
+                        groups[sub] = []
+                        order.append(sub)
+                    groups[sub].append(f)
+                lines: list[str] = []
+                for sub in order:
+                    lines.append(f'<font color="#E60012">●</font> <font color="#333333"><b>{sub}</b></font>')
+                    for f in groups[sub]:
+                        status = self._factor_status_text(f.detail)
+                        status_text = status.split("：", 1)[1] if "：" in status else status
+                        lines.append(f'<font color="#333333">· {f.label}：{status_text or "未填写"}</font>')
+                body = Paragraph("<br/>".join(lines) or "暂无明细", self.styles["CardDetail"])
+                card_data = [header_row, [body, ""]]
+                col_widths = [12.2 * cm, 4.2 * cm]
+            else:
+                grouped = False
+                # 兜底：无结构化因子（旧快照）时按原两列排布
+                details = [self._factor_status_text(x) for x in (d.details or [])]
+                half = (len(details) + 1) // 2
+                left = "<br/>".join(f'<font color="#333333">· {x}</font>' for x in details[:half]) or "暂无明细"
+                right = "<br/>".join(f'<font color="#333333">· {x}</font>' for x in details[half:]) or ""
+                card_data = [
+                    header_row,
+                    [
+                        Paragraph(left, self.styles["CardDetail"]),
+                        Paragraph(right, self.styles["CardDetail"]),
+                    ],
+                ]
+                col_widths = [8.6 * cm, 8.6 * cm]
+            card = Table(card_data, colWidths=col_widths, hAlign="LEFT")
+            style_cmds = [
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 12),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 12),
@@ -470,7 +460,10 @@ class _DimensionMixin:
                 ("BOX", (0, 0), (-1, -1), 1, self.BORDER),
                 ("ROUNDEDCORNERS", [8, 8, 8, 8]),
                 ("LINEBELOW", (0, 0), (-1, 0), 0.5, self.BORDER_SOFT),
-            ]))
+            ]
+            if grouped:
+                style_cmds.append(("SPAN", (0, 1), (1, 1)))
+            card.setStyle(TableStyle(style_cmds))
             # 卡片不可跨页拆分（卡头与明细必须在同一页）
             elements.append(KeepTogether([card, Spacer(1, 0.4 * cm)]))
         return elements
@@ -483,7 +476,7 @@ class _AlertMixin:
 
     def _alerts(self, a: AssessmentResponse) -> list:
         elements = [Spacer(1, 0.5 * cm)]
-        header = self._section_header("三", "风险排查")
+        header = self._section_header("四", "风险排查")
 
         items = self._normalize_alerts(a)
         risky = self._level_is_risky(a)

@@ -1,5 +1,5 @@
-import { useId } from "react";
-import type { AssessmentTrendResponse, LevelConfigItem } from "../types";
+import type { AssessmentTrendResponse } from "../types";
+import { computeTrendYRange } from "../lib/trendRange";
 
 // 图表组件（SVG 自绘，1:1 还原 docs/prototype/app.js 的 SVG 逻辑，确保与冻结基线一致）。
 // 注：recharts 为项目依赖，但手写 SVG 可保证与评审基线像素级一致，避免主题化偏移。
@@ -111,17 +111,29 @@ export function TrendChart({
   width?: number;
   height?: number;
 }) {
-  const gid = `trend-grad-${useId().replace(/:/g, "")}`;
   const vals = trend.points.map((p) => p.total_score);
   if (vals.length === 0) return <div style={{ color: "#666666", fontSize: 14 }}>暂无趋势数据</div>;
+  if (vals.length === 1) {
+    // 只有一次评估：无曲线可画，仅渲染末点
+    return (
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="客情评分趋势">
+        <circle cx={width / 2} cy={height / 2} r={3.5} fill="#fff" stroke={color} strokeWidth={2} />
+        <text x={width / 2} y={height / 2 - 12} textAnchor="middle" fontSize={12} fontWeight={700} fill={color}>
+          {vals[0]}
+        </text>
+      </svg>
+    );
+  }
   const labels = trend.points.map((p) => p.label);
-  const padL = 36;
+  const padL = 8;
   const padR = 14;
   const padT = 20;
   const padB = 26;
   const iw = width - padL - padR;
   const ih = height - padT - padB;
-  const y = (v: number) => padT + ih - (v / 100) * ih;
+  // y 轴按数据范围自适应（与列表 Sparkline 一致），避免固定 0-100 刻度让波动显得平缓
+  const { yMin, ySpan } = computeTrendYRange(vals);
+  const y = (v: number) => padT + ih - ((v - yMin) / ySpan) * ih;
   const x = (i: number) => padL + (i / Math.max(vals.length - 1, 1)) * iw;
 
   // 平滑曲线：Catmull-Rom 转三次贝塞尔
@@ -145,56 +157,15 @@ export function TrendChart({
   const pts: Array<[number, number]> = vals.map((v, i) => [x(i), y(v)]);
   const linePath = smoothPath(pts);
   const areaPath = `${linePath} L ${x(vals.length - 1).toFixed(1)} ${padT + ih} L ${padL} ${padT + ih} Z`;
-  const gridLines = [0, 25, 50, 75, 100].map((v) => (
-    <g key={v}>
-      <line x1={padL} y1={y(v)} x2={width - padR} y2={y(v)} stroke={v === 0 ? "#E5E5E5" : "#F2F2F2"} strokeWidth={1} />
-      <text x={padL - 7} y={y(v) + 3.5} textAnchor="end" fontSize={10} fill="#9C9C9C">
-        {v}
+  const lastIdx = vals.length - 1;
+  const lastDot = (
+    <g>
+      <circle cx={x(lastIdx).toFixed(1)} cy={y(vals[lastIdx]).toFixed(1)} r={3.5} fill="#fff" stroke={color} strokeWidth={2} />
+      <text x={x(lastIdx).toFixed(1)} y={(y(vals[lastIdx]) - 12).toFixed(1)} textAnchor="middle" fontSize={12} fontWeight={700} fill={color}>
+        {vals[lastIdx]}
       </text>
     </g>
-  ));
-
-  const levelLines = (trend.level_lines || []).map((lv: LevelConfigItem) => {
-    if (lv.min_score <= 0 || lv.min_score >= 100) return null;
-    return (
-      <g key={lv.name}>
-        <line
-          x1={padL}
-          y1={y(lv.min_score)}
-          x2={width - padR}
-          y2={y(lv.min_score)}
-          stroke={lv.color}
-          strokeWidth={1}
-          strokeDasharray="5 4"
-          opacity={0.45}
-        />
-        <text
-          x={width - padR - 2}
-          y={y(lv.min_score) - 4}
-          textAnchor="end"
-          fontSize={10}
-          fill={lv.color}
-          opacity={0.85}
-        >
-          {lv.name} {lv.min_score}
-        </text>
-      </g>
-    );
-  });
-
-  const dots = vals.map((v, i) => {
-    const last = i === vals.length - 1;
-    return (
-      <g key={i}>
-        <circle cx={x(i).toFixed(1)} cy={y(v).toFixed(1)} r={last ? 4 : 3} fill="#fff" stroke={color} strokeWidth={last ? 2.4 : 1.8} />
-        {last && (
-          <text x={x(i).toFixed(1)} y={(y(v) - 12).toFixed(1)} textAnchor="middle" fontSize={12} fontWeight={700} fill={color}>
-            {v}
-          </text>
-        )}
-      </g>
-    );
-  });
+  );
   const step = vals.length > 6 ? Math.ceil(vals.length / 5) : 1;
   const xl = labels.map((lb, i) =>
     i % step === 0 || i === vals.length - 1 ? (
@@ -206,17 +177,9 @@ export function TrendChart({
 
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="客情评分趋势">
-      <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity={0.22} />
-          <stop offset="100%" stopColor={color} stopOpacity={0} />
-        </linearGradient>
-      </defs>
-      {gridLines}
-      {levelLines}
-      <path d={areaPath} fill={`url(#${gid})`} />
-      <path d={linePath} fill="none" stroke={color} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
-      {dots}
+      <path d={areaPath} fill={color} opacity={0.09} />
+      <path d={linePath} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+      {lastDot}
       {xl}
     </svg>
   );

@@ -66,6 +66,14 @@ button { font-family: inherit; cursor: pointer; }
   outline-offset: 1px;
 }
 
+/* 文本输入控件聚焦态由自身 border/ring 表达，避免与全局 outline 叠加成双红框；
+   file 选择控件没有自定义聚焦样式，保留浏览器默认 outline 保证键盘可达性 */
+input:focus-visible:not([type="file"]),
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }

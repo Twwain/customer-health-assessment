@@ -262,7 +262,7 @@ class PdfReportGenerator(
             textColor=self.MUTED,
         ))
         styles.add(ParagraphStyle(
-            "MetaValue", fontName=self.FONT_NAME, fontSize=11, leading=16,
+            "MetaValue", fontName=self.FONT_NAME, fontSize=12.5, leading=18,
             textColor=self.INK,
         ))
         return styles
@@ -309,10 +309,10 @@ class PdfReportGenerator(
             story.extend(self._cover(a, industry=industry))
             story.append(PageBreak())
             story.extend(self._overview(a, trend))
+            story.extend(self._trend_section_pdf(trend))
             story.extend(self._dimension_detail(a))
             story.extend(self._alerts(a))
             story.extend(self._ai_strategy_section(strategy_items, references))
-            story.extend(self._trend_section_pdf(trend))
             story.extend(self._footer())
             doc.build(story)
             return buf.getvalue()

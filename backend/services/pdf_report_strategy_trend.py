@@ -42,7 +42,7 @@ class _StrategyMixin:
     _PRIORITY_ORDER = ("recommended", "alternative", "long_term")
 
     def _ai_strategy_section(self, strategy_items, references) -> list:
-        header = self._section_header("四", "推荐策略")
+        header = self._section_header("五", "推荐策略")
         if not strategy_items:
             return [
                 Spacer(1, 0.5 * cm),
@@ -156,7 +156,7 @@ class _TrendMixin:
     """客情评分趋势：matplotlib 曲线 + 等级带/参考线 + 趋势摘要。"""
 
     def _trend_section_pdf(self, trend: AssessmentTrendResponse | None) -> list:
-        header = self._section_header("五", "客情评分趋势")
+        header = self._section_header("二", "客情评分趋势")
         if not trend or len(trend.points) < 2:
             return [
                 Spacer(1, 0.5 * cm),
@@ -174,22 +174,6 @@ class _TrendMixin:
             content.append(self._render_trend_chart(trend))
         except Exception:
             content.append(Paragraph("趋势曲线生成失败，已略去图示。", self.styles["SmallCN"]))
-        trend_cn = {"up": "↑ 上升", "down": "↓ 下降", "flat": "→ 持平"}
-        delta_txt = f"{trend.delta:+.1f}" if trend.previous_score is not None else "—"
-        content.append(Spacer(1, 0.2 * cm))
-        content.append(Paragraph(
-            f'趋势：<b>{trend_cn.get(trend.trend, trend.trend)}</b>（较上次 {delta_txt} 分）',
-            self.styles["BodyCN"],
-        ))
-        if trend.level_lines:
-            lines = " / ".join(
-                f"{lv.name} {lv.min_score:g}分" for lv in trend.level_lines if lv.min_score > 0
-            )
-            if lines:
-                content.append(Paragraph(
-                    f'<font color="#666666">等级参考线：{lines}</font>',
-                    self.styles["SmallCN"],
-                ))
         # 标题 + 曲线 + 摘要整体不跨页
         return [Spacer(1, 0.5 * cm), KeepTogether([header, Spacer(1, 0.25 * cm)] + content)]
 
@@ -211,48 +195,40 @@ class _TrendMixin:
         xs = [p.label for p in trend.points]
         ys = [p.total_score for p in trend.points]
         fig, ax = plt.subplots(figsize=(8.6, 3.4), dpi=160)
-        # 等级背景带（来自评分配置，浅色区分区间）
-        for name, lo, hi, hexc in self._levels():
-            if hi <= 0 or lo >= 100:
-                continue
-            ax.axhspan(lo, hi, color=hexc, alpha=0.05)
-        # reportlab 的 hexval() 返回 0xRRGGBB，matplotlib 只认 #RRGGBB
+        # 与前端趋势图一致的简洁样式：无网格、无等级线、y 轴按数据范围自适应
         brand_hex = f"#{self.BRAND.hexval()[2:]}"
-        ax.plot(range(len(ys)), ys, marker="o", color=brand_hex, linewidth=2.2,
-                markersize=4.5, markerfacecolor="white", markeredgecolor=brand_hex, markeredgewidth=1.4)
-        ax.fill_between(range(len(ys)), ys, min(ys) - 2, color=brand_hex, alpha=0.07)
+        raw_min = min(ys)
+        raw_max = max(ys)
+        raw_span = max(raw_max - raw_min, 8)
+        # 与前端 src/lib/trendRange.ts 同源实现（0.18 外扩 / 最小高度 8 / 中点扩展 4），改动需同步
+        y_min = max(0, raw_min - raw_span * 0.18)
+        y_max = min(100, raw_max + raw_span * 0.18)
+        if y_max - y_min < 8:
+            # 全等值等近平数据：以中点为轴补足最小高度，且不超出 0-100
+            mid = (y_min + y_max) / 2
+            y_min = max(0, mid - 4)
+            y_max = min(100, mid + 4)
+        ax.plot(range(len(ys)), ys, color=brand_hex, linewidth=2.2)
+        ax.fill_between(range(len(ys)), ys, y_min, color=brand_hex, alpha=0.09)
         ax.set_xticks(range(len(xs)))
         ax.set_xticklabels(xs, fontsize=8.5)
-        ax.set_ylim(0, max(100, getattr(trend, "max_score", 100) or 100))
-        ax.set_ylabel("客情评分", fontsize=10)
-        ax.set_title("客情评分历史趋势", fontsize=12, color="#1A1A1A")
-        ax.grid(True, axis="y", linestyle=":", alpha=0.5, color="#D4D4D4")
-        for spine in ("top", "right"):
+        ax.set_ylim(y_min, y_max)
+        ax.set_yticks([])
+        for spine in ("top", "right", "left"):
             ax.spines[spine].set_visible(False)
-        for spine in ("left", "bottom"):
-            ax.spines[spine].set_color("#E5E5E5")
-        for lv in trend.level_lines:
-            try:
-                yv = float(lv.min_score)
-            except Exception:
-                continue
-            if yv <= 0:
-                continue
-            ax.axhline(yv, color=(lv.color or "#94a3b8"), linestyle="--", linewidth=0.9, alpha=0.7)
-        # 每个数据点标注数值
-        for i, v in enumerate(ys):
-            ax.annotate(
-                f"{v:.1f}",
-                (i, v),
-                textcoords="offset points",
-                xytext=(0, 8),
-                ha="center",
-                fontsize=8.5,
-                color="#333333",
-            )
+        ax.spines["bottom"].set_color("#E5E5E5")
         last_x, last_y = len(ys) - 1, ys[-1]
         ax.plot([last_x], [last_y], "o", color=brand_hex, markersize=9,
                 markerfacecolor="white", markeredgecolor=brand_hex, markeredgewidth=2.2)
+        ax.annotate(
+            f"{last_y:.1f}",
+            (last_x, last_y),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            fontsize=9,
+            color="#333333",
+        )
         buf = io.BytesIO()
         fig.savefig(buf, format="png", bbox_inches="tight")
         plt.close(fig)

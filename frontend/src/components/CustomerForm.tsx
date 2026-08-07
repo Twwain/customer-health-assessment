@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CustomerResponse, FactorConfigItem, FactorConfigResponse } from "../types";
+import { groupFactors } from "../lib/factorGroups";
 import { BASIC_FIELDS } from "../lib/customerFields";
 
 interface CustomerFormProps {
@@ -36,6 +37,12 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(enabledDims.map((d) => [d.key, true]))
   );
+  // 二级维度组：默认展开（一级维度默认收起，展开后直接看到因子分组）
+  const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(
+      enabledDims.flatMap((d) => groupFactors(d.factors).map((g) => [`${d.key}::${g.name}`, false])),
+    ),
+  );
   const allCollapsed = enabledDims.every((d) => collapsed[d.key]);
   const toggleAll = () => {
     const next = !allCollapsed;
@@ -44,7 +51,14 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
   const filledCount = (dim: (typeof enabledDims)[number]) =>
     dim.factors.filter((f) => {
       const v = merged[f.field];
-      return v !== undefined && v !== null && v !== "" && v !== false;
+      if (v === undefined || v === null || v === "" || v === false) return false;
+      // select：只有合法选项才算已填（0 / "0" / 历史遗留数字都会渲染为“未选择”）
+      if (f.input.type === "select") {
+        return typeof v === "string" && f.input.options.includes(v);
+      }
+      // slider：0 表示未选择（后端清空时存 0）
+      if (f.input.type === "slider") return v !== 0 && v !== "0";
+      return true;
     }).length;
 
   const set = (field: string, v: unknown) => onChange({ ...value, [field]: v });
@@ -140,15 +154,36 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
                 </button>
                 {isOpen && (
                   <div className="space-y-2.5">
-                    {dim.factors.map((f) => (
-                      <FactorField
-                        key={f.field}
-                        factor={f}
-                        value={merged[f.field]}
-                        readOnly={readOnly}
-                        onChange={(v) => set(f.field, v)}
-                      />
-                    ))}
+                    {groupFactors(dim.factors).map((g) => {
+                      const subKey = `${dim.key}::${g.name}`;
+                      const subOpen = !subCollapsed[subKey];
+                      return (
+                        <div key={subKey}>
+                          <button
+                            type="button"
+                            onClick={() => setSubCollapsed((s) => ({ ...s, [subKey]: !s[subKey] }))}
+                            className="mb-2 flex w-full items-center gap-2 text-left"
+                          >
+                            <span className={`text-[11px] text-muted transition-transform ${subOpen ? "rotate-90" : ""}`}>▶</span>
+                            <span className="text-[13px] font-semibold text-ink-2">{g.name}</span>
+                            <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[12px] text-muted">{g.factors.length} 项</span>
+                          </button>
+                          {subOpen && (
+                            <div className="space-y-2.5">
+                              {g.factors.map((f) => (
+                                <FactorField
+                                  key={f.field}
+                                  factor={f}
+                                  value={merged[f.field]}
+                                  readOnly={readOnly}
+                                  onChange={(v) => set(f.field, v)}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -291,8 +326,9 @@ function FactorField({
       </div>
     );
   } else if (t === "select") {
-    // 0 视为未选择（customer_satisfaction 清空时后端存 0）
-    const val = String(value ?? "") === "0" ? "" : String(value ?? "");
+    // 非合法选项（含 0 / "0" / 历史遗留数字）统一显示为“未选择”
+    const raw = String(value ?? "");
+    const val = factor.input.options.includes(raw) ? raw : "";
     control = (
       <select
         className={inputCls}

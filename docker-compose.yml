@@ -1,13 +1,20 @@
 services:
   app:
+    # 显式指定镜像名：服务器部署直接用传输过去的镜像，不再触发构建
+    image: customer-health-assessment-app:latest
     build:
       context: .
       args:
         INSTALL_PROD_DEPS: ${INSTALL_PROD_DEPS:-1}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     ports:
       - "80:8000"
     volumes:
       - ./data:/app/data
+      # 密钥解密文件（可选）：服务器上放 /root/.ch_secret（600），本地默认 ./.ch_secret
+      # 注意：宿主文件不存在时 Docker 会创建目录而非文件，导致解密失败；
+      # 部署前先 `touch .ch_secret` 或 `python backend/scripts/encrypt_env.py` 生成密钥。
+      - ${CH_SECRET_FILE:-./.ch_secret}:/run/secrets/ch_secret:ro
     env_file:
       - .env
     restart: unless-stopped

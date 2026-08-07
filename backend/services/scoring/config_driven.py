@@ -11,10 +11,10 @@ import datetime
 
 from database import utcnow
 from models import Customer
-from schemas import AlertItem, AssessmentResponse, DimensionScore
+from schemas import AlertItem, AssessmentResponse, DimensionScore, FactorScoreItem
 
 from .base import ScoringStrategy
-from .config_loader import ScoringConfig, load_scoring_config
+from .config_loader import ScoringConfig, load_scoring_config, sub_dimension_of
 from .rules import (
     DimensionResult,
     evaluate_condition,
@@ -49,6 +49,10 @@ class ConfigDrivenStrategy(ScoringStrategy):
         total = sum(r.score for r in results)
         level, color = self._level(total, config)
         alerts, suggestions = self._analyze(c, config, today)
+        sub_map = {}
+        for dim in config.enabled_dimensions:
+            for f in dim.factors:
+                sub_map[f.field] = sub_dimension_of(f.description)
 
         return AssessmentResponse(
             customer_id=c.id,
@@ -57,7 +61,7 @@ class ConfigDrivenStrategy(ScoringStrategy):
             max_score=config.total_max_score,
             level=level,
             level_color=color,
-            dimensions=[self._to_schema(r) for r in results],
+            dimensions=[self._to_schema(r, sub_map) for r in results],
             risk_alerts=[a.message for a in alerts],
             alerts=alerts,
             suggestions=suggestions,
@@ -99,14 +103,35 @@ class ConfigDrivenStrategy(ScoringStrategy):
 
     # ── 工具 ──────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _to_schema(result: DimensionResult) -> DimensionScore:
+    def _to_schema(
+        self,
+        result: DimensionResult,
+        sub_map: dict[str, str] | None = None,
+    ) -> DimensionScore:
+        if sub_map is None:
+            # 兜底：按当前实例的配置路径解析，避免依赖全局默认配置
+            sub_map = {
+                f.field: sub_dimension_of(f.description)
+                for dim in self.config.enabled_dimensions
+                for f in dim.factors
+            }
+        factors = [
+            FactorScoreItem(
+                field=fs.field,
+                label=fs.label,
+                sub_dimension=sub_map.get(fs.field, ""),
+                detail="\n".join(fs.details) if fs.details else "",
+                score=fs.score,
+            )
+            for fs in result.factor_scores
+        ]
         return DimensionScore(
             key=result.key,
             name=result.name,
             score=result.score,
             max_score=result.max_score,
             details=result.details,
+            factors=factors,
         )
 
     def _level(self, total: float, config: ScoringConfig | None = None) -> tuple[str, str]:

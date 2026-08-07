@@ -8,6 +8,7 @@ interface HealthCardProps {
   assessment: AssessmentResponse;
   trend?: AssessmentTrendResponse | null;
   compact?: boolean;
+  showTrendButton?: boolean;
   onAlertAI?: () => void;
   onEditFactors?: () => void;
 }
@@ -16,7 +17,14 @@ function dimColor(pct: number): string {
   return pct >= 70 ? "#1AAE39" : pct >= 40 ? "#DD5B00" : "#E03131";
 }
 
-export default function HealthCard({ assessment, trend, compact, onAlertAI, onEditFactors }: HealthCardProps) {
+export default function HealthCard({
+  assessment,
+  trend,
+  compact,
+  showTrendButton = true,
+  onAlertAI,
+  onEditFactors,
+}: HealthCardProps) {
   const [trendOpen, setTrendOpen] = useState(false);
   const color = assessment.level_color || levelColor(assessment.level);
   const t = trend ? trendMeta(trend.latest_score, trend.previous_score) : null;
@@ -77,13 +85,15 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <button
-          className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
-          onClick={() => setTrendOpen((v) => !v)}
-          disabled={!trend}
-        >
-          {trendOpen ? "收起" : "查看"}历史趋势
-        </button>
+        {showTrendButton && (
+          <button
+            className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
+            onClick={() => setTrendOpen((v) => !v)}
+            disabled={!trend}
+          >
+            {trendOpen ? "收起" : "查看"}历史趋势
+          </button>
+        )}
         {onAlertAI && (
           <button
             className="rounded-lg bg-accent px-2.5 py-1.5 text-[12.5px] font-medium text-white transition hover:bg-accent-hover"
@@ -102,7 +112,7 @@ export default function HealthCard({ assessment, trend, compact, onAlertAI, onEd
         )}
       </div>
 
-      {trendOpen && trend && (
+      {showTrendButton && trendOpen && trend && (
         <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
           <div className="mb-1 text-[13px] font-semibold text-ink">📈 客情评分趋势</div>
           <div className="overflow-x-auto">

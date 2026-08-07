@@ -8,5 +8,6 @@ __pycache__
 data/
 backend/static/
 .env
+.ch_secret
 .DS_Store
 Thumbs.db

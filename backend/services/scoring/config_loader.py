@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass, field as dc_field
 from typing import Any
@@ -22,6 +23,39 @@ except ImportError as exc:  # pragma: no cover
 
 
 DEFAULT_CONFIG_FILENAME = "scoring_config.yaml"
+
+# 因子描述中的“二级维度”标注（例：“（二级维度：决策链覆盖度）”“（-1~3，二级维度：决策链覆盖度）”）
+SUB_DIM_PATTERN = re.compile(r"二级维度[:：]\s*([^，,。；;）)\]]+)")
+# 括号内要去掉的标注子串（含前置分隔符）
+_SUB_DIM_ANNOTATION = re.compile(r"，?\s*二级维度[:：][^，,。；;]*")
+
+
+def sub_dimension_of(description: str) -> str:
+    """从因子描述中提取“二级维度：xxx”标注值；无标注返回空串。"""
+    if not description:
+        return ""
+    m = SUB_DIM_PATTERN.search(description)
+    return m.group(1).strip() if m else ""
+
+
+def strip_sub_dimension_annotation(description: str) -> str:
+    """移除描述中的“（二级维度：xxx）”标注，保留括号内其它内容（如“-1~3”）。
+
+    同时兜底清理未加括号的“，二级维度：xxx”标注，避免描述残留。
+    """
+    if not description:
+        return ""
+
+    def _clean_paren(m: re.Match) -> str:
+        if "二级维度" not in m.group(0):
+            return m.group(0)
+        inner = _SUB_DIM_ANNOTATION.sub("", m.group(0)[1:-1]).strip("，,、 \t")
+        return f"（{inner}）" if inner else ""
+
+    text = re.sub(r"[（(][^（()）]*[）)]", _clean_paren, description)
+    text = _SUB_DIM_ANNOTATION.sub("", text)
+    return text.strip("，,、 \t")
+
 
 VALID_RULE_TYPES = {"threshold", "mapping", "days_since", "linear", "penalty", "constant"}
 VALID_CONDITION_OPS = {

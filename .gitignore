@@ -19,6 +19,8 @@ data/
 
 # Environment
 .env
+.env.prod
+.ch_secret
 
 # IDE
 .idea/

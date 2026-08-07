@@ -9,11 +9,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from reportlab.platypus import Paragraph, Table
+from reportlab.platypus import KeepTogether, Paragraph, Table
 
 import config
 from database import Base, get_db
 from models import AssessmentHistory, Customer
+from schemas import AlertItem, AssessmentResponse, DimensionScore, FactorScoreItem
 from services.ai import llm_adapter
 from services.ai.llm_adapter import LLMUnavailableError
 from services.pdf_report import PdfReportGenerator
@@ -251,6 +252,8 @@ def _collect_flow_text(flows) -> str:
         elif isinstance(flow, Table):
             for row in flow._cellvalues:
                 texts.append(_collect_flow_text(row))
+        elif isinstance(flow, KeepTogether):
+            texts.append(_collect_flow_text(flow._content))
     return "".join(texts)
 
 
@@ -288,6 +291,63 @@ def test_pdf_cover_shows_customer_industry_and_date(db, customer):
     assert customer.industry in text
     assert "评估日期" in text
     assert "评估模型" not in text
+
+
+def test_pdf_dimension_cards_render_grouped_factors(db, customer):
+    """维度因子带 sub_dimension 时走按二级维度分组渲染分支（非旧快照兜底）。"""
+    assessment = AssessmentResponse(
+        customer_id=customer.id,
+        customer_name=customer.customer_name,
+        total_score=60.0,
+        max_score=100,
+        level="亚健康",
+        level_color="#DD5B00",
+        dimensions=[
+            DimensionScore(
+                key="kcr",
+                name="客户关系网络",
+                score=12.0,
+                max_score=20.0,
+                details=["已识别占比：92%"],
+                factors=[
+                    FactorScoreItem(
+                        field="kcr_01",
+                        label="已识别决策链人数占比",
+                        sub_dimension="决策链覆盖度",
+                        detail="已识别占比：92%",
+                        score=2.1,
+                    ),
+                    FactorScoreItem(
+                        field="kcr_02",
+                        label="关键人客情等级",
+                        sub_dimension="决策链覆盖度",
+                        detail="关键人等级：高",
+                        score=2.1,
+                    ),
+                    FactorScoreItem(
+                        field="kcr_05",
+                        label="高层关系",
+                        sub_dimension="信息互通",
+                        detail="高层关系：已建立",
+                        score=1.5,
+                    ),
+                ],
+            )
+        ],
+        risk_alerts=[],
+        alerts=[],
+        suggestions=[],
+        config_version="2026.08",
+        assessed_at=datetime.datetime.now(datetime.timezone.utc),
+    )
+    gen = PdfReportGenerator()
+    cards = gen._dimension_cards(assessment)
+    text = _collect_flow_text(cards)
+    assert "决策链覆盖度" in text and "信息互通" in text
+    assert "已识别决策链人数占比" in text and "关键人客情等级" in text
+
+    pdf = gen.generate(assessment)
+    assert _pdf_starts_ok(pdf)
 
 
 def test_pdf_with_trend_chart(db, customer):
