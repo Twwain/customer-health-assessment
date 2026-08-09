@@ -18,6 +18,7 @@ import re
 from typing import Any, Sequence
 
 from config import CHUNK_OVERLAP, CHUNK_SIZE, KNOWLEDGE_DATA_DIR
+from sqlalchemy.orm import joinedload
 from models import (
     KNOWLEDGE_CATEGORIES,
     KNOWLEDGE_STATUSES,
@@ -136,6 +137,23 @@ def migrate_seed_knowledge_status(db: Any, store: VectorStore | None = None) -> 
     return len(docs)
 
 
+def migrate_add_industry_column(db: Any, store: VectorStore | None = None) -> int:
+    """给存量 knowledge_items 表补 industry 列（SQLite ALTER TABLE）。
+
+    SQLite 没有 ``ADD COLUMN IF NOT EXISTS``，先查 PRAGMA 判断列是否存在。
+    存量条目行业未知，保持空串（通用）；用户编辑行业后由 update_item_metadata 自动同步向量库。
+    返回 1 表示本次执行了迁移，0 表示列已存在。
+    """
+    from sqlalchemy import text
+
+    cols = {row[1] for row in db.execute(text("PRAGMA table_info(knowledge_items)"))}
+    if "industry" in cols:
+        return 0
+    db.execute(text("ALTER TABLE knowledge_items ADD COLUMN industry VARCHAR(50) DEFAULT ''"))
+    db.commit()
+    return 1
+
+
 def _safe_filename(name: str, ext: str) -> str:
     base = re.sub(r"[^\w一-鿿.-]", "_", name).strip("_") or "doc"
     return f"{base}{ext}"
@@ -207,6 +225,7 @@ class KnowledgeBaseService:
                 "document_id": doc.id,
                 "chunk_index": i,
                 "category": doc.category,
+                "industry": item.industry if item else "",
                 "title": item.title if item else doc.title,
                 "status": doc.status,
                 "item_id": item.id if item else 0,
@@ -247,6 +266,7 @@ class KnowledgeBaseService:
         category: str,
         filename: str,
         raw: bytes,
+        industry: str = "",
         created_by: str = "system",
         status: str = "proposed",
     ) -> KnowledgeDocument:
@@ -278,6 +298,7 @@ class KnowledgeBaseService:
                 document_id=doc.id,
                 title=doc.title,
                 category=category,
+                industry=(industry or "").strip(),
                 storage="vector",
                 status=status,
                 created_by=created_by,
@@ -355,7 +376,7 @@ class KnowledgeBaseService:
         q: str | None = None,
         limit: int = 50,
     ) -> list[KnowledgeItem]:
-        query = self._db.query(KnowledgeItem)
+        query = self._db.query(KnowledgeItem).options(joinedload(KnowledgeItem.document))
         if category:
             query = query.filter(KnowledgeItem.category == category)
         if status:
@@ -375,7 +396,12 @@ class KnowledgeBaseService:
         return items[:limit]
 
     def get_item(self, item_id: int) -> KnowledgeItem | None:
-        return self._db.query(KnowledgeItem).filter(KnowledgeItem.id == item_id).first()
+        return (
+            self._db.query(KnowledgeItem)
+            .options(joinedload(KnowledgeItem.document))
+            .filter(KnowledgeItem.id == item_id)
+            .first()
+        )
 
     def search(
         self,
@@ -404,6 +430,7 @@ class KnowledgeBaseService:
         *,
         title: str | None = None,
         category: str | None = None,
+        industry: str | None = None,
         tags: Sequence[str] | None = None,
     ) -> KnowledgeItem | None:
         item = self.get_item(item_id)
@@ -415,6 +442,8 @@ class KnowledgeBaseService:
             item.title = title
         if category is not None:
             item.category = category
+        if industry is not None:
+            item.industry = (industry or "").strip()
         if tags is not None:
             item.tags = list(tags)
         # 同步文档分类（检索过滤用到 document 上的 category）
@@ -439,6 +468,7 @@ class KnowledgeBaseService:
                 {
                     **(c.chunk_metadata or {}),
                     "category": item.category,
+                    "industry": item.industry,
                     "status": item.status,
                     "title": item.title,
                 }
@@ -450,6 +480,7 @@ class KnowledgeBaseService:
                 c.chunk_metadata = {
                     **(c.chunk_metadata or {}),
                     "category": item.category,
+                    "industry": item.industry,
                     "status": item.status,
                     "title": item.title,
                 }
@@ -462,39 +493,80 @@ class KnowledgeBaseService:
         return item
 
     # ── 审核：proposed → canonical──────────
+    def set_items_status(self, item_ids: Sequence[int], status: str) -> tuple[int, list[str]]:
+        """批量设置条目状态（上线 / 下线），返回 ``(更新条数, 警告列表)``。
+
+        单事务更新 items / documents / chunks，再批量同步向量库 metadata；
+        不存在的 id 直接报错，避免静默部分成功。
+        """
+        if status not in KNOWLEDGE_STATUSES:
+            raise ValueError(f"无效的知识状态：{status!r}，可选值：{' / '.join(KNOWLEDGE_STATUSES)}")
+        ids = list(dict.fromkeys(int(i) for i in item_ids))
+        items = (
+            self._db.query(KnowledgeItem)
+            .options(joinedload(KnowledgeItem.document))
+            .filter(KnowledgeItem.id.in_(ids))
+            .all()
+        )
+        found_ids = {it.id for it in items}
+        missing = [i for i in ids if i not in found_ids]
+        if missing:
+            raise ValueError(f"知识条目不存在：{missing}")
+
+        doc_ids = {it.document_id for it in items}
+        docs: dict[int, KnowledgeDocument] = {}
+        if doc_ids:
+            docs = {
+                d.id: d
+                for d in self._db.query(KnowledgeDocument)
+                .filter(KnowledgeDocument.id.in_(doc_ids))
+                .all()
+            }
+        for it in items:
+            it.status = status
+            doc = docs.get(it.document_id)
+            if doc is not None:
+                doc.status = status
+
+        # 切片表 metadata 副本同步（检索过滤读向量库 metadata，这里保持一致）
+        chunk_rows: list[KnowledgeChunk] = []
+        if doc_ids:
+            chunk_rows = (
+                self._db.query(KnowledgeChunk)
+                .filter(KnowledgeChunk.document_id.in_(doc_ids))
+                .all()
+            )
+        for c in chunk_rows:
+            c.chunk_metadata = {**(c.chunk_metadata or {}), "status": status}
+        self._db.commit()
+
+        warnings: list[str] = []
+        vector_ids = [c.vector_id for c in chunk_rows if c.vector_id]
+        if vector_ids:
+            metadatas = [c.chunk_metadata for c in chunk_rows if c.vector_id]
+            try:
+                self._store.update_metadatas(vector_ids, metadatas)
+            except Exception as exc:  # 向量库不可用：DB 已更新，提示可 reindex 修复
+                msg = f"批量更新向量 metadata 失败（可 reindex 修复）：{exc}"
+                logger.warning(msg)
+                warnings.append(msg)
+        return len(items), warnings
+
     def approve_item(self, item_id: int) -> KnowledgeItem | None:
+        """审核通过：proposed → canonical。"""
         item = self.get_item(item_id)
         if item is None:
             return None
-        item.status = "canonical"
-        doc = (
-            self._db.query(KnowledgeDocument)
-            .filter(KnowledgeDocument.id == item.document_id)
-            .first()
-        )
-        if doc is not None:
-            doc.status = "canonical"
-        self._db.commit()
-        # 同步向量库 metadata 的 status
-        chunk_rows = (
-            self._db.query(KnowledgeChunk)
-            .filter(KnowledgeChunk.document_id == item.document_id)
-            .all()
-        )
-        ids = [c.vector_id for c in chunk_rows if c.vector_id]
-        if ids:
-            metadatas = [
-                {**(c.chunk_metadata or {}), "status": "canonical"} for c in chunk_rows if c.vector_id
-            ]
-            # 回写切片表 metadata 副本
-            for c in chunk_rows:
-                c.chunk_metadata = {**(c.chunk_metadata or {}), "status": "canonical"}
-            self._db.commit()
-            try:
-                self._store.update_metadatas(ids, metadatas)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("更新向量 status 失败：%s", exc)
-        return item
+        self.set_items_status([item_id], "canonical")
+        return self.get_item(item_id)
+
+    def revoke_item(self, item_id: int) -> KnowledgeItem | None:
+        """撤销审核（下线）：canonical → proposed。"""
+        item = self.get_item(item_id)
+        if item is None:
+            return None
+        self.set_items_status([item_id], "proposed")
+        return self.get_item(item_id)
 
     # ── 删除（含向量清理）───────────────────────────────────────────────────
     def delete_item(self, item_id: int) -> bool:

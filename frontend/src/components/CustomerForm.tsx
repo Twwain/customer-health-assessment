@@ -47,6 +47,12 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
   const toggleAll = () => {
     const next = !allCollapsed;
     setCollapsed(Object.fromEntries(enabledDims.map((d) => [d.key, next])));
+    // 全部展开 / 收起时二级维度组同步重置为展开，避免手动收起的分组残留
+    setSubCollapsed(
+      Object.fromEntries(
+        enabledDims.flatMap((d) => groupFactors(d.factors).map((g) => [`${d.key}::${g.name}`, false])),
+      ),
+    );
   };
   const filledCount = (dim: (typeof enabledDims)[number]) =>
     dim.factors.filter((f) => {

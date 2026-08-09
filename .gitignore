@@ -94,7 +94,6 @@ frontend/lint_out.txt
 .codebuddy/
 .codex/
 
-# Local docs (not for git)
-docs/
+# Local dev process artifacts (not for git)
+dev_process/
 AGENTS.md
-CHANGELOG.md

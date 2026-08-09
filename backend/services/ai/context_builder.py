@@ -206,7 +206,7 @@ def build_knowledge_context(
                 "title": c.item_title,
                 "category": c.category,
                 "score": round(c.score, 4),
-                "snippet": c.content[:200],
+                "snippet": (c.hit_content or c.content)[:200],
                 "chunk_id": c.chunk_index,
                 "document_id": c.document_id,
                 "item_id": c.item_id,

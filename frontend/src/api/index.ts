@@ -113,18 +113,23 @@ export const knowledge = {
   get: (id: number) => http.get<KnowledgeItemResponse>(`/knowledge/items/${id}`).then((r) => r.data),
   search: (data: { query: string; customer_id?: number; category?: string; status?: string; top_k?: number }) =>
     http.post<KnowledgeSearchResponse>("/knowledge/search", data).then((r) => r.data),
-  upload: (file: File, category: string, title?: string) => {
+  upload: (file: File, category: string, title?: string, industry?: string) => {
     const form = new FormData();
     form.append("file", file);
     form.append("category", category);
     if (title) form.append("title", title);
+    if (industry) form.append("industry", industry);
     return http.post("/knowledge/upload", form).then((r) => r.data);
   },
-  update: (id: number, data: { title?: string; category?: string; tags?: string[] }) =>
+  update: (id: number, data: { title?: string; category?: string; industry?: string; tags?: string[] }) =>
     http.put<KnowledgeItemResponse>(`/knowledge/items/${id}`, data).then((r) => r.data),
   remove: (id: number) => http.delete(`/knowledge/items/${id}`).then((r) => r.data),
   approve: (id: number) =>
     http.post<KnowledgeItemResponse>(`/knowledge/items/${id}/approve`).then((r) => r.data),
+  revoke: (id: number) =>
+    http.post<KnowledgeItemResponse>(`/knowledge/items/${id}/revoke`).then((r) => r.data),
+  batchStatus: (ids: number[], status: "canonical" | "proposed") =>
+    http.post("/knowledge/batch-status", { ids, status }).then((r) => r.data),
   reindex: (category?: string) =>
     http.post("/knowledge/reindex", category ? { category } : {}).then((r) => r.data),
   status: () => http.get<KnowledgeStatusResponse>("/knowledge/status").then((r) => r.data),

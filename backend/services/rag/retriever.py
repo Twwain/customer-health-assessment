@@ -28,6 +28,7 @@ class RetrievedChunk:
     content: str
     score: float
     metadata: dict
+    hit_content: str = ""
 
 
 class KnowledgeRetriever:
@@ -88,6 +89,7 @@ class KnowledgeRetriever:
                     item_title=m.get("title", "") or "",
                     category=m.get("category", "") or "",
                     content=r.content,
+                    hit_content=r.content,
                     score=r.score,
                     metadata=m,
                 )
@@ -128,6 +130,7 @@ class KnowledgeRetriever:
                 item_title=chunk.item_title,
                 category=chunk.category,
                 content=expanded,
+                hit_content=chunk.hit_content or chunk.content,
                 score=chunk.score,
                 metadata=chunk.metadata,
             )

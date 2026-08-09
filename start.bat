@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
 
-::: Kill old processes that might hold the ports
-taskkill /f /im python.exe 2>nul
-taskkill /f /im node.exe 2>nul
+::: 按端口清理残留进程：只杀监听 8000 / 5173 的 PID，避免误伤其他 python / node
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /c:":8000 " ^| findstr "LISTENING"') do taskkill /f /pid %%p 2>nul
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /c:":5173 " ^| findstr "LISTENING"') do taskkill /f /pid %%p 2>nul
 timeout /t 2 /nobreak >nul
 
 echo.
@@ -18,6 +18,7 @@ echo.
 ::: Start backend in a new window, with correct working directory
 ::: Prefer project venv python (bare "python" may resolve to an old system Python without deps)
 set "PY=python"
+set "SECRET_KEY_FILE=%~dp0.ch_secret"
 if exist "%~dp0backend\.venv\Scripts\python.exe" set "PY=%~dp0backend\.venv\Scripts\python.exe"
 start "Backend" /d "%~dp0backend" cmd /k ""%PY%" -m uvicorn main:app --port 8000"
 
@@ -25,7 +26,8 @@ start "Backend" /d "%~dp0backend" cmd /k ""%PY%" -m uvicorn main:app --port 8000
 timeout /t 3 /nobreak >nul
 
 ::: Start frontend in a new window, with correct working directory
-start "Frontend" /d "%~dp0frontend" cmd /k "npx vite --host 0.0.0.0 --port 5173"
+::: 直接用 node 运行 vite（不依赖 npm/npx，避免 PATH 与沙箱权限差异）
+start "Frontend" /d "%~dp0frontend" cmd /k "node node_modules\vite\bin\vite.js --host 0.0.0.0 --port 5173"
 
 echo.
 echo Waiting for servers to be ready...

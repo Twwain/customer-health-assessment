@@ -300,6 +300,44 @@ def test_split_strategy_payload_tolerates_broken_json():
     assert "正常回答内容" in body
 
 
+def test_split_strategy_payload_recovers_fenced_json_with_trailing_note():
+    """未闭合 json 围栏 + 尾部说明文字：解析出策略项且正文不暴露原始 JSON。"""
+    text = (
+        "**数据缺口说明**：未检索到相关知识。\n"
+        "```json\n"
+        '{"strategies": [{"priority": "recommended", "title": "策略A", "urgency": "high", '
+        '"reason": "r", "action": "a", "expected_outcome": "o"}]}\n'
+        "本页面仅显示策略摘要，完整报告请点击「生成报告」。"
+    )
+    body, items = strategy.split_strategy_payload(text)
+    assert len(items) == 1
+    assert items[0]["title"] == "策略A"
+    assert "```json" not in body
+    assert "数据缺口说明" in body
+    # 围栏后的说明文字应保留（与闭合围栏路径行为一致）
+    assert "本页面仅显示策略摘要，完整报告请点击「生成报告」" in body
+
+
+def test_split_strategy_payload_recovers_compact_fence_without_newline():
+    """紧凑写法 ```json{...}（围栏后无换行）不丢 JSON 首字符。"""
+    text = (
+        '```json{"strategies": [{"priority": "recommended", "title": "策略B", '
+        '"urgency": "medium", "reason": "r", "action": "a", "expected_outcome": "o"}]}'
+    )
+    body, items = strategy.split_strategy_payload(text)
+    assert len(items) == 1
+    assert items[0]["title"] == "策略B"
+    assert "```json" not in body
+
+
+def test_split_strategy_payload_strips_empty_unclosed_fence():
+    """截断在围栏处（围栏后无内容）：正文不残留 ```json 字样。"""
+    body, items = strategy.split_strategy_payload("正常回答\n```json")
+    assert items == []
+    assert "正常回答" in body
+    assert "```json" not in body
+
+
 def test_strategy_items_sorted_by_priority():
     text = (
         '```json\n{"strategies": ['
@@ -440,7 +478,7 @@ def test_scenario_summary_hint_appended(db, customer, fake_llm, scenario, keywor
 
     content = result["message"]["content"]
     assert f"本页面仅显示{keyword}" in content
-    assert "完整报告请点击「导出报告」" in content
+    assert "完整报告请点击「生成报告」" in content
 
 
 def test_strategy_scenario_parses_and_snapshots_items(db, customer):
@@ -593,6 +631,37 @@ def test_set_feedback(db, customer, fake_llm):
     result = chat_engine.complete_turn(db, session, content="问题")
     message = chat_engine.set_feedback(db, result["message"]["id"], "up")
     assert message.feedback == "up"
+
+
+def test_chat_session_streaming_cleared_after_complete_turn(db, customer, fake_llm):
+    """生成完成后进程内 streaming 标记应复位（异常路径由 finally 兜底）。"""
+    session = chat_engine.create_session(db, customer_id=customer.id, scenario="assessment")
+    assert chat_engine.is_session_streaming(session.id) is False
+    chat_engine.complete_turn(db, session, content="", scenario="assessment")
+    assert chat_engine.is_session_streaming(session.id) is False
+
+
+def test_streaming_registry_claim_and_release():
+    """进程内注册表：抢占互斥、生成结束后释放。"""
+    sid = 10_001
+    chat_engine._release_streaming(sid)  # 兜底清理，避免失败用例污染
+    assert chat_engine.is_session_streaming(sid) is False
+    assert chat_engine._claim_streaming(sid) is True
+    assert chat_engine.is_session_streaming(sid) is True
+    # 同一会话并发生成被拒绝
+    assert chat_engine._claim_streaming(sid) is False
+    chat_engine._release_streaming(sid)
+    assert chat_engine.is_session_streaming(sid) is False
+
+
+def test_normalize_ref_title():
+    """引用标题归一化：剥掉书刊引号/括号包装与尾部标点。"""
+    from services.ai.chat_engine import _normalize_ref_title
+
+    assert _normalize_ref_title("《客户健康评估方法论》") == "客户健康评估方法论"
+    assert _normalize_ref_title("「风险预警」。") == "风险预警"
+    assert _normalize_ref_title(" 制造业白皮书 ") == "制造业白皮书"
+    assert _normalize_ref_title("") == ""
 
 
 # ══════════════════════════ 接口层═══════════════════════════════

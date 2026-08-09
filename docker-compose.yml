@@ -16,5 +16,5 @@ services:
       # 部署前先 `touch .ch_secret` 或 `python backend/scripts/encrypt_env.py` 生成密钥。
       - ${CH_SECRET_FILE:-./.ch_secret}:/run/secrets/ch_secret:ro
     env_file:
-      - .env
+      - ./backend/.env
     restart: unless-stopped

@@ -221,7 +221,7 @@ export default function CustomerList() {
             <h1 className="text-[23px] font-semibold tracking-tight text-ink">客户库</h1>
           </div>
           <div className="mt-0.5 text-[14px] text-muted">
-            编辑客情因子 · 保存后自动重算客情评分并写入评估历史，可一键发起 AI 评估
+            客情管理入口 · 支持编辑客户 / 客情评分 / 历史趋势
           </div>
         </div>
         <button
@@ -448,9 +448,14 @@ export default function CustomerList() {
               </>
             ) : (
               <>
-                <span className="mr-auto whitespace-nowrap text-[13px] text-muted">保存后自动重算评分并写入历史</span>
-                <button className="rounded-lg border border-border px-3 py-2 text-[14px] text-ink-2" onClick={() => setFactorDrawer(null)}>
-                  取消
+                <span className="mr-auto" />
+                <button
+                  type="button"
+                  className="rounded-lg border border-info/30 bg-info-soft px-3 py-2 text-[14px] font-medium text-info transition hover:bg-info-soft/70"
+                  onClick={() => evalCustomer(factorDrawer.customer)}
+                  disabled={saving}
+                >
+                  ✨ AI 评估
                 </button>
                 <button className="rounded-lg bg-accent px-3 py-2 text-[14px] font-medium text-white disabled:opacity-50" onClick={saveFactors} disabled={saving}>
                   {saving ? "保存中…" : "保存并重新评分"}

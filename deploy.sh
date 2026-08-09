@@ -25,7 +25,7 @@ trap 'rm -f "$IMAGE_FILE"' EXIT
 
 server_has_config() {
   ssh $SSH_OPTS "$SERVER" \
-    "test -f $PROJECT_DIR/docker-compose.yml && test -f $PROJECT_DIR/.env && echo ok" 2>/dev/null \
+    "test -f $PROJECT_DIR/docker-compose.yml && test -f $PROJECT_DIR/backend/.env && echo ok" 2>/dev/null \
     | grep -q ok
 }
 
@@ -33,7 +33,7 @@ echo "=== 0/3 检查部署配置 ==="
 if [ "$SYNC_CONFIG" = "1" ] || { [ "$SYNC_CONFIG" = "auto" ] && ! server_has_config; }; then
   [ -f "$ENV_PROD" ] || {
     echo "错误：未找到 $ENV_PROD（加密部署配置）。请先执行：" >&2
-    echo "  cp .env .env.prod && python backend/scripts/encrypt_env.py --env .env.prod --key-file ./.ch_secret" >&2
+    echo "  cp backend/.env .env.prod && python backend/scripts/encrypt_env.py --env .env.prod --key-file ./.ch_secret" >&2
     exit 1
   }
   grep -qE '^(export[[:space:]]+)?(LLM_API_KEY|LLM_EMBEDDING_API_KEY|EMBEDDING_API_KEY)=enc:' "$ENV_PROD" || {
@@ -46,11 +46,11 @@ if [ "$SYNC_CONFIG" = "1" ] || { [ "$SYNC_CONFIG" = "auto" ] && ! server_has_con
     exit 1
   }
   echo "同步部署配置到服务器 $PROJECT_DIR ..."
-  ssh $SSH_OPTS "$SERVER" "mkdir -p $PROJECT_DIR"
+  ssh $SSH_OPTS "$SERVER" "mkdir -p $PROJECT_DIR/backend"
   scp $SSH_OPTS docker-compose.yml "$SERVER:$PROJECT_DIR/docker-compose.yml"
-  scp $SSH_OPTS "$ENV_PROD" "$SERVER:$PROJECT_DIR/.env"
+  scp $SSH_OPTS "$ENV_PROD" "$SERVER:$PROJECT_DIR/backend/.env"
   scp $SSH_OPTS "$SECRET_FILE" "$SERVER:$PROJECT_DIR/.ch_secret"
-  ssh $SSH_OPTS "$SERVER" "chmod 600 $PROJECT_DIR/.env $PROJECT_DIR/.ch_secret"
+  ssh $SSH_OPTS "$SERVER" "chmod 600 $PROJECT_DIR/backend/.env $PROJECT_DIR/.ch_secret"
   echo "部署配置同步完成"
 else
   echo "跳过配置同步（SYNC_CONFIG=$SYNC_CONFIG，服务器已有配置）"

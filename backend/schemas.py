@@ -266,6 +266,7 @@ class KnowledgeReference(BaseModel):
     score: float = 0
     snippet: str = ""
     chunk_id: int | None = None
+    used: bool = False
 
 
 class ChatMessageItem(BaseModel):
@@ -296,6 +297,7 @@ class ChatSessionItem(BaseModel):
     customer_id: int | None = None
     customer_name: str = ""
     scenario: str = "free_qa"
+    streaming: bool = False
     message_count: int = 0
     last_message: str = ""
     created_at: datetime.datetime
@@ -371,6 +373,7 @@ class KnowledgeItemResponse(BaseModel):
     document_id: int
     title: str
     category: str
+    industry: str = ""
     tags: list[str] = Field(default_factory=list)
     summary: str = ""
     storage: str = "vector"
@@ -430,11 +433,19 @@ class KnowledgeUpdateRequest(BaseModel):
 
     title: str | None = None
     category: str | None = None
+    industry: str | None = None
     tags: list[str] | None = None
 
 
 class KnowledgeReindexRequest(BaseModel):
     category: str | None = None
+
+
+class KnowledgeBatchStatusRequest(BaseModel):
+    """批量上下线：ids 为目标条目，status 为目标状态。"""
+
+    ids: list[int] = Field(..., min_length=1, description="目标条目 id 列表")
+    status: str = Field(..., description="canonical（上线） / proposed（下线）")
 
 
 class KnowledgeReindexResponse(BaseModel):

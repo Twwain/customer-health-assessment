@@ -1,4 +1,6 @@
 import os
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,21 +12,39 @@ Base.metadata.create_all(bind=engine)
 
 
 def _migrate_legacy_data() -> None:
-    """启动时执行幂等数据迁移（历史知识分类名校正等）。失败不阻断启动。"""
+    """启动时执行幂等数据迁移（历史知识分类名校正等）。失败不阻断启动。
+
+    顺序约定：先补 schema 列（迁移后的 ORM 查询会引用新列），再做数据迁移；
+    每个迁移独立 try/except，单个失败不影响后续步骤，避免"缺列库带病启动"。
+    """
     import logging
 
+    logger = logging.getLogger(__name__)
     db = SessionLocal()
+    steps: list[tuple[str, Any]] = []
     try:
         from services.rag.knowledge_base import (
+            migrate_add_industry_column,
             migrate_legacy_categories,
             migrate_seed_knowledge_status,
         )
         from services.rag.vector_store import get_vector_store
 
-        migrate_legacy_categories(db, store=get_vector_store())
-        migrate_seed_knowledge_status(db, store=get_vector_store())
-    except Exception as exc:  # pragma: no cover - 迁移失败不影响启动
-        logging.getLogger(__name__).warning("数据迁移执行失败：%s", exc)
+        store = get_vector_store()
+        steps = [
+            ("补 knowledge_items.industry 列", lambda: migrate_add_industry_column(db, store=store)),
+            ("校正历史知识分类名", lambda: migrate_legacy_categories(db, store=store)),
+            ("seed 知识状态提升为 canonical", lambda: migrate_seed_knowledge_status(db, store=store)),
+        ]
+    except Exception as exc:  # pragma: no cover - 依赖导入失败不影响启动
+        logger.warning("数据迁移准备失败：%s", exc)
+    try:
+        for name, step in steps:
+            try:
+                step()
+            except Exception as exc:  # 单个迁移失败不影响启动，但数据库可能不完整
+                logger.warning("数据迁移「%s」执行失败（请检查数据库状态）：%s", name, exc)
+                db.rollback()
     finally:
         db.close()
 

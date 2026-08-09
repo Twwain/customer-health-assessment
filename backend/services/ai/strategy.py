@@ -123,6 +123,8 @@ def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
         try:
             payload = json.loads(snippet)
         except json.JSONDecodeError:
+            # 解析失败的围栏块同样从展示正文剥离，避免把原始 JSON 暴露给用户
+            body = body.replace(match.group(0), "")
             continue
 
         raw_items = _extract_items(payload)
@@ -137,12 +139,15 @@ def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
 
     # 容错：输出被 max_tokens 截断导致围栏未闭合时，尝试解析从最后一个 ```json 到末尾的片段
     if not items:
-        idx = text.rfind("```json")
-        if idx >= 0:
-            tail = text[idx + 7 :].strip()
+        fence_m = re.search(r"(?:^|\n)```json", text)
+        if fence_m is not None:
+            # match.end() 指向围栏结束（含前导换行），紧凑写法 ```json{...} 也不丢字符
+            tail = text[fence_m.end() :].strip()
+            head = text[: fence_m.start()].rstrip()
             if tail:
                 try:
-                    payload = json.loads(tail)
+                    # 容忍 JSON 块后附带说明文字（如"本页面仅显示策略摘要…"）
+                    payload, end = json.JSONDecoder().raw_decode(tail)
                 except json.JSONDecodeError:
                     payload = None
                 if payload is not None:
@@ -151,8 +156,17 @@ def split_strategy_payload(text: str) -> tuple[str, list[dict]]:
                         item = normalize_item(raw)
                         if item:
                             items.append(item)
-                    # 正文同样剔除这段未闭合的代码块尾巴，避免展示残缺 JSON
-                    body = text[:idx].rstrip()
+                    # 剔除未闭合代码块与其中的 JSON，但保留其后附带的说明文字
+                    note = tail[end:].strip()
+                    body = head
+                    if note:
+                        body = f"{head}\n\n{note}" if head else note
+                else:
+                    # 解析失败：整个未闭合围栏尾巴从展示正文剔除，避免暴露残缺 JSON
+                    body = head
+            else:
+                # 围栏后没有任何内容：也把空围栏从展示正文剔除
+                body = head
 
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
     items.sort(key=_sort_key)

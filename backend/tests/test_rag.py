@@ -723,3 +723,113 @@ def test_retrieve_window_expands_neighbors(db, memory_store, fake_embed):
         status=None,
     )
     assert len(plain[0].content) <= len(single.content)
+
+
+def test_item_list_and_detail_show_chunk_count(app_client):
+    """C1：列表 / 详情切片数委托文档 chunk_count，而非恒 0。"""
+    files = {"file": ("m.md", io.BytesIO(METHODOLOGY_MD.encode("utf-8")), "text/markdown")}
+    up = app_client.post("/api/knowledge/upload", files=files, data={"category": "内部规范"})
+    assert up.status_code == 200, up.text
+    item_id = up.json()["item_id"]
+
+    lst = app_client.get("/api/knowledge/items").json()
+    row = next(x for x in lst["items"] if x["id"] == item_id)
+    assert row["chunk_count"] > 0
+
+    detail = app_client.get(f"/api/knowledge/items/{item_id}").json()
+    assert detail["chunk_count"] == row["chunk_count"]
+
+
+def test_upload_industry_metadata_and_edit_syncs_vector(app_client):
+    """C3：上传 / 编辑条目行业，切片 metadata 同步（reranker 同行业加权的前提）。"""
+    files = {"file": ("m.md", io.BytesIO(METHODOLOGY_MD.encode("utf-8")), "text/markdown")}
+    up = app_client.post(
+        "/api/knowledge/upload", files=files, data={"category": "内部规范", "industry": "金融"}
+    )
+    item_id = up.json()["item_id"]
+    detail = app_client.get(f"/api/knowledge/items/{item_id}").json()
+    assert detail["industry"] == "金融"
+
+    # 编辑行业后向量库 metadata 同步
+    upd = app_client.put(f"/api/knowledge/items/{item_id}", json={"industry": "银行"})
+    assert upd.status_code == 200
+    assert upd.json()["industry"] == "银行"
+
+    import services.rag.vector_store as vs
+
+    store = vs.get_vector_store()
+    raw = store.query(_bag_of_chars_embed(["x"])[0], top_k=20)
+    hit = [r for r in raw if r["metadata"].get("item_id") == item_id]
+    assert hit
+    assert all(r["metadata"].get("industry") == "银行" for r in hit)
+
+
+def test_revoke_and_batch_status_endpoints(app_client):
+    """C4：撤销审核 + 批量上下线接口。"""
+    files = {"file": ("m.md", io.BytesIO(METHODOLOGY_MD.encode("utf-8")), "text/markdown")}
+    up1 = app_client.post("/api/knowledge/upload", files=files, data={"category": "内部规范"})
+    up2 = app_client.post("/api/knowledge/upload", files=files, data={"category": "外部指标"})
+    id1, id2 = up1.json()["item_id"], up2.json()["item_id"]
+
+    # 批量上线
+    r = app_client.post("/api/knowledge/batch-status", json={"ids": [id1, id2], "status": "canonical"})
+    assert r.status_code == 200 and r.json()["updated"] == 2
+    assert isinstance(r.json().get("warnings"), list)
+    assert app_client.get(f"/api/knowledge/items/{id1}").json()["status"] == "canonical"
+    assert app_client.get(f"/api/knowledge/items/{id2}").json()["status"] == "canonical"
+
+    # 撤销审核：canonical → proposed
+    rv = app_client.post(f"/api/knowledge/items/{id1}/revoke")
+    assert rv.status_code == 200 and rv.json()["status"] == "proposed"
+
+    # 批量下线
+    r2 = app_client.post("/api/knowledge/batch-status", json={"ids": [id1, id2], "status": "proposed"})
+    assert r2.status_code == 200 and r2.json()["updated"] == 2
+
+    # 非法状态 400
+    bad = app_client.post("/api/knowledge/batch-status", json={"ids": [id1], "status": "bogus"})
+    assert bad.status_code == 400
+
+    # 存在不存在的 id：整体 400，避免静默部分成功
+    missing = app_client.post(
+        "/api/knowledge/batch-status", json={"ids": [id1, 999_999], "status": "canonical"}
+    )
+    assert missing.status_code == 400
+
+
+def test_migrate_add_industry_column_idempotent(db):
+    """C3：启动迁移对已有 industry 列的表幂等跳过。"""
+    from services.rag.knowledge_base import migrate_add_industry_column
+
+    assert migrate_add_industry_column(db) == 0  # 新表 create_all 已含列
+
+
+def test_migrate_add_industry_column_adds_to_legacy_table(tmp_path):
+    """旧库缺列时 ALTER 成功，且再次执行幂等（覆盖真实升级路径）。"""
+    from sqlalchemy import create_engine, text as sa_text
+    from sqlalchemy.orm import sessionmaker
+
+    from services.rag.knowledge_base import migrate_add_industry_column
+
+    db_path = tmp_path / "legacy.db"
+    eng = create_engine(f"sqlite:///{db_path}")
+    with eng.begin() as conn:
+        conn.execute(
+            sa_text(
+                "CREATE TABLE knowledge_items ("
+                "id INTEGER PRIMARY KEY, document_id INTEGER, title TEXT, category TEXT, "
+                "tags TEXT, summary TEXT, storage TEXT, status TEXT, "
+                "adoption_count INTEGER DEFAULT 0, hit_count INTEGER DEFAULT 0, "
+                "created_by TEXT, created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+    Session = sessionmaker(bind=eng)
+    db = Session()
+    try:
+        assert migrate_add_industry_column(db) == 1
+        cols = {r[1] for r in db.execute(sa_text("PRAGMA table_info(knowledge_items)"))}
+        assert "industry" in cols
+        assert migrate_add_industry_column(db) == 0
+    finally:
+        db.close()
+        eng.dispose()

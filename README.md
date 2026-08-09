@@ -69,8 +69,8 @@ bash start.sh        # Linux / Git Bash
 
 - 首次运行自动创建 SQLite 数据库并 seed 演示数据（13 条示例客户）。
 - 后端依赖安装：`pip install -r backend/requirements.txt`。
-- 前端依赖使用 **pnpm** 管理（仓库已含 `frontend/pnpm-lock.yaml`；本机 npm 全局安装损坏时，可用 `frontend/node_modules` 已装依赖直接运行）。需先 `cd frontend && pnpm install`，再 `pnpm run dev`（或经 `start.sh` 自动拉起）。
-- 配置 LLM：复制 `.env.example`（仓库根目录）为 `backend/.env` 并填入 Key（不填则自动降级；Docker 由 `docker-compose.yml` 的 `env_file: .env` 注入，无需文件）。
+- 前端依赖使用 **pnpm** 管理（仓库已含 `frontend/pnpm-lock.yaml`；Codex 沙箱内 npm 读取被拦时，可用 `frontend/node_modules` 已装依赖直接运行）。需先 `cd frontend && pnpm install`，再 `pnpm run dev`（或经 `start.sh` 自动拉起）。
+- 配置 LLM：复制 `.env.example`（仓库根目录）为 `backend/.env` 并填入 Key（不填则自动降级；Docker 由 `docker-compose.yml` 的 `env_file: ./backend/.env` 注入，无需文件）。
 
 ### Docker 部署
 
@@ -82,7 +82,7 @@ docker compose up -d --build
 ```
 
 - 生产可选依赖（chromadb / pymupdf / python-docx / FlagEmbedding）由 `backend/requirements-prod.txt` 安装；任一缺失时镜像仍正常构建并回退内存实现。
-- 通过 `docker-compose.yml` 的 `env_file: .env` 注入 LLM Key 等配置。
+- 通过 `docker-compose.yml` 的 `env_file: ./backend/.env` 注入 LLM Key 等配置。
 
 ### 云服务器部署
 
@@ -97,7 +97,7 @@ bash deploy.sh
 
 | 文件 | 作用 |
 |------|------|
-| `.env` | LLM Key / 向量库 / 重排等运行配置（见 `.env.example`） |
+| `backend/.env` | LLM Key / 向量库 / 重排等运行配置（见 `.env.example`） |
 | `backend/scoring_config.yaml` | 评分维度 / 因子 / 权重 / 打分规则 / 预警规则 / 等级阈值 |
 | `backend/prompt_templates.yaml` | 场景化 Prompt 模板（free_qa / assessment / strategy / alert_analysis / session_title）+ 安全护栏 |
 | `backend/data/knowledge/` | 预置知识（如 `customer_health_methodology.md` 评估方法论） |
@@ -174,7 +174,7 @@ cd backend && python -m pytest tests/ -v
 - **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；未装自动回退 `memory`（基础功能可用）。
 - **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 雅黑 / macOS PingFang / Linux 文泉驿）。
 - **数据持久化**：挂载 `./data:/app/data`，数据库与向量库落盘。
-- **访问控制**：系统为单租户内部工具，**无内置登录鉴权**；公网 / 云服务器部署时请在前置网关或反向代理层配置访问控制（IP 白名单 / Basic Auth / VPN 等），并将 `.env`、`AGENTS.md`、`docs/` 等敏感文件排除出发布内容。
+- **访问控制**：系统为单租户内部工具，**无内置登录鉴权**；公网 / 云服务器部署时请在前置网关或反向代理层配置访问控制（IP 白名单 / Basic Auth / VPN 等），并将 `.env`、`AGENTS.md`、`dev_process/` 等敏感文件排除出发布内容。
 
 ## 降级与可用性
 

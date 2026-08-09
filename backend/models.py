@@ -211,6 +211,7 @@ class KnowledgeItem(Base):
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, comment="条目标题（可编辑）")
     category: Mapped[str] = mapped_column(String(30), default="内部规范", index=True, comment="分类（可编辑）")
+    industry: Mapped[str] = mapped_column(String(50), default="", index=True, comment="适用行业（检索同行业加权，空=通用）")
     tags: Mapped[list] = mapped_column(JSON, default=list, comment="标签（可编辑）")
     summary: Mapped[str] = mapped_column(Text, default="", comment="摘要，用于列表展示")
     storage: Mapped[str] = mapped_column(String(20), default="vector", comment="vector=向量库 / structured=SQLite")
@@ -222,6 +223,11 @@ class KnowledgeItem(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     document: Mapped["KnowledgeDocument"] = relationship(back_populates="items")
+
+    @property
+    def chunk_count(self) -> int:
+        """切片数：委托源文档的 chunk_count，供列表 / 详情直接展示。"""
+        return self.document.chunk_count if self.document is not None else 0
 
 
 class KnowledgeMetric(Base):

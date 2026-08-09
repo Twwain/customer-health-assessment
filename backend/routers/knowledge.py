@@ -17,13 +17,17 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from config import RERANKER
+from config import KNOWLEDGE_DATA_DIR, RERANKER
 from database import get_db
 from models import Customer, KnowledgeItem
 from schemas import (
+    KnowledgeBatchStatusRequest,
     KnowledgeItemListResponse,
     KnowledgeItemResponse,
     KnowledgeMetricCreate,
@@ -87,6 +91,31 @@ def get_item(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemRespon
     return KnowledgeItemResponse.model_validate(item)
 
 
+@router.get("/items/{item_id}/download")
+def download_item(item_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """下载知识条目对应的原始文档全文（用于人工核验知识有效性）。"""
+    item = _svc(db).get_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    path = item.document.file_path
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="知识文档文件不存在")
+    # 只允许下载知识库目录内的文件，防止 DB 路径被污染时任意读盘
+    data_root = os.path.realpath(KNOWLEDGE_DATA_DIR)
+    real_path = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([data_root, real_path]) == data_root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise HTTPException(status_code=400, detail="文档路径不在知识库目录内")
+    return FileResponse(
+        real_path,
+        media_type="application/octet-stream",
+        filename=os.path.basename(path),
+    )
+
+
 @router.post("/search", response_model=KnowledgeSearchResponse)
 def search(
     payload: KnowledgeSearchRequest,
@@ -122,10 +151,9 @@ def upload(
     file: UploadFile = File(...),
     title: str | None = Form(None),
     category: str = Form("内部规范"),
+    industry: str = Form(""),
     db: Session = Depends(get_db),
 ) -> KnowledgeUploadResponse:
-    import os
-
     from services.rag.knowledge_base import normalize_category
 
     ext = os.path.splitext(file.filename or "")[1].lower()
@@ -148,6 +176,7 @@ def upload(
         category=category,
         filename=file.filename or "upload.bin",
         raw=raw,
+        industry=industry,
         created_by="user",
     )
     item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).first()
@@ -173,6 +202,7 @@ def update_metadata(
             item_id,
             title=payload.title,
             category=payload.category,
+            industry=payload.industry,
             tags=payload.tags,
         )
     except ValueError as exc:
@@ -197,6 +227,27 @@ def approve(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemRespons
     if item is None:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     return KnowledgeItemResponse.model_validate(item)
+
+
+@router.post("/items/{item_id}/revoke", response_model=KnowledgeItemResponse)
+def revoke(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemResponse:
+    """撤销审核（下线）：canonical → proposed。"""
+    item = _svc(db).revoke_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    return KnowledgeItemResponse.model_validate(item)
+
+
+@router.post("/batch-status")
+def batch_status(
+    payload: KnowledgeBatchStatusRequest, db: Session = Depends(get_db)
+) -> dict:
+    """批量上线 / 下线：设置条目与文档状态，并同步向量库 metadata。"""
+    try:
+        updated, warnings = _svc(db).set_items_status(payload.ids, payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"updated": updated, "warnings": warnings}
 
 
 @router.post("/reindex", response_model=KnowledgeReindexResponse)

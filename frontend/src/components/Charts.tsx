@@ -1,7 +1,7 @@
 import type { AssessmentTrendResponse } from "../types";
 import { computeTrendYRange } from "../lib/trendRange";
 
-// 图表组件（SVG 自绘，1:1 还原 docs/prototype/app.js 的 SVG 逻辑，确保与冻结基线一致）。
+// 图表组件（SVG 自绘，1:1 还原 dev_process/prototype/app.js 的 SVG 逻辑，确保与冻结基线一致）。
 // 注：recharts 为项目依赖，但手写 SVG 可保证与评审基线像素级一致，避免主题化偏移。
 
 export function Ring({

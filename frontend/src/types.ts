@@ -178,6 +178,7 @@ export interface KnowledgeReference {
   category: string;
   score: number;
   snippet: string;
+  used?: boolean;
 }
 
 export interface ChatMessageItem {
@@ -199,6 +200,7 @@ export interface ChatSessionItem {
   customer_id: number | null;
   customer_name: string;
   scenario: string;
+  streaming: boolean;
   message_count: number;
   last_message: string;
   created_at: string;
@@ -247,6 +249,7 @@ export interface KnowledgeItemResponse {
   document_id: number;
   title: string;
   category: string;
+  industry: string;
   tags: string[];
   summary: string;
   storage: string;

@@ -24,6 +24,7 @@ export default function Knowledge() {
   const [metaItem, setMetaItem] = useState<KnowledgeItemResponse | null>(null);
   const [deleteItem, setDeleteItem] = useState<KnowledgeItemResponse | null>(null);
   const [reindexing, setReindexing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   const loadItems = (cat: string) => {
     knowledge
@@ -67,6 +68,38 @@ export default function Knowledge() {
     }
   };
 
+  const revoke = async (id: number) => {
+    try {
+      const r = await knowledge.revoke(id);
+      setItems((prev) => prev.map((it) => (it.id === id ? r : it)));
+    } catch {
+      alert("撤销审核失败");
+    }
+  };
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const batchStatus = async (status: "canonical" | "proposed") => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    if (!window.confirm(`确认${status === "canonical" ? "上线" : "下线"} ${ids.length} 条知识？`)) return;
+    try {
+      await knowledge.batchStatus(ids, status);
+      setSelectedIds(new Set());
+      setLoading(true);
+      loadItems(activeCat);
+    } catch {
+      alert("批量操作失败");
+    }
+  };
+
   const remove = async () => {
     if (!deleteItem) return;
     try {
@@ -98,9 +131,9 @@ export default function Knowledge() {
         <div className="mr-auto">
           <div className="flex items-center gap-2.5">
             <span className="h-[16px] w-[3px] rounded-full bg-accent" />
-            <h1 className="text-[22px] font-semibold tracking-tight text-ink">知识库</h1>
+            <h1 className="text-[23px] font-semibold tracking-tight text-ink">知识库</h1>
           </div>
-          <div className="mt-0.5 text-[13px] text-muted">知识增强引擎入口 · 支持浏览 / 检索 / 上传 / 删除 / 编辑元数据</div>
+          <div className="mt-0.5 text-[14px] text-muted">知识库入口 · 支持浏览 / 检索 / 上传 / 删除 / 编辑元数据</div>
         </div>
         <button
           className="rounded-lg border border-border-strong bg-surface px-3 py-2 text-[13px] text-ink-2 transition hover:border-accent hover:text-accent"
@@ -173,6 +206,8 @@ export default function Knowledge() {
             onClick={() => {
               setLoading(true);
               setActiveCat(c);
+              // 切换分类时清空勾选，避免跨分类选中不可见条目继续批量操作
+              setSelectedIds(new Set());
             }}
           >
             {c} <span className={activeCat === c ? "opacity-80" : "text-muted"}>{c === "全部" ? items.length : ""}</span>
@@ -183,6 +218,22 @@ export default function Knowledge() {
       <div className="mb-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[13px] text-muted">
         💡 <span className="font-medium text-ink-2">知识分层存储：</span>叙事/文本类知识进<span className="font-medium">向量库</span>；精确数值类指标进<span className="font-medium">SQLite 结构化表</span>，评估时按行业/规模精确查询，避免向量检索数值误差。
       </div>
+
+      {selectedIds.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-accent-soft/40 px-3 py-2">
+          <span className="text-[13px] text-ink-2">已选 {selectedIds.size} 条</span>
+          <span className="ml-auto" />
+          <button className="rounded-lg bg-accent px-2.5 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-hover" onClick={() => batchStatus("canonical")}>
+            ⬆ 批量上线
+          </button>
+          <button className="rounded-lg border border-warning/40 px-2.5 py-1.5 text-[13px] text-warning transition hover:border-warning" onClick={() => batchStatus("proposed")}>
+            ⬇ 批量下线
+          </button>
+          <button className="rounded-lg border border-border px-2.5 py-1.5 text-[13px] text-ink-2" onClick={() => setSelectedIds(new Set())}>
+            取消选择
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className="py-20 text-center text-muted">加载中…</div>
@@ -198,7 +249,10 @@ export default function Knowledge() {
             <Row
               key={k.id}
               item={k}
+              selected={selectedIds.has(k.id)}
+              onToggle={() => toggleSelect(k.id)}
               onApprove={() => approve(k.id)}
+              onRevoke={() => revoke(k.id)}
               onMeta={() => setMetaItem(k)}
               onDelete={() => setDeleteItem(k)}
             />
@@ -251,18 +305,31 @@ const selCls =
 
 function Row({
   item,
+  selected,
+  onToggle,
   onApprove,
+  onRevoke,
   onMeta,
   onDelete,
 }: {
   item: KnowledgeItemResponse;
+  selected: boolean;
+  onToggle: () => void;
   onApprove: () => void;
+  onRevoke: () => void;
   onMeta: () => void;
   onDelete: () => void;
 }) {
   const canonical = item.status === "canonical";
   return (
     <div className="flex flex-col gap-2.5 border-b border-border-soft px-4 py-3.5 transition last:border-0 hover:bg-surface-3 sm:flex-row sm:items-center">
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={onToggle}
+        className="h-4 w-4 shrink-0 accent-accent"
+        aria-label={`选择 ${item.title}`}
+      />
       <div className="flex min-w-0 flex-1 items-start gap-2.5">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-[19px]">
           {categoryIcon(item.category)}
@@ -280,6 +347,12 @@ function Row({
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12.5px] text-muted">
             <span>{item.category}</span>
+            {item.industry && (
+              <>
+                <span>·</span>
+                <span>{item.industry}</span>
+              </>
+            )}
             <span>·</span>
             <span>{item.chunk_count} 切片</span>
             <span>·</span>
@@ -297,14 +370,25 @@ function Row({
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-        {!canonical && (
-          <button className="rounded-lg bg-accent px-2.5 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-hover" onClick={onApprove}>
-            通过审核
+        {canonical ? (
+          <button className="rounded-lg border border-border px-2.5 py-1.5 text-[13px] text-ink-2 transition hover:border-warning hover:text-warning" onClick={onRevoke}>
+            撤销审核
           </button>
-        )}
-        <button className="rounded-lg border border-border px-2.5 py-1.5 text-[13px] text-ink-2 transition hover:border-accent hover:text-accent" onClick={onMeta}>
-          编辑元数据
-        </button>
+          ) : (
+            <button className="rounded-lg bg-accent px-2.5 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-hover" onClick={onApprove}>
+              通过审核
+            </button>
+          )}
+          <a
+            className="rounded-lg border border-border px-2.5 py-1.5 text-[13px] text-ink-2 transition hover:border-accent hover:text-accent"
+            href={`/api/knowledge/items/${item.id}/download`}
+            download
+          >
+            ⬇ 下载全文
+          </a>
+          <button className="rounded-lg border border-border px-2.5 py-1.5 text-[13px] text-ink-2 transition hover:border-accent hover:text-accent" onClick={onMeta}>
+            编辑元数据
+          </button>
         <button className="rounded-lg border border-border px-2.5 py-1.5 text-[13px] text-danger transition hover:border-danger" onClick={onDelete}>
           删除
         </button>
@@ -316,13 +400,14 @@ function Row({
 function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [category, setCategory] = useState<string>(KNOWLEDGE_CATEGORIES[0]);
+  const [industry, setIndustry] = useState("");
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async () => {
     if (!file) return;
     setBusy(true);
     try {
-      await knowledge.upload(file, category, title.trim() || undefined);
+      await knowledge.upload(file, category, title.trim() || undefined, industry.trim() || undefined);
       onDone();
     } catch (e) {
       alert("上传失败：" + (e instanceof Error ? e.message : "未知错误"));
@@ -357,6 +442,10 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
             </select>
           </div>
           <div className="mt-3">
+            <label className="mb-1 block text-[13.5px] font-medium text-ink-2">适用行业（可选，检索同行业加权）</label>
+            <input value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="如：金融 / 制造业，留空为通用" className="w-full rounded-lg border border-border-strong px-3 py-2 text-[14px] outline-none focus:border-accent" />
+          </div>
+          <div className="mt-3">
             <label className="mb-1 block text-[13.5px] font-medium text-ink-2">标题（可选）</label>
             <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="留空则使用文件名" className="w-full rounded-lg border border-border-strong px-3 py-2 text-[14px] outline-none focus:border-accent" />
           </div>
@@ -389,6 +478,7 @@ function MetaModal({
 }) {
   const [title, setTitle] = useState(item.title);
   const [category, setCategory] = useState(item.category);
+  const [industry, setIndustry] = useState(item.industry ?? "");
   const [tags, setTags] = useState(item.tags.join(", "));
   const [busy, setBusy] = useState(false);
   const submit = async () => {
@@ -397,6 +487,7 @@ function MetaModal({
       const r = await knowledge.update(item.id, {
         title: title.trim() || item.title,
         category,
+        industry: industry.trim(),
         tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
       });
       onDone(r);
@@ -429,6 +520,10 @@ function MetaModal({
                 <option key={c}>{c}</option>
               ))}
             </select>
+          </div>
+          <div className="mb-3">
+            <label className="mb-1 block text-[13.5px] font-medium text-ink-2">适用行业（可选，检索同行业加权）</label>
+            <input value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="如：金融 / 制造业，留空为通用" className="w-full rounded-lg border border-border-strong px-3 py-2 text-[14px] outline-none focus:border-accent" />
           </div>
           <div className="mb-3">
             <label className="mb-1 block text-[13.5px] font-medium text-ink-2">标签（逗号分隔）</label>

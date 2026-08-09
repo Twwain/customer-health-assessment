@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
@@ -50,8 +52,45 @@ from .prompt_templates import DEFAULT_SCENARIO, SCENARIOS, get_template
 from .strategy import generate, split_strategy_payload
 from .tools import MAX_TOOL_ROUNDS, TOOL_SCHEMAS, append_tool_results
 
+
 DEFAULT_TITLE = "新对话"
 TITLE_MAX_CHARS = 16
+
+# 进程内"正在生成"的会话注册表（单进程部署假设）：
+# 相比把标记写进数据库，内存集合没有"崩溃/杀进程后永久滞留"的脏状态问题，
+# 也天然支持同一会话并发生成的互斥判定。会话详情 / 列表接口据此返回 streaming。
+_STREAMING_SESSION_IDS: set[int] = set()
+_STREAMING_LOCK = threading.Lock()
+
+
+def is_session_streaming(session_id: int) -> bool:
+    """当前进程内该会话是否正在生成（SSE 或完整轮次均登记）。"""
+    return session_id in _STREAMING_SESSION_IDS
+
+
+def _claim_streaming(session_id: int) -> bool:
+    """登记会话为"正在生成"；已被占用（并发生成）时返回 False。"""
+    with _STREAMING_LOCK:
+        if session_id in _STREAMING_SESSION_IDS:
+            return False
+        _STREAMING_SESSION_IDS.add(session_id)
+        return True
+
+
+def _release_streaming(session_id: int) -> None:
+    """生成结束（含异常 / 客户端断开）后释放登记。"""
+    with _STREAMING_LOCK:
+        _STREAMING_SESSION_IDS.discard(session_id)
+
+
+# 引用标题归一化：去掉常见书刊引号/括号包装后做精确比较，
+# 避免"风险"这类短词子串匹配把无关知识误标为"已引用"。
+_REF_WRAP_CHARS = "《》「」“”‘’\"'（）()【】<>〈〉，。、"
+_REF_WRAP_STRIP_RE = re.compile(f"^[{re.escape(_REF_WRAP_CHARS)}]+|[{re.escape(_REF_WRAP_CHARS)}]+$")
+
+
+def _normalize_ref_title(title: str | Any) -> str:
+    return _REF_WRAP_STRIP_RE.sub("", str(title or "").strip())
 
 # 快捷入口（AI 评估 / 策略 / 预警）没有用户输入时使用的默认提问：
 # 落库展示与「重新生成」重放共用同一份文案
@@ -61,12 +100,12 @@ _DEFAULT_QUICK_QUESTIONS = {
     "alert_analysis": "请解读该客户当前的风险预警",
 }
 
-# 对话内摘要提示：完整因子明细 / 风险预警 / 策略细则见导出报告
-# （导出 PDF 含分维度因子明细、风险提示与建议、AI 智能策略建议）
+# 对话内摘要提示：完整因子明细 / 风险预警 / 策略细则见生成报告
+# （生成 PDF 含分维度因子明细、风险提示与建议、AI 智能策略建议）
 _SCENARIO_SUMMARY_HINTS = {
-    "assessment": "本页面仅显示评估摘要，完整报告请点击「导出报告」。",
-    "strategy": "本页面仅显示策略摘要，完整报告请点击「导出报告」。",
-    "alert_analysis": "本页面仅显示风险摘要，完整报告请点击「导出报告」。",
+    "assessment": "本页面仅显示评估摘要，完整报告请点击「生成报告」。",
+    "strategy": "本页面仅显示策略摘要，完整报告请点击「生成报告」。",
+    "alert_analysis": "本页面仅显示风险摘要，完整报告请点击「生成报告」。",
 }
 
 # M4：走 Agent Loop（检索→推理→自批判→精炼）的场景；其余走直接流式
@@ -444,7 +483,7 @@ def run_turn(
         raw_text = f"{raw_text}\n\n" + "\n\n".join(f"> ⚠️ {w}" for w in warnings)
     summary_hint = _SCENARIO_SUMMARY_HINTS.get(scenario)
     if summary_hint and ctx.assessment is not None:
-        # 会话内只展示摘要；完整因子明细 / 风险预警 / 策略细则见导出报告
+        # 会话内只展示摘要；完整因子明细 / 风险预警 / 策略细则见生成报告
         raw_text = raw_text.rstrip() + f"\n\n> 💡 {summary_hint}"
 
     body, items = split_strategy_payload(guardrails.sanitize_output(raw_text))
@@ -458,6 +497,27 @@ def run_turn(
     # 知识溯源：agent 场景用其检索结果，其余用上下文注入的引用
     base_refs = agent_refs if agent_refs is not None else ctx.references
     final_refs = _merge_references(base_refs, tool_refs)
+    # 标记「已引用」：策略条目的 reference 或正文「参考：标题」实际引用到的知识。
+    # 归一化后做精确匹配，长标题（>=6 字）才允许子串匹配，避免短词误标。
+    used_titles: set[str] = set()
+    for it in items or []:
+        u = _normalize_ref_title(it.get("reference"))
+        if u:
+            used_titles.add(u)
+    for m in re.findall(r"参考[:：]\s*([^）)]+)", raw_text or ""):
+        t = _normalize_ref_title(m)
+        if t:
+            used_titles.add(t)
+    for ref in final_refs:
+        t = _normalize_ref_title(ref.get("title"))
+        if not t:
+            ref["used"] = False
+            continue
+        matched = any(
+            u == t or (len(u) >= 6 and u in t)
+            for u in used_titles
+        )
+        ref["used"] = matched
     if final_refs:
         yield TurnEvent("references", {"items": final_refs})
 
@@ -519,6 +579,8 @@ def stream_sse(
     推流前就执行清理，流式过程中不能再用请求级 Session。
     """
     db = SessionLocal()
+    session: ChatSession | None = None
+    claimed = False
     try:
         session = db.get(ChatSession, session_id)
         if session is None:
@@ -532,6 +594,10 @@ def stream_sse(
                 yield sse(TurnEvent("error", {"message": "没有可重新生成的消息"}))
                 return
 
+        if not _claim_streaming(session.id):
+            yield sse(TurnEvent("error", {"message": "该会话正在生成中，请稍候"}))
+            return
+        claimed = True
         for event in run_turn(
             db,
             session,
@@ -545,6 +611,8 @@ def stream_sse(
     except Exception as exc:  # noqa: BLE001
         yield sse(TurnEvent("error", {"message": str(exc)}))
     finally:
+        if claimed:
+            _release_streaming(session.id if session is not None else session_id)
         db.close()
 
 
@@ -607,30 +675,36 @@ def complete_turn(
         "error": "",
     }
 
-    for event in run_turn(
-        db,
-        session,
-        content=content,
-        scenario=scenario,
-        customer_id=customer_id,
-        persist_user=persist_user,
-        exclude_message_id=exclude_message_id,
-    ):
-        if event.type == "context":
-            result["assessment"] = event.data.get("assessment")
-            result["trend"] = event.data.get("trend")
-        elif event.type == "strategy":
-            result["strategy_items"] = event.data.get("items") or []
-        elif event.type == "references":
-            result["references"] = event.data.get("items") or []
-        elif event.type == "warning":
-            result["warnings"].append(event.data.get("message", ""))
-        elif event.type == "error":
-            result["error"] = event.data.get("message", "")
-        elif event.type == "done":
-            result["message"] = event.data.get("message")
-            result["degraded"] = bool(event.data.get("degraded"))
-            result["tokens_used"] = event.data.get("tokens_used", 0)
-            result["latency_ms"] = event.data.get("latency_ms", 0)
+    if not _claim_streaming(session.id):
+        result["error"] = "该会话正在生成中，请稍候"
+        return result
+    try:
+        for event in run_turn(
+            db,
+            session,
+            content=content,
+            scenario=scenario,
+            customer_id=customer_id,
+            persist_user=persist_user,
+            exclude_message_id=exclude_message_id,
+        ):
+            if event.type == "context":
+                result["assessment"] = event.data.get("assessment")
+                result["trend"] = event.data.get("trend")
+            elif event.type == "strategy":
+                result["strategy_items"] = event.data.get("items") or []
+            elif event.type == "references":
+                result["references"] = event.data.get("items") or []
+            elif event.type == "warning":
+                result["warnings"].append(event.data.get("message", ""))
+            elif event.type == "error":
+                result["error"] = event.data.get("message", "")
+            elif event.type == "done":
+                result["message"] = event.data.get("message")
+                result["degraded"] = bool(event.data.get("degraded"))
+                result["tokens_used"] = event.data.get("tokens_used", 0)
+                result["latency_ms"] = event.data.get("latency_ms", 0)
+    finally:
+        _release_streaming(session.id)
 
     return result

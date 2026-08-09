@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { KnowledgeReference, StrategyItem } from "../types";
 import { UrgencyBadge } from "./Badges";
 
@@ -27,7 +28,7 @@ export function StrategyList({
 }: {
   items: StrategyItem[];
   references?: KnowledgeReference[];
-  onTrace?: (ref: KnowledgeReference) => void;
+  onTrace?: (refs: KnowledgeReference[]) => void;
 }) {
   if (!items || items.length === 0) return null;
   const sorted = [...items].sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority));
@@ -73,7 +74,7 @@ export function StrategyList({
                           <button
                             className="mt-1.5 inline-flex items-center gap-1 text-[12px] text-accent hover:underline"
                             onClick={() =>
-                              onTrace?.(ref || { title: it.reference, category: "", score: 0, snippet: "" })
+                              onTrace?.(ref ? [ref] : [{ title: it.reference, category: "", score: 0, snippet: "" }])
                             }
                           >
                             📎 {it.reference} <span className="font-medium">溯源 ›</span>
@@ -110,26 +111,60 @@ export function RefsBox({
   onTrace,
 }: {
   references?: KnowledgeReference[];
-  onTrace?: (ref: KnowledgeReference) => void;
+  onTrace?: (refs: KnowledgeReference[]) => void;
 }) {
+  const [open, setOpen] = useState(false);
   if (!references || references.length === 0) return null;
+  const groups = new Map<number, KnowledgeReference[]>();
+  for (const r of references) {
+    const key = r.document_id ?? r.item_id ?? 0;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(r);
+  }
+  const sorted = [...groups.entries()].sort(
+    (a, b) => (b[1][0].score ?? 0) - (a[1][0].score ?? 0),
+  );
   return (
     <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
-      <div className="mb-1.5 text-[12px] text-muted">
-        📚 本次回答共检索 {references.length} 条知识（metadata 过滤 → 双路召回 → Rerank）
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {references.map((r, i) => (
-          <button
-            key={i}
-            className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-1 text-[11.5px] text-ink-2 transition hover:border-accent hover:text-accent"
-            onClick={() => onTrace?.(r)}
-          >
-            📄 {r.title}
-            {r.score ? <span className="text-accent">· {r.score.toFixed(2)}</span> : null}
-          </button>
-        ))}
-      </div>
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 text-left text-[12px] text-muted transition hover:text-ink-2"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="shrink-0">{open ? "▾" : "▸"}</span>
+        <span>📚 本次回答共检索 {groups.size} 个文档 / {references.length} 段（点击{open ? "收起" : "展开"}）</span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1.5">
+          {sorted.map(([docId, refs]) => {
+            const first = refs[0];
+            const usedCount = refs.filter((r) => r.used).length;
+            return (
+              <button
+                key={docId}
+                type="button"
+                className="flex w-full items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-2 text-left text-[12.5px] text-ink-2 transition hover:border-accent hover:text-accent"
+                onClick={() => onTrace?.(refs)}
+              >
+                <span className="shrink-0">📄</span>
+                <span className="truncate">{first.title}</span>
+                <span className="ml-auto shrink-0 text-muted">{refs.length} 段</span>
+                {first.score ? <span className="shrink-0 text-accent">· {first.score.toFixed(2)}</span> : null}
+                {usedCount > 0 ? (
+                  <span className="shrink-0 rounded-full bg-accent-soft px-1.5 py-0.5 text-[11px] text-accent">
+                    已引用 {usedCount}
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
+                    仅检索
+                  </span>
+                )}
+                <span className="shrink-0 text-accent">查看 ›</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

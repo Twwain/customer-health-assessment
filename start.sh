@@ -24,6 +24,8 @@ echo "  Ctrl+C 停止所有服务"
 echo "==================================="
 
 cd "$SCRIPT_DIR/backend"
+# 加密 .env 的解密密钥（backend/.env 为唯一配置，本机启动时通过环境变量定位）
+export SECRET_KEY_FILE="$SCRIPT_DIR/.ch_secret"
 # 优先用项目 venv 的 python（裸 python 可能解析到无依赖的旧系统 Python）；
 # Windows venv 在 Scripts/，Linux/macOS venv 在 bin/
 PY="$SCRIPT_DIR/backend/.venv/Scripts/python.exe"

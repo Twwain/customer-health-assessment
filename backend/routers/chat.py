@@ -118,6 +118,7 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
             customer_id=s.customer_id,
             customer_name=name_by_cid.get(s.customer_id, "") if s.customer_id else "",
             scenario=s.scenario,
+            streaming=chat_engine.is_session_streaming(s.id),
             message_count=count_by_sid.get(s.id, 0),
             last_message=(last_content_by_sid.get(s.id, "") or "")[:60],
             created_at=s.created_at,

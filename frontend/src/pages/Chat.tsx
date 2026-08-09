@@ -48,13 +48,14 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [stream, setStream] = useState<StreamMsg | null>(null);
   const [busy, setBusy] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState("AI 对话");
   const [sessionCustomerId, setSessionCustomerId] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportJob, setExportJob] = useState<{ id: string; status: string } | null>(null);
   const [ctx, setCtx] = useState<{ assessment?: AssessmentResponse | null; trend?: AssessmentTrendResponse | null }>({});
-  const [trace, setTrace] = useState<KnowledgeReference | null>(null);
+  const [trace, setTrace] = useState<KnowledgeReference[] | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<number, string>>({});
   const [adopted, setAdopted] = useState<Record<number, boolean>>({});
@@ -65,6 +66,27 @@ export default function Chat() {
   const scenarioRef = useRef<string>("free_qa");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pendingScenario = useRef<Scenario | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  const stopPolling = () => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+  const startPolling = (id: number) => {
+    stopPolling();
+    const startedAt = Date.now();
+    pollRef.current = window.setInterval(() => {
+      if (Date.now() - startedAt > 120000) {
+        stopPolling();
+        setResuming(false);
+        setError("生成超时，请刷新页面或重新发送");
+        return;
+      }
+      void loadSession(id);
+    }, 3000);
+  };
 
   // ── SSE 流式发送 ──────────────────────────────────────────
   const handleEvent = (ev: ChatEvent) => {
@@ -73,11 +95,15 @@ export default function Chat() {
       streamRef.current = null;
       setStream(null);
       setMessages((prev) => [...prev, msg]);
+      stopPolling();
+      setResuming(false);
       return;
     }
     if (ev.type === "error") {
       streamRef.current = null;
       setStream(null);
+      stopPolling();
+      setResuming(false);
       setError((ev.data.message as string | undefined) || "生成出错");
       return;
     }
@@ -183,6 +209,14 @@ export default function Chat() {
         scenarioRef.current = s.scenario;
         for (const m of s.messages) if (m.feedback) setFeedbacks((p) => ({ ...p, [m.id]: m.feedback }));
         if (s.customer_id) fetchCtx(s.customer_id);
+        // 恢复提示：切走再切回时，若后端标记会话仍在生成则显示「正在生成」并轮询
+        if (s.streaming) {
+          setResuming(true);
+          startPolling(id);
+        } else {
+          setResuming(false);
+          stopPolling();
+        }
       })
       .catch(() => setError("会话加载失败"));
 
@@ -198,6 +232,9 @@ export default function Chat() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionIdNum]);
+
+  // 组件卸载时停止恢复轮询
+  useEffect(() => () => stopPolling(), []);
 
   const runQuick = (scenario: Scenario) => {
     if (!sessionIdNum) return;
@@ -246,7 +283,7 @@ export default function Chat() {
 
   const exportPdf = async () => {
     if (!sessionCustomerId) {
-      alert("该会话未关联客户，无法导出报告");
+      alert("该会话未关联客户，无法生成报告");
       return;
     }
     setExporting(true);
@@ -366,6 +403,7 @@ export default function Chat() {
   }
 
   const display = stream ? [...messages, stream as unknown as ChatMessageItem] : messages;
+  const showResume = resuming && !stream && !busy;
 
   return (
     <div className="flex h-full flex-col">
@@ -400,7 +438,7 @@ export default function Chat() {
               onClick={exportPdf}
               disabled={exporting || !sessionCustomerId}
             >
-              {exporting ? "⏳ 导出中…" : "📄 导出报告"}
+              {exporting ? "⏳ 生成中…" : "📄 生成报告"}
             </button>
             {exporting && exportJob?.status === "running" && (
               <button
@@ -442,6 +480,12 @@ export default function Chat() {
               />
             );
           })}
+          {showResume && (
+            <div className="rounded-xl border border-border bg-surface px-3.5 py-2.5 text-[14px] text-muted">
+              <span className="cursor-blink mr-1" />
+              正在生成…
+            </div>
+          )}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[14px] text-danger">
               ⚠️ {error}
@@ -490,7 +534,7 @@ export default function Chat() {
         </div>
       </div>
 
-      {trace && <TraceDrawer reference={trace} onClose={() => setTrace(null)} />}
+      {trace && <TraceDrawer references={trace} onClose={() => setTrace(null)} />}
       {picker}
     </div>
   );
@@ -527,7 +571,7 @@ function MessageView({
   streamHint?: string;
   feedback: string;
   adopted: boolean;
-  onTrace: (r: KnowledgeReference) => void;
+  onTrace: (r: KnowledgeReference[]) => void;
   onFeedback: (fb: string) => void;
   onAdopt: () => void;
 }) {
@@ -598,8 +642,8 @@ function ToolBtn({ active, onClick, label }: { active: boolean; onClick: () => v
   );
 }
 
-function TraceDrawer({ reference, onClose }: { reference: KnowledgeReference; onClose: () => void }) {
-  const snippet = reference.snippet || "（无切片预览，可在知识库中查看原文）";
+function TraceDrawer({ references, onClose }: { references: KnowledgeReference[]; onClose: () => void }) {
+  const first = references[0];
   return (
     <>
       <div className="overlay-mask" onClick={onClose} />
@@ -612,14 +656,28 @@ function TraceDrawer({ reference, onClose }: { reference: KnowledgeReference; on
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="rounded-xl border border-border bg-surface-2 p-3">
-            <div className="text-[15px] font-semibold text-ink">{reference.title || "—"}</div>
+            <div className="text-[15px] font-semibold text-ink">{first?.title || "—"}</div>
             <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[13px] text-muted">
-              {reference.category && <span>分类：{reference.category}</span>}
-              {reference.score ? <span>相似度：<b className="text-accent">{reference.score.toFixed(2)}</b></span> : null}
+              {first?.category && <span>分类：{first.category}</span>}
+              {references.length > 1 && <span>{references.length} 个命中切片</span>}
             </div>
           </div>
           <div className="mb-1.5 mt-3 text-[12.5px] text-muted">命中切片原文</div>
-          <div className="rounded-xl border border-border-soft bg-surface p-3 text-[14px] leading-relaxed text-ink-2">{snippet}</div>
+          <div className="space-y-2">
+            {references.map((r, i) => (
+              <div key={i} className="rounded-xl border border-border-soft bg-surface p-3 text-[14px] leading-relaxed text-ink-2">
+                <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                  <span>P.{r.chunk_id ?? "—"} · 相似度 {r.score ? r.score.toFixed(2) : "—"}</span>
+                  {r.used ? (
+                    <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10.5px] text-accent">已引用</span>
+                  ) : (
+                    <span className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10.5px] text-muted">仅检索</span>
+                  )}
+                </div>
+                <div className="whitespace-pre-wrap">{r.snippet || "（无切片预览，可在知识库中查看原文）"}</div>
+              </div>
+            ))}
+          </div>
           <div className="mt-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[13px] text-muted">
             💡 该片段由检索链路召回：metadata 过滤 → dense 向量召回 → Rerank 重排。
           </div>
@@ -701,7 +759,7 @@ function WelcomeScreen({
             <h1 className="text-[25px] font-semibold tracking-tight text-ink">你好，我是客情分析助手</h1>
           </div>
           <p className="mt-2 text-[14.5px] leading-relaxed text-muted">
-            结合<strong className="font-medium text-ink">量化评估引擎</strong>（因子评分）与<strong className="font-medium text-ink">知识增强引擎</strong>（RAG 检索），帮你分析客户健康度、排查风险、制定可执行策略。
+            结合<strong className="font-medium text-ink">客户库</strong>（客情因子数据）与<strong className="font-medium text-ink">知识库</strong>（内部资料检索），帮你分析客户健康度、排查风险、制定可执行策略。
           </p>
         </div>
 
