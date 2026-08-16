@@ -195,28 +195,28 @@ def list_customers(
         # 等级筛选基于最近一次评估快照（AssessmentHistory.level）走 SQL 过滤，
         # 避免对全表逐条实时评分；快照在建档/编辑/因子更新/AI 评估时均会刷新。
         # 无快照的客户（理论上建档即落基线）回退为实时评估，保证语义完整。
+        scoring = get_scoring_strategy()
         latest = (
             db.query(
                 AssessmentHistory.customer_id,
                 func.max(AssessmentHistory.id).label("max_id"),
             )
+            .filter(AssessmentHistory.config_version == scoring.config.version)
             .group_by(AssessmentHistory.customer_id)
             .subquery()
         )
-        snapshot_rows = (
-            db.query(AssessmentHistory.customer_id, AssessmentHistory.level)
-            .join(latest, AssessmentHistory.id == latest.c.max_id)
-            .all()
+        query = query.outerjoin(latest, Customer.id == latest.c.customer_id).outerjoin(
+            AssessmentHistory, AssessmentHistory.id == latest.c.max_id
         )
-        level_by_customer = {cid: lv for cid, lv in snapshot_rows}
-        all_ids = [cid for (cid,) in query.with_entities(Customer.id).all()]
-        missing = [cid for cid in all_ids if cid not in level_by_customer]
-        if missing:
-            engine = get_scoring_strategy()
-            for c in db.query(Customer).filter(Customer.id.in_(missing)).all():
-                level_by_customer[c.id] = engine.evaluate(c).level
-        matched = [cid for cid in all_ids if level_by_customer.get(cid) == level]
-        query = query.filter(Customer.id.in_(matched) if matched else Customer.id == -1)
+        # 建档/编辑都会写快照；这里只为迁移前的历史客户保留小范围实时回退。
+        missing_customers = query.filter(AssessmentHistory.id.is_(None)).all()
+        fallback_ids: list[int] = []
+        if missing_customers:
+            fallback_ids = [c.id for c in missing_customers if scoring.evaluate(c).level == level]
+        level_filter = AssessmentHistory.level == level
+        if fallback_ids:
+            level_filter = or_(level_filter, Customer.id.in_(fallback_ids))
+        query = query.filter(level_filter)
 
     total = query.count()
     items = query.order_by(Customer.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
@@ -240,7 +240,7 @@ def list_industries(db: Session = Depends(get_db)):
 def get_factor_config():
     """返回当前因子配置（来自 scoring_config.yaml），供前端动态渲染因子表单。
 
-    ：新增因子只需在配置里注册，前后端均无需改代码。
+    新增因子只需在配置里注册，前后端均无需改代码。
     """
     config = load_scoring_config()
     return FactorConfigResponse(

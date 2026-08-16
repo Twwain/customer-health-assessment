@@ -1,6 +1,6 @@
 """数据模型。
 
-早期只有 Customer；后续按  扩展出对话、评估历史与知识库三组模型：
+早期只有 Customer；后续按业务能力扩展出对话、评估历史与知识库三组模型：
 
 - 对话：ChatSession / ChatMessage
 - 评估历史：AssessmentHistory（支撑预警趋势箭头与历史曲线）

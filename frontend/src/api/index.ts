@@ -132,6 +132,16 @@ export const knowledge = {
     http.post("/knowledge/batch-status", { ids, status }).then((r) => r.data),
   reindex: (category?: string) =>
     http.post("/knowledge/reindex", category ? { category } : {}).then((r) => r.data),
+  reindexJob: (category?: string) =>
+    http
+      .post<{ job_id: string; status: string }>("/knowledge/reindex/jobs", category ? { category } : {})
+      .then((r) => r.data),
+  reindexJobStatus: (jobId: string) =>
+    http
+      .get<{ job_id: string; status: "running" | "ready" | "error"; reindexed: number; error?: string }>(
+        `/knowledge/reindex/jobs/${jobId}`,
+      )
+      .then((r) => r.data),
   status: () => http.get<KnowledgeStatusResponse>("/knowledge/status").then((r) => r.data),
 };
 

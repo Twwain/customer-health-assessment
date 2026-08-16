@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -7,9 +8,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from database import engine, Base, SessionLocal
 from routers import assessment, chat, customers, knowledge
-
-Base.metadata.create_all(bind=engine)
-
 
 def _migrate_legacy_data() -> None:
     """启动时执行幂等数据迁移（历史知识分类名校正等）。失败不阻断启动。
@@ -49,9 +47,15 @@ def _migrate_legacy_data() -> None:
         db.close()
 
 
-_migrate_legacy_data()
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """应用启动时初始化数据库；单纯导入 ``main`` 不再产生写库副作用。"""
+    Base.metadata.create_all(bind=engine)
+    _migrate_legacy_data()
+    yield
 
-app = FastAPI(title="客情评估智能体")
+
+app = FastAPI(title="客情评估智能体", lifespan=lifespan)
 
 # CORS：生产为同源部署，跨域主要面向本地开发（Vite 代理外的直连场景）。
 # allow_origins="*" 与 allow_credentials=True 是浏览器规范禁止的组合，

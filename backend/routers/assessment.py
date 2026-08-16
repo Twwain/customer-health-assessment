@@ -7,10 +7,11 @@ import uuid
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 import config
 from database import get_db
-from models import Customer
+from models import AssessmentHistory, Customer
 from schemas import (
     AssessmentHistoryItem,
     AssessmentHistoryResponse,
@@ -30,7 +31,6 @@ history_router = APIRouter(prefix="/customers", tags=["评估历史"])
 
 logger = logging.getLogger(__name__)
 
-engine = get_scoring_strategy()
 pdf_gen = PdfReportGenerator()
 
 # 异步 PDF 导出任务（内存态：生成结果直接缓存在进程内，重启即失效）
@@ -123,7 +123,7 @@ def _get_customer(customer_id: int, db: Session) -> Customer:
 
 @router.get("/{customer_id}", response_model=AssessmentResponse)
 def get_assessment(customer_id: int, db: Session = Depends(get_db)):
-    return engine.evaluate(_get_customer(customer_id, db))
+    return get_scoring_strategy().evaluate(_get_customer(customer_id, db))
 
 
 @router.post("/{customer_id}/snapshot", response_model=AssessmentHistoryItem)
@@ -135,7 +135,7 @@ def create_assessment_snapshot(
 ):
     """执行一次评估并写入历史快照（趋势曲线的数据来源）。"""
     customer = _get_customer(customer_id, db)
-    assessment = engine.evaluate(customer)
+    assessment = get_scoring_strategy().evaluate(customer)
     record = assessment_history.record_assessment(
         db,
         customer,
@@ -290,15 +290,15 @@ def download_pdf_job(customer_id: int, job_id: str):
 
 @router.get("/all/overview", response_model=OverviewResponse)
 def get_overview(db: Session = Depends(get_db)):
-    customers = db.query(Customer).all()
-
     # 等级分布按 scoring_config.yaml 的 levels 动态构建（最低档视为"风险档"），
     # 不写死等级名，配置改名后接口仍然正确。
-    levels_cfg = engine.config.levels  # 按 min_score 降序
+    scoring = get_scoring_strategy()
+    levels_cfg = scoring.config.levels  # 按 min_score 降序
     level_names = [lv.name for lv in levels_cfg]
     risk_level = levels_cfg[-1].name if levels_cfg else ""
 
-    if not customers:
+    total_customers = db.query(Customer).count()
+    if not total_customers:
         return OverviewResponse(
             total_customers=0,
             avg_score=0,
@@ -308,41 +308,94 @@ def get_overview(db: Session = Depends(get_db)):
             risk_customers=[],
         )
 
-    pairs = [(engine.evaluate(c), c) for c in customers]
-    assessments = [a for a, _ in pairs]
-    scores = [a.total_score for a in assessments]
-    avg_score = round(sum(scores) / len(scores), 1)
-    risk_count = sum(1 for a in assessments if a.level == risk_level)
-    distribution = {name: 0 for name in level_names}
-    for a in assessments:
-        distribution[a.level] = distribution.get(a.level, 0) + 1
-
-    # Build summaries with industry info
-    summaries = [
-        CustomerHealthSummary(
-            customer_id=a.customer_id,
-            customer_name=a.customer_name,
-            industry=c.industry,
-            total_score=a.total_score,
-            level=a.level,
-            level_color=a.level_color,
+    # 正常路径只读取每位客户的最新评分快照，避免每次打开总览都全量实时评分。
+    # 无快照仅是历史数据兼容场景，回退评分后会与快照结果一起参与汇总。
+    latest = (
+        db.query(
+            AssessmentHistory.customer_id,
+            func.max(AssessmentHistory.id).label("max_id"),
         )
-        for a, c in pairs
-    ]
+        .filter(AssessmentHistory.config_version == scoring.config.version)
+        .group_by(AssessmentHistory.customer_id)
+        .subquery()
+    )
+    snapshot_stats = (
+        db.query(func.count(AssessmentHistory.id), func.sum(AssessmentHistory.total_score))
+        .join(latest, AssessmentHistory.id == latest.c.max_id)
+        .one()
+    )
+    snapshot_count, snapshot_score_sum = snapshot_stats
+    distribution = {name: 0 for name in level_names}
+    for level, count in (
+        db.query(AssessmentHistory.level, func.count(AssessmentHistory.id))
+        .join(latest, AssessmentHistory.id == latest.c.max_id)
+        .group_by(AssessmentHistory.level)
+        .all()
+    ):
+        distribution[level] = count
 
-    # Recent: top 5 by updated_at desc（先建 id→updated_at 索引，避免 O(N²) 查找）
-    updated_at_by_id = {c.id: c.updated_at for _, c in pairs}
+    snapshot_base = (
+        db.query(AssessmentHistory, Customer)
+        .join(latest, AssessmentHistory.id == latest.c.max_id)
+        .join(Customer, Customer.id == AssessmentHistory.customer_id)
+    )
+    recent_rows = snapshot_base.order_by(Customer.updated_at.desc()).limit(5).all()
+    risk_rows = snapshot_base.order_by(AssessmentHistory.total_score.asc()).limit(5).all()
+    missing_customers = (
+        db.query(Customer)
+        .outerjoin(latest, Customer.id == latest.c.customer_id)
+        .filter(latest.c.customer_id.is_(None))
+        .all()
+    )
+
+    def snapshot_summary(history: AssessmentHistory, customer: Customer) -> CustomerHealthSummary:
+        return CustomerHealthSummary(
+            customer_id=history.customer_id,
+            customer_name=customer.customer_name,
+            industry=customer.industry,
+            total_score=history.total_score,
+            level=history.level,
+            level_color=history.level_color,
+        )
+
+    missing_pairs = [
+        (
+            CustomerHealthSummary(
+                customer_id=result.customer_id,
+                customer_name=result.customer_name,
+                industry=customer.industry,
+                total_score=result.total_score,
+                level=result.level,
+                level_color=result.level_color,
+            ),
+            customer,
+        )
+        for customer in missing_customers
+        for result in [scoring.evaluate(customer)]
+    ]
+    for summary, _ in missing_pairs:
+        distribution[summary.level] = distribution.get(summary.level, 0) + 1
+    missing_score_sum = sum(summary.total_score for summary, _ in missing_pairs)
+    evaluated_count = snapshot_count + len(missing_pairs)
+    avg_score = round(((snapshot_score_sum or 0) + missing_score_sum) / evaluated_count, 1)
+    risk_count = distribution.get(risk_level, 0)
+
+    # Top 5 候选由 SQL 截断；仅将极少数无快照兼容数据合入后排序。
+    recent_pairs = [(snapshot_summary(history, customer), customer) for history, customer in recent_rows]
+    recent_pairs.extend(missing_pairs)
     recent = sorted(
-        summaries,
-        key=lambda s: updated_at_by_id.get(s.customer_id) or datetime.datetime.min,
+        recent_pairs,
+        key=lambda pair: pair[1].updated_at or datetime.datetime.min,
         reverse=True,
     )[:5]
+    recent = [summary for summary, _ in recent]
 
-    # Risk: lowest 5 scores
-    risk = sorted(summaries, key=lambda s: s.total_score)[:5]
+    risk = [snapshot_summary(history, customer) for history, customer in risk_rows]
+    risk.extend(summary for summary, _ in missing_pairs)
+    risk = sorted(risk, key=lambda summary: summary.total_score)[:5]
 
     return OverviewResponse(
-        total_customers=len(customers),
+        total_customers=total_customers,
         avg_score=avg_score,
         risk_count=risk_count,
         level_distribution=distribution,

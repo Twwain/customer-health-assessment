@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { knowledge } from "../api";
 import type {
   KnowledgeItemResponse,
@@ -6,11 +6,13 @@ import type {
   KnowledgeStatusResponse,
 } from "../types";
 import { categoryIcon, storageLabel } from "../lib/ui";
+import { useUiFeedback } from "../components/UiFeedback";
 
 // 知识分类与后端 models.KNOWLEDGE_CATEGORIES 保持一致（分类权重按此表生效）
 const KNOWLEDGE_CATEGORIES = ["内部规范", "内部指标", "外部指标", "对话沉淀"] as const;
 
 export default function Knowledge() {
+  const { notify, confirm: confirmAction } = useUiFeedback();
   const [items, setItems] = useState<KnowledgeItemResponse[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [activeCat, setActiveCat] = useState("全部");
@@ -24,6 +26,13 @@ export default function Knowledge() {
   const [metaItem, setMetaItem] = useState<KnowledgeItemResponse | null>(null);
   const [deleteItem, setDeleteItem] = useState<KnowledgeItemResponse | null>(null);
   const [reindexing, setReindexing] = useState(false);
+  const [reindexJob, setReindexJob] = useState<{
+    id: string;
+    status: "running" | "ready" | "error";
+    reindexed: number;
+    error?: string;
+  } | null>(null);
+  const reindexPollRef = useRef<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   const loadItems = (cat: string) => {
@@ -64,7 +73,7 @@ export default function Knowledge() {
       const r = await knowledge.approve(id);
       setItems((prev) => prev.map((it) => (it.id === id ? r : it)));
     } catch {
-      alert("审核失败");
+      notify("审核失败", "error");
     }
   };
 
@@ -73,7 +82,7 @@ export default function Knowledge() {
       const r = await knowledge.revoke(id);
       setItems((prev) => prev.map((it) => (it.id === id ? r : it)));
     } catch {
-      alert("撤销审核失败");
+      notify("撤销审核失败", "error");
     }
   };
 
@@ -89,14 +98,14 @@ export default function Knowledge() {
   const batchStatus = async (status: "canonical" | "proposed") => {
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
-    if (!window.confirm(`确认${status === "canonical" ? "上线" : "下线"} ${ids.length} 条知识？`)) return;
+    if (!(await confirmAction(`确认${status === "canonical" ? "上线" : "下线"} ${ids.length} 条知识？`))) return;
     try {
       await knowledge.batchStatus(ids, status);
       setSelectedIds(new Set());
       setLoading(true);
       loadItems(activeCat);
     } catch {
-      alert("批量操作失败");
+      notify("批量操作失败", "error");
     }
   };
 
@@ -107,21 +116,63 @@ export default function Knowledge() {
       setItems((prev) => prev.filter((it) => it.id !== deleteItem.id));
       setDeleteItem(null);
     } catch {
-      alert("删除失败");
+      notify("删除失败", "error");
+    }
+  };
+
+  const stopReindexPolling = () => {
+    if (reindexPollRef.current !== null) {
+      window.clearInterval(reindexPollRef.current);
+      reindexPollRef.current = null;
     }
   };
 
   const reindex = async () => {
     setReindexing(true);
+    setReindexJob(null);
     try {
-      const r = await knowledge.reindex();
-      alert(`重建索引完成：重新索引 ${r.reindexed ?? 0} 条`);
-    } catch {
-      alert("重建索引失败");
-    } finally {
+      const job = await knowledge.reindexJob();
+      setReindexJob({ id: job.job_id, status: "running", reindexed: 0 });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "重建索引任务创建失败";
+      setReindexJob({ id: "", status: "error", reindexed: 0, error: message });
+      notify(message, "error");
       setReindexing(false);
     }
   };
+
+  useEffect(() => {
+    if (!reindexJob || reindexJob.status !== "running") return;
+    const jobId = reindexJob.id;
+    stopReindexPolling();
+    reindexPollRef.current = window.setInterval(async () => {
+      try {
+        const status = await knowledge.reindexJobStatus(jobId);
+        if (status.status === "ready" || status.status === "error") {
+          stopReindexPolling();
+          setReindexing(false);
+          setReindexJob({
+            id: jobId,
+            status: status.status,
+            reindexed: status.reindexed ?? 0,
+            error: status.error,
+          });
+          if (status.status === "ready") {
+            notify(`重建索引完成：重新索引 ${status.reindexed ?? 0} 条`, "success");
+          } else {
+            notify(`重建索引失败：${status.error || "未知错误"}`, "error");
+          }
+        }
+      } catch (e) {
+        stopReindexPolling();
+        setReindexing(false);
+        const message = e instanceof Error ? e.message : "任务状态获取失败";
+        setReindexJob({ id: jobId, status: "error", reindexed: 0, error: message });
+        notify(message, "error");
+      }
+    }, 1000);
+    return stopReindexPolling;
+  }, [reindexJob, notify]);
 
   const tabs = ["全部", ...categories];
 
@@ -140,8 +191,23 @@ export default function Knowledge() {
           onClick={reindex}
           disabled={reindexing}
         >
-          🔄 重建索引
+          {reindexing ? "⏳ 重建中…" : "🔄 重建索引"}
         </button>
+        {reindexJob?.status === "running" && (
+          <span className="rounded-lg border border-info/30 bg-info-soft px-3 py-2 text-[13px] text-info">
+            正在后台重建索引，请稍候…
+          </span>
+        )}
+        {reindexJob?.status === "ready" && (
+          <span className="rounded-lg border border-success/30 bg-success-soft px-3 py-2 text-[13px] text-success">
+            ✓ 已完成，共重建 {reindexJob.reindexed} 条
+          </span>
+        )}
+        {reindexJob?.status === "error" && (
+          <span className="max-w-xs truncate rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger" title={reindexJob.error}>
+            ⚠ 重建失败：{reindexJob.error || "未知错误"}
+          </span>
+        )}
         <button
           className="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white transition hover:bg-accent-hover"
           onClick={() => setUploadOpen(true)}
@@ -398,6 +464,7 @@ function Row({
 }
 
 function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const { notify } = useUiFeedback();
   const [file, setFile] = useState<File | null>(null);
   const [category, setCategory] = useState<string>(KNOWLEDGE_CATEGORIES[0]);
   const [industry, setIndustry] = useState("");
@@ -410,7 +477,7 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
       await knowledge.upload(file, category, title.trim() || undefined, industry.trim() || undefined);
       onDone();
     } catch (e) {
-      alert("上传失败：" + (e instanceof Error ? e.message : "未知错误"));
+      notify("上传失败：" + (e instanceof Error ? e.message : "未知错误"), "error");
     } finally {
       setBusy(false);
     }
@@ -476,6 +543,7 @@ function MetaModal({
   onClose: () => void;
   onDone: (updated: KnowledgeItemResponse) => void;
 }) {
+  const { notify } = useUiFeedback();
   const [title, setTitle] = useState(item.title);
   const [category, setCategory] = useState(item.category);
   const [industry, setIndustry] = useState(item.industry ?? "");
@@ -492,7 +560,7 @@ function MetaModal({
       });
       onDone(r);
     } catch (e) {
-      alert("保存失败：" + (e instanceof Error ? e.message : "未知错误"));
+      notify("保存失败：" + (e instanceof Error ? e.message : "未知错误"), "error");
     } finally {
       setBusy(false);
     }

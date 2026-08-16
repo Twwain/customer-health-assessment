@@ -69,7 +69,7 @@ bash start.sh        # Linux / Git Bash
 
 - 首次运行自动创建 SQLite 数据库并 seed 演示数据（13 条示例客户）。
 - 后端依赖安装：`pip install -r backend/requirements.txt`。
-- 前端依赖使用 **pnpm** 管理（仓库已含 `frontend/pnpm-lock.yaml`；Codex 沙箱内 npm 读取被拦时，可用 `frontend/node_modules` 已装依赖直接运行）。需先 `cd frontend && pnpm install`，再 `pnpm run dev`（或经 `start.sh` 自动拉起）。
+- 前端依赖统一使用 **npm** 管理（仓库仅保留 `frontend/package-lock.json`）。需先 `cd frontend && npm ci`，再 `npm run dev`（或经 `start.sh` 自动拉起）。
 - 配置 LLM：复制 `.env.example`（仓库根目录）为 `backend/.env` 并填入 Key（不填则自动降级；Docker 由 `docker-compose.yml` 的 `env_file: ./backend/.env` 注入，无需文件）。
 
 ### Docker 部署
@@ -166,7 +166,7 @@ Dockerfile / docker-compose.yml / deploy.sh / start.sh / start.bat / .env.exampl
 cd backend && python -m pytest tests/ -v
 ```
 
-覆盖：评分配置化、评估历史与趋势、LLM 适配与 SSE 对话、RAG 检索、Agent Loop（检索→推理→自批判→精炼）、报告整合（AI 解析 / 离线降级 / 趋势图）。前端以 `pnpm run build` + `pnpm run lint` + `pnpm run test`（vitest）验证。
+覆盖：评分配置化、评估历史与趋势、LLM 适配与 SSE 对话、RAG 检索、Agent Loop（检索→推理→自批判→精炼）、报告整合（AI 解析 / 离线降级 / 趋势图）。前端以 `npm run build` + `npm run lint` + `npm run test`（vitest）验证。
 
 ## 部署要点
 

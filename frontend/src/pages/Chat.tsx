@@ -13,6 +13,7 @@ import { useLLMStatus } from "../statusContext";
 import { renderMarkdown } from "../lib/ui";
 import HealthCard from "../components/HealthCard";
 import { RefsBox, StrategyList } from "../components/StrategyList";
+import { useUiFeedback } from "../components/UiFeedback";
 
 interface StreamMsg {
   role: "assistant";
@@ -44,6 +45,7 @@ export default function Chat() {
   const location = useLocation();
   const navigate = useNavigate();
   const { status } = useLLMStatus();
+  const { notify, confirm: confirmAction } = useUiFeedback();
 
   const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [stream, setStream] = useState<StreamMsg | null>(null);
@@ -76,6 +78,7 @@ export default function Chat() {
   };
   const startPolling = (id: number) => {
     stopPolling();
+    // eslint-disable-next-line react-hooks/purity -- 轮询超时基准必须取启动时的当前时间
     const startedAt = Date.now();
     pollRef.current = window.setInterval(() => {
       if (Date.now() - startedAt > 120000) {
@@ -283,7 +286,7 @@ export default function Chat() {
 
   const exportPdf = async () => {
     if (!sessionCustomerId) {
-      alert("该会话未关联客户，无法生成报告");
+      notify("该会话未关联客户，无法生成报告", "error");
       return;
     }
     setExporting(true);
@@ -293,7 +296,7 @@ export default function Chat() {
       const job = await customers.pdfJob(sessionCustomerId, true);
       setExportJob({ id: job.job_id, status: job.status });
     } catch {
-      alert("导出任务创建失败，请稍后重试");
+      notify("导出任务创建失败，请稍后重试", "error");
       setExporting(false);
     }
   };
@@ -317,17 +320,17 @@ export default function Chat() {
           setExportJob({ id: jobId, status: s.status });
           setExporting(false);
           if (s.status === "error") {
-            alert("报告生成失败：" + (s.error || "未知错误"));
+            notify("报告生成失败：" + (s.error || "未知错误"), "error");
           }
         }
       } catch {
         clearInterval(timer);
         setExporting(false);
-        alert("导出任务状态获取失败，请重试");
+        notify("导出任务状态获取失败，请重试", "error");
       }
     }, 2000);
     return () => clearInterval(timer);
-  }, [exportJob, sessionCustomerId]);
+  }, [exportJob, sessionCustomerId, notify]);
 
   const cancelExport = () => {
     // 仅停止前端轮询与状态，后端任务会在 TTL 内自行回收
@@ -351,18 +354,18 @@ export default function Chat() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       setExportJob(null);
     } catch {
-      alert("报告下载失败，请重试");
+      notify("报告下载失败，请重试", "error");
     }
   };
 
   const deleteSession = async () => {
     if (!sessionIdNum) return;
-    if (!confirm("确定删除该会话？")) return;
+    if (!(await confirmAction("确定删除该会话？", { title: "删除会话", confirmText: "确认删除", danger: true }))) return;
     try {
       await chat.deleteSession(sessionIdNum);
       navigate("/chat");
     } catch {
-      alert("删除失败");
+      notify("删除失败", "error");
     }
   };
 
@@ -373,7 +376,7 @@ export default function Chat() {
     chat
       .createSession({ title: `${c.customer_name} · ${SCENE_LABEL[sc]}`, customer_id: c.id, scenario: sc })
       .then((s) => navigate(`/chat/${s.id}`, { state: { autoScenario: sc } }))
-      .catch(() => alert("创建会话失败"));
+      .catch(() => notify("创建会话失败", "error"));
   };
 
   const picker = pickerOpen && (

@@ -431,6 +431,39 @@ def test_update_approve_delete_reindex_status(app_client):
     assert app_client.get("/api/knowledge/items").json()["total"] == 0
 
 
+def test_async_reindex_job_reports_completion(app_client):
+    files = {"file": ("async.md", io.BytesIO(METHODOLOGY_MD.encode("utf-8")), "text/markdown")}
+    app_client.post("/api/knowledge/upload", files=files, data={"category": "内部规范"})
+
+    created = app_client.post("/api/knowledge/reindex/jobs", json={})
+    assert created.status_code == 200
+    assert created.json()["status"] == "running"
+
+    status = app_client.get(f"/api/knowledge/reindex/jobs/{created.json()['job_id']}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "ready"
+    assert status.json()["reindexed"] >= 1
+
+
+def test_reindex_job_sweep_marks_stale_running_job_as_error(monkeypatch):
+    from routers import knowledge as knowledge_router
+
+    knowledge_router._reindex_jobs.clear()
+    knowledge_router._reindex_jobs["stale"] = {
+        "status": "running",
+        "created": 100.0,
+        "reindexed": 0,
+        "error": None,
+    }
+    monkeypatch.setattr(knowledge_router, "_REINDEX_JOB_TTL", 60)
+
+    knowledge_router._sweep_reindex_jobs(now=161.0)
+
+    assert knowledge_router._reindex_jobs["stale"]["status"] == "error"
+    assert knowledge_router._reindex_jobs["stale"]["error"] == "重建索引超时"
+    knowledge_router._reindex_jobs.clear()
+
+
 # ══════════════════ 分类规范化与历史数据迁移（2026-08 第二轮修复）═══════════════════
 
 

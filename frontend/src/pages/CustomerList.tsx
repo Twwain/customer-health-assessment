@@ -13,6 +13,7 @@ import { LevelBadge } from "../components/Badges";
 import { Sparkline, TrendChart } from "../components/Charts";
 import CustomerForm from "../components/CustomerForm";
 import { BASIC_FIELDS } from "../lib/customerFields";
+import { useUiFeedback } from "../components/UiFeedback";
 
 interface Row {
   customer: CustomerResponse;
@@ -28,6 +29,7 @@ const resolveLevels = (config: FactorConfigResponse | null): LevelSpec[] =>
 export default function CustomerList() {
   const navigate = useNavigate();
   const isMobile = useIsMobile();
+  const { notify, confirm: confirmAction } = useUiFeedback();
 
   const [rows, setRows] = useState<CustomerResponse[]>([]);
   const [assess, setAssess] = useState<Record<number, AssessmentResponse | null>>({});
@@ -154,9 +156,10 @@ export default function CustomerList() {
         .catch(() => {});
       setFactorDrawer(null);
     } catch (e) {
-      alert(
+      notify(
         `${basicSaved ? "基本信息已保存；" : ""}保存失败：` +
           (e instanceof Error ? e.message : "未知错误"),
+        "error",
       );
       // 基本信息已落库时刷新列表同步显示，抽屉保留以便重试因子部分
       if (basicSaved) {
@@ -178,13 +181,13 @@ export default function CustomerList() {
       });
       navigate(`/chat/${s.id}`, { state: { autoScenario: "assessment" } });
     } catch {
-      alert("创建评估会话失败");
+      notify("创建评估会话失败", "error");
     }
   };
 
   const deleteCustomer = async (c: CustomerResponse) => {
     if (deleting !== null) return;
-    if (!window.confirm(`确定删除客户「${c.customer_name}」吗？此操作不可恢复。`)) return;
+    if (!(await confirmAction(`确定删除客户「${c.customer_name}」吗？此操作不可恢复。`, { title: "删除客户", confirmText: "确认删除", danger: true }))) return;
     setDeleting(c.id);
     try {
       await customers.remove(c.id);
@@ -201,7 +204,7 @@ export default function CustomerList() {
         return next;
       });
     } catch (e) {
-      alert("删除失败：" + (e instanceof Error ? e.message : "未知错误"));
+      notify("删除失败：" + (e instanceof Error ? e.message : "未知错误"), "error");
     } finally {
       setDeleting(null);
     }
@@ -628,6 +631,7 @@ function AddCustomerModal({
   onClose: () => void;
   onDone: () => void;
 }) {
+  const { notify } = useUiFeedback();
   const [tab, setTab] = useState<"single" | "import">("single");
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [file, setFile] = useState<File | null>(null);
@@ -645,7 +649,7 @@ function AddCustomerModal({
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch {
-      alert("模板下载失败，请稍后重试");
+      notify("模板下载失败，请稍后重试", "error");
     }
   };
 
@@ -665,7 +669,7 @@ function AddCustomerModal({
       if (Object.keys(factors).length) await customers.updateFactors(c.id, factors);
       onDone();
     } catch (e) {
-      alert("创建失败：" + (e instanceof Error ? e.message : "未知错误"));
+      notify("创建失败：" + (e instanceof Error ? e.message : "未知错误"), "error");
       setBusy(false);
     }
   };
@@ -675,10 +679,10 @@ function AddCustomerModal({
     setBusy(true);
     try {
       const r = await customers.import(file);
-      alert(`导入完成：新建 ${r.created ?? 0} 条${r.errors?.length ? `，${r.errors.length} 条出错` : ""}`);
+      notify(`导入完成：新建 ${r.created ?? 0} 条${r.errors?.length ? `，${r.errors.length} 条出错` : ""}`, "success");
       onDone();
     } catch (e) {
-      alert("导入失败：" + (e instanceof Error ? e.message : "未知错误"));
+      notify("导入失败：" + (e instanceof Error ? e.message : "未知错误"), "error");
       setBusy(false);
     }
   };

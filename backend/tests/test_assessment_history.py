@@ -11,6 +11,8 @@ from database import Base
 from models import AssessmentHistory, ChatMessage, ChatSession, Customer, KnowledgeChunk
 from services import assessment_history
 from services.scoring import get_scoring_strategy
+from routers.assessment import get_overview
+from routers.customers import list_customers
 
 
 @pytest.fixture()
@@ -91,6 +93,47 @@ def test_unchanged_assessment_is_not_duplicated(db, customer):
     assert assessment_history.record_assessment(db, customer) is not None
     assert assessment_history.record_assessment(db, customer) is None
     assert db.query(AssessmentHistory).count() == 1
+
+
+def test_overview_uses_latest_snapshot_without_live_rescoring(db, customer, monkeypatch):
+    record = assessment_history.record_assessment(db, customer)
+    expected_score = record.total_score
+
+    class SnapshotOnlyStrategy:
+        config = get_scoring_strategy().config
+
+        def evaluate(self, _customer):
+            raise AssertionError("已有快照的客户不应在 overview 中实时重算")
+
+    monkeypatch.setattr("routers.assessment.get_scoring_strategy", lambda: SnapshotOnlyStrategy())
+    result = get_overview(db)
+
+    assert result.total_customers == 1
+    assert result.avg_score == expected_score
+    assert result.level_distribution[record.level] == 1
+
+
+def test_level_filter_uses_latest_snapshot_and_database_pagination(db, customer):
+    assessment_history.record_assessment(db, customer)
+    other = Customer(customer_name="健康客户", industry="制造", custom_fields={})
+    db.add(other)
+    db.commit()
+    db.refresh(other)
+    assessment_history.record_assessment(db, other)
+    latest_other = (
+        db.query(AssessmentHistory)
+        .filter(AssessmentHistory.customer_id == other.id)
+        .order_by(AssessmentHistory.id.desc())
+        .first()
+    )
+    latest_other.level = "健康"
+    latest_other.total_score = 88
+    db.commit()
+
+    result = list_customers(search="", industry="", level="健康", page=1, page_size=1, db=db)
+
+    assert result.total == 1
+    assert [item.id for item in result.items] == [other.id]
 
 
 def test_force_record_when_unchanged(db, customer):

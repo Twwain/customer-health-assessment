@@ -18,10 +18,13 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
+import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from config import KNOWLEDGE_DATA_DIR, RERANKER
 from database import get_db
@@ -49,6 +52,43 @@ from services.rag.retriever import RetrievedChunk
 from services.rag.vector_store import get_vector_store
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+
+_reindex_jobs: dict[str, dict] = {}
+_reindex_jobs_lock = threading.Lock()
+_REINDEX_JOB_TTL = 3600
+
+
+def _sweep_reindex_jobs(now: float | None = None) -> None:
+    """标记超时任务并限制进程内历史状态数量（须在锁内调用）。"""
+    now = now or time.time()
+    for job in _reindex_jobs.values():
+        if job["status"] == "running" and now - job["created"] > _REINDEX_JOB_TTL:
+            job.update(status="error", error="重建索引超时", finished=now)
+
+    done = sorted(
+        (job_id for job_id, job in _reindex_jobs.items() if job["status"] != "running"),
+        key=lambda job_id: _reindex_jobs[job_id]["created"],
+    )
+    for old_id in done[:-19]:
+        _reindex_jobs.pop(old_id, None)
+
+
+def _run_reindex_job(job_id: str, category: str | None, bind) -> None:
+    session_factory = sessionmaker(bind=bind, autoflush=False, autocommit=False)
+    db = session_factory()
+    try:
+        count = _svc(db).reindex(category=category)
+        with _reindex_jobs_lock:
+            job = _reindex_jobs.get(job_id)
+            if job is not None and job["status"] == "running":
+                job.update(status="ready", reindexed=count, finished=time.time())
+    except Exception as exc:  # noqa: BLE001 - 后台任务通过状态接口报告错误
+        with _reindex_jobs_lock:
+            job = _reindex_jobs.get(job_id)
+            if job is not None and job["status"] == "running":
+                job.update(status="error", error=str(exc), finished=time.time())
+    finally:
+        db.close()
 
 
 def _svc(db: Session) -> KnowledgeBaseService:
@@ -258,6 +298,45 @@ def reindex(
     category = payload.category if payload else None
     count = _svc(db).reindex(category=category)
     return KnowledgeReindexResponse(reindexed=count)
+
+
+@router.post("/reindex/jobs")
+def create_reindex_job(
+    background_tasks: BackgroundTasks,
+    payload: KnowledgeReindexRequest | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """异步重建索引；前端通过 job 状态轮询展示生成进度。"""
+    category = payload.category if payload else None
+    with _reindex_jobs_lock:
+        _sweep_reindex_jobs()
+        if any(job["status"] == "running" for job in _reindex_jobs.values()):
+            raise HTTPException(status_code=429, detail="索引正在重建，请等待当前任务完成")
+        job_id = uuid.uuid4().hex
+        _reindex_jobs[job_id] = {
+            "status": "running",
+            "category": category,
+            "reindexed": 0,
+            "error": None,
+            "created": time.time(),
+        }
+    background_tasks.add_task(_run_reindex_job, job_id, category, db.get_bind())
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/reindex/jobs/{job_id}")
+def get_reindex_job(job_id: str) -> dict:
+    with _reindex_jobs_lock:
+        _sweep_reindex_jobs()
+        job = _reindex_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="重建索引任务不存在")
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "reindexed": job["reindexed"],
+            "error": job["error"],
+        }
 
 
 # ── 结构化知识指标─────────────
