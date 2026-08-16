@@ -11,8 +11,8 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # 生产可选依赖开关（默认安装）：
-#   INSTALL_PROD_DEPS=1（默认）→ 安装 chromadb / pymupdf / python-docx / FlagEmbedding
-#   INSTALL_PROD_DEPS=0      → 跳过（镜像从 ~10GB 降到 ~0.7GB），系统自动回退
+#   INSTALL_PROD_DEPS=1（默认）→ 安装 chromadb / pymupdf / python-docx
+#   INSTALL_PROD_DEPS=0      → 跳过（镜像进一步缩小），系统自动回退
 #                              内存向量库 / metadata 重排 / 基础文档解析，核心功能不受影响。
 # 内存受限的服务器（如 1G RAM）建议关闭，用 docker compose build --build-arg INSTALL_PROD_DEPS=0
 ARG INSTALL_PROD_DEPS=1
@@ -32,12 +32,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 
 # 生产可选依赖：缺失时系统自动回退内存实现，不影响核心功能
-# （chromadb 向量库 / pymupdf / python-docx 文档解析 / FlagEmbedding 重排）
+# （chromadb 向量库 / pymupdf / python-docx 文档解析）
 RUN if [ "$INSTALL_PROD_DEPS" = "1" ]; then \
       pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements-prod.txt || { \
         echo "===================== WARNING ====================="; \
         echo "可选依赖安装失败！RAG 向量库 / PDF 解析 / 重排将回退内存实现，"; \
-        echo "知识库检索能力显著降级。请检查网络或私有 PyPI 源后重建镜像。"; \
+        echo "知识库向量检索或文档解析能力将降级。请检查网络或私有 PyPI 源后重建镜像。"; \
         echo "==================================================="; \
       }; \
     else \

@@ -81,7 +81,7 @@ docker compose up -d --build
 # 访问 http://localhost （后端同时托管前端静态资源）
 ```
 
-- 生产可选依赖（chromadb / pymupdf / python-docx / FlagEmbedding）由 `backend/requirements-prod.txt` 安装；任一缺失时镜像仍正常构建并回退内存实现。
+- 生产可选依赖（chromadb / pymupdf / python-docx）由 `backend/requirements-prod.txt` 安装；任一缺失时镜像仍正常构建并回退内存实现。Docker 镜像默认不安装 FlagEmbedding，以避免引入 PyTorch/CUDA 巨型依赖，重排使用 MetadataReranker。
 - 通过 `docker-compose.yml` 的 `env_file: ./backend/.env` 注入 LLM Key 等配置。
 
 ### 云服务器部署
@@ -170,7 +170,7 @@ cd backend && python -m pytest tests/ -v
 
 ## 部署要点
 
-- **依赖分层**：`requirements.txt`（核心，Python 3.10+ 可直接装，3.12 验证通过）；`requirements-prod.txt`（chromadb / pymupdf / python-docx / FlagEmbedding，Docker 安装，缺失自动回退）。
+- **依赖分层**：`requirements.txt`（核心，Python 3.10+ 可直接装，3.12 验证通过）；`requirements-prod.txt`（chromadb / pymupdf / python-docx，Docker 安装，缺失自动回退）。
 - **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；未装自动回退 `memory`（基础功能可用）。
 - **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 雅黑 / macOS PingFang / Linux 文泉驿）。
 - **数据持久化**：挂载 `./data:/app/data`，数据库与向量库落盘。

@@ -17,4 +17,7 @@ services:
       - ${CH_SECRET_FILE:-./.ch_secret}:/run/secrets/ch_secret:ro
     env_file:
       - ./backend/.env
+    environment:
+      # Docker 中强制写入挂载目录，避免 backend/.env 的本地开发路径覆盖持久化配置。
+      DB_PATH: /app/data/customer_health.db
     restart: unless-stopped

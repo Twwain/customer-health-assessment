@@ -1,10 +1,10 @@
 # 生产 / Docker 可选依赖
 #
-# 这些依赖在本地开发（Python 3.14）环境下可能缺少可用 wheel（如 chromadb / onnxruntime / torch），
+# 这些依赖在本地开发（Python 3.14）环境下可能缺少可用 wheel（如 chromadb / onnxruntime），
 # 因此与核心依赖分离。未安装时系统自动回退到内存实现，核心功能不受影响：
 #   - chromadb 未装 → 向量库回退 InMemoryVectorStore（KNOWLEDGE_VECTOR_STORE=chroma 时才需要）
 #   - pymupdf / python-docx 未装 → 知识库上传仅支持 md/txt/csv（pdf/xlsx/docx 解析为 lazy import）
-#   - FlagEmbedding 未装 → 重排回退 MetadataReranker（RERANKER=bge 时才需要）
+#   - BGE 重排不随生产镜像安装，统一使用 MetadataReranker，避免引入 PyTorch/CUDA 巨型依赖
 #
 # Docker 部署会安装本文件（见 Dockerfile），使向量库与多种文档解析在生产环境生效。
 # 安装：pip install -r requirements-prod.txt
@@ -12,4 +12,3 @@
 chromadb>=0.5.0          # 向量库（KNOWLEDGE_VECTOR_STORE=chroma 时启用）
 pymupdf>=1.24.0          # PDF 文档解析（知识库上传 PDF）
 python-docx>=1.1.0       # DOCX 文档解析
-FlagEmbedding>=1.2.0     # BGE 重排（RERANKER=bge 时启用，需 torch，体积较大）
