@@ -445,6 +445,19 @@ def test_async_reindex_job_reports_completion(app_client):
     assert status.json()["reindexed"] >= 1
 
 
+def test_sync_reindex_rejects_when_another_reindex_is_running(app_client):
+    from routers import knowledge as knowledge_router
+
+    assert knowledge_router._reindex_operation_lock.acquire(blocking=False)
+    try:
+        response = app_client.post("/api/knowledge/reindex", json={})
+    finally:
+        knowledge_router._reindex_operation_lock.release()
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "索引正在重建，请等待当前任务完成"
+
+
 def test_reindex_job_sweep_marks_stale_running_job_as_error(monkeypatch):
     from routers import knowledge as knowledge_router
 

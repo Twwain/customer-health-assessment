@@ -1489,6 +1489,41 @@ def test_free_qa_runs_customer_compare_tool(db, customer):
     assert '"count"' in tool_msg["content"] and '"customers"' in tool_msg["content"]
 
 
+def test_free_qa_discards_text_emitted_with_tool_call(db, customer):
+    """工具调用轮伴随文本时，应清除临时草稿并只持久化工具后的正式回答。"""
+
+    class DraftingToolAdapter(ToolCallingFakeAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append(list(messages))
+            self.tool_args.append(kwargs.get("tools"))
+            self.rounds += 1
+            if self.rounds <= self.tool_rounds:
+                on_tool_calls = kwargs.get("on_tool_calls")
+                if on_tool_calls:
+                    on_tool_calls(self.tool_calls)
+                yield "工具调用前的临时草稿"
+                return
+            yield from self.final_chunks
+
+    adapter = DraftingToolAdapter(
+        tool_calls=[{"id": "call_draft", "name": "customer_compare", "arguments": "{}"}],
+        final_chunks=["基于工具结果的最终结论"],
+    )
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(
+        db, title="", customer_id=customer.id, scenario="free_qa"
+    )
+
+    events = list(chat_engine.run_turn(db, session, content="对比"))
+    done = next(event for event in events if event.type == "done")
+
+    assert any(
+        event.type == "replace" and event.data.get("reason") == "tool_followup"
+        for event in events
+    )
+    assert done.data["message"]["content"] == "基于工具结果的最终结论"
+
+
 def test_knowledge_search_tool_dedups_and_returns_refs(db, monkeypatch):
     from services.rag.retriever import RetrievedChunk as RC
 
@@ -1683,6 +1718,42 @@ def test_graph_builder_tool_round_cap_finishes_with_final_call(db, customer):
     assert len(adapter.calls) == 6
     assert adapter.tool_args[-1] is None
     assert agent._tool_warning
+
+
+def test_graph_builder_tool_round_cap_discards_tool_call_draft(db, customer):
+    """模型边输出草稿边请求工具时，最终答案不得重新拼回已清除的草稿。"""
+    from services.ai.graph_builder import AssessmentStrategyAgent
+    from services.ai.prompt_templates import get_template
+
+    class DraftingToolAdapter(ToolCallingFakeAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append(list(messages))
+            self.tool_args.append(kwargs.get("tools"))
+            self.rounds += 1
+            if self.rounds <= self.tool_rounds:
+                on_tool_calls = kwargs.get("on_tool_calls")
+                if on_tool_calls:
+                    on_tool_calls(self.tool_calls)
+                yield "工具调用前的临时草稿"
+                return
+            yield from self.final_chunks
+
+    adapter = DraftingToolAdapter(
+        tool_calls=[{"id": "call_draft", "name": "customer_compare", "arguments": "{}"}],
+        final_chunks=["基于工具结果的最终结论"],
+        tool_rounds=5,
+    )
+    agent = AssessmentStrategyAgent(adapter=adapter)
+    messages = [
+        llm_adapter.LLMMessage(role="system", content="sys"),
+        llm_adapter.LLMMessage(role="user", content="问"),
+    ]
+
+    text, _ = agent._call_llm_with_tools(
+        messages, get_template("assessment"), customer=customer, db=db
+    )
+
+    assert text == "基于工具结果的最终结论"
 
 
 def test_usage_counts_last_value_per_round(db, customer):

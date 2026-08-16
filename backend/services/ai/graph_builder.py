@@ -220,7 +220,9 @@ class AssessmentStrategyAgent:
                     stream, phase="tool_final", messages=messages,
                     max_tokens=max_tokens, usage=usage,
                 )
-                return text + final_text, refs
+                # 当前工具轮的草稿已经通过 replace 从客户端清除；收尾请求
+                # 才是基于工具结果生成的正式答案，持久化时也只保留它。
+                return final_text, refs
 
     def _refine(self, ctx, references, draft, critique_text, question, today, template, scenario: str = "strategy") -> str:
         system_text = template.render_system(today=today)

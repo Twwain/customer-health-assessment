@@ -55,6 +55,7 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 _reindex_jobs: dict[str, dict] = {}
 _reindex_jobs_lock = threading.Lock()
+_reindex_operation_lock = threading.Lock()
 _REINDEX_JOB_TTL = 3600
 
 
@@ -89,6 +90,7 @@ def _run_reindex_job(job_id: str, category: str | None, bind) -> None:
                 job.update(status="error", error=str(exc), finished=time.time())
     finally:
         db.close()
+        _reindex_operation_lock.release()
 
 
 def _svc(db: Session) -> KnowledgeBaseService:
@@ -296,8 +298,13 @@ def reindex(
     db: Session = Depends(get_db),
 ) -> KnowledgeReindexResponse:
     category = payload.category if payload else None
-    count = _svc(db).reindex(category=category)
-    return KnowledgeReindexResponse(reindexed=count)
+    if not _reindex_operation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="索引正在重建，请等待当前任务完成")
+    try:
+        count = _svc(db).reindex(category=category)
+        return KnowledgeReindexResponse(reindexed=count)
+    finally:
+        _reindex_operation_lock.release()
 
 
 @router.post("/reindex/jobs")
@@ -310,7 +317,7 @@ def create_reindex_job(
     category = payload.category if payload else None
     with _reindex_jobs_lock:
         _sweep_reindex_jobs()
-        if any(job["status"] == "running" for job in _reindex_jobs.values()):
+        if not _reindex_operation_lock.acquire(blocking=False):
             raise HTTPException(status_code=429, detail="索引正在重建，请等待当前任务完成")
         job_id = uuid.uuid4().hex
         _reindex_jobs[job_id] = {
@@ -320,7 +327,13 @@ def create_reindex_job(
             "error": None,
             "created": time.time(),
         }
-    background_tasks.add_task(_run_reindex_job, job_id, category, db.get_bind())
+    try:
+        background_tasks.add_task(_run_reindex_job, job_id, category, db.get_bind())
+    except Exception:
+        _reindex_operation_lock.release()
+        with _reindex_jobs_lock:
+            _reindex_jobs.pop(job_id, None)
+        raise
     return {"job_id": job_id, "status": "running"}
 
 

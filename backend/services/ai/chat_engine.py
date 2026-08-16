@@ -559,6 +559,7 @@ def run_turn(
                 call_started = time.monotonic()
                 call_ttft_ms: int | None = None
                 call_output_chars = 0
+                round_chunks: list[str] = []
                 visible_sanitizer = guardrails.StreamingOutputSanitizer()
                 stream = adapter.stream_chat_completion(
                     messages,
@@ -576,7 +577,7 @@ def run_turn(
                         if call_ttft_ms is None:
                             call_ttft_ms = int((time.monotonic() - call_started) * 1000)
                         call_output_chars += len(delta)
-                        chunks.append(delta)
+                        round_chunks.append(delta)
                         visible_delta = visible_sanitizer.feed(delta)
                         if visible_delta:
                             _mark_client_delta()
@@ -607,7 +608,12 @@ def run_turn(
                     })
                 used_tokens += round_tokens
                 if not tool_calls:
+                    chunks.extend(round_chunks)
                     break
+                if round_chunks:
+                    # 本轮文本是模型发起工具调用前的临时草稿；工具结果回填后
+                    # 会重新生成正式答案，因此清空客户端展示且不写入持久化内容。
+                    yield TurnEvent("replace", {"text": "", "reason": "tool_followup"})
                 tool_rounds += 1
                 timings["tool_rounds"] = tool_rounds
                 tool_started = time.monotonic()
@@ -685,6 +691,7 @@ def run_turn(
                 chunks.append(piece)
                 yield TurnEvent("delta", {"text": piece})
         except LLMError as exc:  # 已经吐了一部分字，保留残文并提示
+            chunks.extend(round_chunks)
             warnings.append(f"生成中断：{exc}")
             yield TurnEvent("warning", {"message": f"生成中断：{exc}"})
         except Exception as exc:  # noqa: BLE001 - 兜底，保证前端一定收到结束事件
