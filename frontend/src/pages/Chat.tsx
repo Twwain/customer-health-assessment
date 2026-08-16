@@ -133,6 +133,9 @@ export default function Chat() {
       case "delta":
         next = { ...cur, content: cur.content + (ev.data.text as string) };
         break;
+      case "replace":
+        next = { ...cur, content: (ev.data.text as string | undefined) || "" };
+        break;
       case "strategy":
         next = { ...cur, strategy_items: ev.data.items as StrategyItem[] };
         break;

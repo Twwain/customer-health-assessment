@@ -140,6 +140,9 @@ LLM_STREAM_USAGE = _env_bool("LLM_STREAM_USAGE", True)
 # 关闭后对话仍可正常生成，只是不再主动检索与对比；不兼容 function calling
 # 的供应商会在适配器层收到 400 后自动去掉 tools 重试，无需改这里。
 LLM_TOOLS_ENABLED = _env_bool("LLM_TOOLS_ENABLED", True)
+# DeepSeek V4 默认开启 thinking。交互对话优先首字速度，PDF 报告优先分析质量。
+LLM_CHAT_THINKING_ENABLED = _env_bool("LLM_CHAT_THINKING_ENABLED", False)
+LLM_REPORT_THINKING_ENABLED = _env_bool("LLM_REPORT_THINKING_ENABLED", True)
 
 
 # ══════════════════════════ Embedding═══════════════════════════

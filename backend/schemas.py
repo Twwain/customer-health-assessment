@@ -335,6 +335,7 @@ class ChatTurnResponse(BaseModel):
     degraded: bool = False
     tokens_used: int = 0
     latency_ms: int = 0
+    timings: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     error: str = ""
 
@@ -361,6 +362,8 @@ class LLMStatusResponse(BaseModel):
     embedding_available: bool = False
     prompt_version: str = ""
     scenarios: list[str] = Field(default_factory=list)
+    chat_thinking_enabled: bool = False
+    report_thinking_enabled: bool = True
 
 
 # ════════════════════════ 知识库 RAG═══════════════════════

@@ -13,6 +13,7 @@
 | start      | 开始生成       | session_id / scenario / degraded / model / user_message_id |
 | context    | 有客户上下文时 | assessment / trend（前端 HealthCard 直接渲染） |
 | delta      | 每个增量       | text |
+| replace    | 草稿需替换     | text / reason（工具续写或精炼时清空旧草稿） |
 | strategy   | 策略解析完成   | items（结构化策略条目） |
 | references | 有知识引用时   | items |
 | warning    | 生成中断等     | message |
@@ -24,10 +25,12 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
+import queue
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator
 
 from sqlalchemy.orm import Session
@@ -52,6 +55,8 @@ from .prompt_templates import DEFAULT_SCENARIO, SCENARIOS, get_template
 from .strategy import generate, split_strategy_payload
 from .tools import MAX_TOOL_ROUNDS, TOOL_SCHEMAS, append_tool_results
 
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_TITLE = "新对话"
 TITLE_MAX_CHARS = 16
@@ -61,6 +66,7 @@ TITLE_MAX_CHARS = 16
 # 也天然支持同一会话并发生成的互斥判定。会话详情 / 列表接口据此返回 streaming。
 _STREAMING_SESSION_IDS: set[int] = set()
 _STREAMING_LOCK = threading.Lock()
+AGENT_CANCEL_JOIN_SECONDS = 0.25
 
 
 def is_session_streaming(session_id: int) -> bool:
@@ -295,6 +301,52 @@ def _merge_references(*groups: list[dict] | None) -> list[dict]:
     return merged
 
 
+def _message_chars(messages: list[LLMMessage | dict]) -> int:
+    return sum(
+        len(str(m.content if isinstance(m, LLMMessage) else m.get("content", "")))
+        for m in messages
+    )
+
+
+class _VisibleAgentStream:
+    """过滤策略机器 JSON，并对可见 Agent 增量做跨 chunk 脱敏。"""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside_json = False
+        self._sanitizer = guardrails.StreamingOutputSanitizer()
+
+    def feed(self, text: str) -> str:
+        self._pending += text or ""
+        visible: list[str] = []
+        while self._pending:
+            if self._inside_json:
+                end = self._pending.find("```")
+                if end < 0:
+                    self._pending = self._pending[-2:]
+                    break
+                self._pending = self._pending[end + 3:]
+                self._inside_json = False
+                continue
+            match = re.search(r"```json\s*", self._pending, re.IGNORECASE)
+            if match is None:
+                keep = min(6, len(self._pending))
+                if len(self._pending) > keep:
+                    visible.append(self._pending[:-keep])
+                    self._pending = self._pending[-keep:]
+                break
+            visible.append(self._pending[:match.start()])
+            self._pending = self._pending[match.end():]
+            self._inside_json = True
+        return self._sanitizer.feed("".join(visible))
+
+    def flush(self) -> str:
+        visible = "" if self._inside_json else self._pending
+        self._pending = ""
+        self._inside_json = False
+        return self._sanitizer.feed(visible) + self._sanitizer.flush()
+
+
 def run_turn(
     db: Session,
     session: ChatSession,
@@ -307,6 +359,14 @@ def run_turn(
 ) -> Iterator[TurnEvent]:
     """执行一轮对话，产出事件流。异常一律转成 error 事件，不向上抛。"""
     started = time.monotonic()
+    timings: dict[str, Any] = {
+        "scoring_ms": 0, "context_ms": 0, "rag_ms": 0,
+        "embedding_ms": 0, "vector_query_ms": 0, "rerank_ms": 0,
+        "generation_ms": 0, "tool_ms": 0, "persist_ms": 0,
+        "time_to_first_client_delta_ms": None,
+        "llm_calls": [], "llm_call_count": 0,
+        "tool_rounds": 0, "refine_rounds": 0,
+    }
     scenario = scenario if scenario in SCENARIOS else (session.scenario or DEFAULT_SCENARIO)
     question, hits = guardrails.sanitize_input(content)
     if not question and persist_user and scenario in ("assessment", "strategy", "alert_analysis"):
@@ -318,6 +378,7 @@ def run_turn(
     if customer and not session.customer_id:
         session.customer_id = customer.id
 
+    persist_started = time.monotonic()
     user_message: ChatMessage | None = None
     if persist_user and question:
         user_message = ChatMessage(session_id=session.id, role="user", content=question)
@@ -326,6 +387,7 @@ def run_turn(
 
     _auto_title(session, question, customer, scenario)
     db.commit()
+    timings["persist_ms"] = int((time.monotonic() - persist_started) * 1000)
 
     adapter = get_chat_adapter()
     yield TurnEvent(
@@ -342,6 +404,7 @@ def run_turn(
 
     # ① 量化评估引擎 —— 先算分，再让 AI 解读
     assessment = None
+    scoring_started = time.monotonic()
     if customer is not None:
         assessment = get_scoring_strategy().evaluate(customer)
         if scenario == "assessment":
@@ -349,16 +412,20 @@ def run_turn(
             assessment_history.record_assessment(
                 db, customer, assessment, assessed_by="ai", trigger="ai_assessment"
             )
+    timings["scoring_ms"] = int((time.monotonic() - scoring_started) * 1000)
 
     # Agent 场景由 Agent Loop 自行检索（tools.rag_retrieve），这里不重复检索：
     # 避免同一轮对话双重 embedding 调用与知识 hit_count 重复计数
+    context_started = time.monotonic()
     ctx = build_context(
         db,
         customer,
         assessment=assessment,
         query=question,
         retrieve_knowledge=scenario not in AGENT_SCENARIOS,
+        rag_timings=timings,
     )
+    timings["context_ms"] = int((time.monotonic() - context_started) * 1000)
     if ctx.assessment is not None:
         yield TurnEvent(
             "context",
@@ -378,28 +445,98 @@ def run_turn(
     # 既避免只统计最后一轮，也避免同一轮内 usage 重复出现时虚高。
     used_tokens = 0
     round_tokens = 0
+    round_usage: dict[str, Any] = {}
 
     def _collect_usage(u: dict[str, Any]) -> None:
         nonlocal round_tokens
         round_tokens = int(u.get("total_tokens") or 0)
+        round_usage.update(u)
 
     degraded_items: list[dict] = []
     degraded = False
     warnings: list[str] = []
     agent_refs: list[dict] | None = None
+    agent_displayed_text: str | None = None
+    generation_started = time.monotonic()
+
+    def _mark_client_delta() -> None:
+        if timings["time_to_first_client_delta_ms"] is None:
+            timings["time_to_first_client_delta_ms"] = int((time.monotonic() - started) * 1000)
 
     if scenario in AGENT_SCENARIOS:
         # M4：评估 / 策略 / 预警解读走 Agent Loop（检索→推理→自批判→精炼）
-        gen = generate(
-            scenario, ctx, customer, db, adapter=adapter, question=question,
-            tools_enabled=config.LLM_TOOLS_ENABLED,
+        event_queue: queue.Queue[tuple[str, dict] | None] = queue.Queue()
+        agent_result: dict[str, Any] = {}
+        agent_cancelled = threading.Event()
+        customer_id_for_worker = customer.id if customer is not None else None
+
+        def _run_agent() -> None:
+            # 使用同一 Engine 创建独立 Session，既保持测试/多数据库绑定一致，
+            # 又避免跨线程复用调用方的 Session。
+            worker_db = Session(bind=db.get_bind())
+            try:
+                worker_customer = (
+                    worker_db.get(Customer, customer_id_for_worker)
+                    if customer_id_for_worker is not None else None
+                )
+                worker_ctx = replace(ctx, customer=worker_customer)
+                agent_result["value"] = generate(
+                    scenario, worker_ctx, worker_customer, worker_db,
+                    adapter=adapter, question=question,
+                    tools_enabled=config.LLM_TOOLS_ENABLED,
+                    thinking_enabled=config.LLM_CHAT_THINKING_ENABLED,
+                    cancel_event=agent_cancelled,
+                    on_event=lambda event_type, data: (
+                        event_queue.put((event_type, data))
+                        if not agent_cancelled.is_set() else None
+                    ),
+                )
+            except BaseException as exc:  # 传回主生成器，沿用外层 SSE 兜底
+                agent_result["error"] = exc
+            finally:
+                worker_db.close()
+                event_queue.put(None)
+
+        agent_thread = threading.Thread(
+            target=_run_agent, name=f"chat-agent-{session.id}", daemon=True
         )
+        agent_thread.start()
+        visible_stream = _VisibleAgentStream()
+        agent_displayed_text = ""
+        try:
+            while True:
+                queued = event_queue.get()
+                if queued is None:
+                    break
+                event_type, data = queued
+                if event_type == "delta":
+                    text = visible_stream.feed(str(data.get("text") or ""))
+                    if text:
+                        _mark_client_delta()
+                        agent_displayed_text += text
+                        yield TurnEvent("delta", {"text": text, "phase": data.get("phase")})
+                elif event_type == "replace":
+                    visible_stream = _VisibleAgentStream()
+                    agent_displayed_text = ""
+                    yield TurnEvent("replace", {**data, "text": ""})
+        finally:
+            agent_cancelled.set()
+            agent_thread.join(timeout=AGENT_CANCEL_JOIN_SECONDS)
+        if agent_thread.is_alive():
+            return
+        tail = visible_stream.flush()
+        if tail:
+            _mark_client_delta()
+            agent_displayed_text += tail
+            yield TurnEvent("delta", {"text": tail, "phase": "final"})
+        if "error" in agent_result:
+            raise agent_result["error"]
+        gen = agent_result["value"]
         degraded = gen.degraded
         degraded_items = gen.degraded_items
         agent_refs = gen.references
-        for piece in _slice_text(gen.text):
-            chunks.append(piece)
-            yield TurnEvent("delta", {"text": piece})
+        timings.update(gen.timings)
+        chunks.append(gen.text)
         warnings.extend(gen.warnings)
         for w in gen.warnings:
             yield TurnEvent("warning", {"message": w})
@@ -413,11 +550,16 @@ def run_turn(
             tools_enabled = config.LLM_TOOLS_ENABLED
             while True:
                 round_tokens = 0
+                round_usage.clear()
                 tool_calls: list[dict[str, Any]] = []
 
                 def _collect_tool_calls(items: list[dict[str, Any]]) -> None:
                     tool_calls.extend(items)
 
+                call_started = time.monotonic()
+                call_ttft_ms: int | None = None
+                call_output_chars = 0
+                visible_sanitizer = guardrails.StreamingOutputSanitizer()
                 stream = adapter.stream_chat_completion(
                     messages,
                     temperature=template.temperature,
@@ -425,14 +567,50 @@ def run_turn(
                     on_usage=_collect_usage,
                     tools=TOOL_SCHEMAS if tools_enabled else None,
                     on_tool_calls=_collect_tool_calls,
+                    extra={"thinking": {
+                        "type": "enabled" if config.LLM_CHAT_THINKING_ENABLED else "disabled"
+                    }},
                 )
-                for delta in stream:
-                    chunks.append(delta)
-                    yield TurnEvent("delta", {"text": delta})
+                try:
+                    for delta in stream:
+                        if call_ttft_ms is None:
+                            call_ttft_ms = int((time.monotonic() - call_started) * 1000)
+                        call_output_chars += len(delta)
+                        chunks.append(delta)
+                        visible_delta = visible_sanitizer.feed(delta)
+                        if visible_delta:
+                            _mark_client_delta()
+                            yield TurnEvent("delta", {"text": visible_delta})
+                    visible_tail = visible_sanitizer.flush()
+                    if visible_tail:
+                        _mark_client_delta()
+                        yield TurnEvent("delta", {"text": visible_tail})
+                finally:
+                    duration_ms = int((time.monotonic() - call_started) * 1000)
+                    completion_tokens = int(round_usage.get("completion_tokens") or 0)
+                    timings["llm_calls"].append({
+                        "phase": "direct" if tool_rounds == 0 else "tool_followup",
+                        "ttft_ms": call_ttft_ms,
+                        "duration_ms": duration_ms,
+                        "message_count": len(messages),
+                        "prompt_chars": _message_chars(messages),
+                        "output_chars": call_output_chars,
+                        "max_tokens": min(template.max_tokens, config.LLM_MAX_TOKENS),
+                        "thinking_enabled": config.LLM_CHAT_THINKING_ENABLED,
+                        "prompt_tokens": int(round_usage.get("prompt_tokens") or 0),
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": int(round_usage.get("total_tokens") or 0),
+                        "completion_tokens_per_second": (
+                            round(completion_tokens * 1000 / duration_ms, 2)
+                            if completion_tokens and duration_ms else None
+                        ),
+                    })
                 used_tokens += round_tokens
                 if not tool_calls:
                     break
                 tool_rounds += 1
+                timings["tool_rounds"] = tool_rounds
+                tool_started = time.monotonic()
                 messages, refs = append_tool_results(
                     messages,
                     tool_calls,
@@ -440,22 +618,61 @@ def run_turn(
                     db=db,
                     exclude_ids=exclude_ids,
                 )
+                timings["tool_ms"] += int((time.monotonic() - tool_started) * 1000)
                 tool_refs.extend(refs)
                 exclude_ids.update(ref["id"] for ref in refs)
                 if tool_rounds >= MAX_TOOL_ROUNDS:
                     # 已回填本轮工具结果：不带工具收尾一次，避免空回复
                     warnings.append("工具调用次数已达上限，已基于已获取信息作答")
                     round_tokens = 0
+                    round_usage.clear()
+                    call_started = time.monotonic()
+                    call_ttft_ms = None
+                    call_output_chars = 0
+                    visible_sanitizer = guardrails.StreamingOutputSanitizer()
                     stream = adapter.stream_chat_completion(
                         messages,
                         temperature=template.temperature,
                         max_tokens=min(template.max_tokens, config.LLM_MAX_TOKENS),
                         on_usage=_collect_usage,
                         tools=None,
+                        extra={"thinking": {
+                            "type": "enabled" if config.LLM_CHAT_THINKING_ENABLED else "disabled"
+                        }},
                     )
-                    for delta in stream:
-                        chunks.append(delta)
-                        yield TurnEvent("delta", {"text": delta})
+                    try:
+                        for delta in stream:
+                            if call_ttft_ms is None:
+                                call_ttft_ms = int((time.monotonic() - call_started) * 1000)
+                            call_output_chars += len(delta)
+                            chunks.append(delta)
+                            visible_delta = visible_sanitizer.feed(delta)
+                            if visible_delta:
+                                _mark_client_delta()
+                                yield TurnEvent("delta", {"text": visible_delta})
+                        visible_tail = visible_sanitizer.flush()
+                        if visible_tail:
+                            _mark_client_delta()
+                            yield TurnEvent("delta", {"text": visible_tail})
+                    finally:
+                        duration_ms = int((time.monotonic() - call_started) * 1000)
+                        completion_tokens = int(round_usage.get("completion_tokens") or 0)
+                        timings["llm_calls"].append({
+                            "phase": "tool_final", "ttft_ms": call_ttft_ms,
+                            "duration_ms": duration_ms,
+                            "message_count": len(messages),
+                            "prompt_chars": _message_chars(messages),
+                            "output_chars": call_output_chars,
+                            "max_tokens": min(template.max_tokens, config.LLM_MAX_TOKENS),
+                            "thinking_enabled": config.LLM_CHAT_THINKING_ENABLED,
+                            "prompt_tokens": int(round_usage.get("prompt_tokens") or 0),
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": int(round_usage.get("total_tokens") or 0),
+                            "completion_tokens_per_second": (
+                                round(completion_tokens * 1000 / duration_ms, 2)
+                                if completion_tokens and duration_ms else None
+                            ),
+                        })
                     used_tokens += round_tokens
                     break
         except LLMUnavailableError as exc:
@@ -464,6 +681,7 @@ def run_turn(
             text, degraded_items = build_degraded_reply(scenario, ctx, question)
             yield TurnEvent("warning", {"message": f"LLM 不可用，已降级为规则引擎：{exc}"})
             for piece in _slice_text(text):
+                _mark_client_delta()
                 chunks.append(piece)
                 yield TurnEvent("delta", {"text": piece})
         except LLMError as exc:  # 已经吐了一部分字，保留残文并提示
@@ -475,9 +693,12 @@ def run_turn(
             text, degraded_items = build_degraded_reply(scenario, ctx, question)
             yield TurnEvent("warning", {"message": f"对话异常，已降级为规则引擎：{exc}"})
             for piece in _slice_text(text):
+                _mark_client_delta()
                 chunks.append(piece)
                 yield TurnEvent("delta", {"text": piece})
 
+    timings["generation_ms"] = int((time.monotonic() - generation_started) * 1000)
+    timings["llm_call_count"] = len(timings["llm_calls"])
     raw_text = "".join(chunks)
     if warnings:
         raw_text = f"{raw_text}\n\n" + "\n\n".join(f"> ⚠️ {w}" for w in warnings)
@@ -487,6 +708,9 @@ def run_turn(
         raw_text = raw_text.rstrip() + f"\n\n> 💡 {summary_hint}"
 
     body, items = split_strategy_payload(guardrails.sanitize_output(raw_text))
+    if agent_displayed_text is not None and agent_displayed_text != body:
+        yield TurnEvent("replace", {"text": body, "reason": "final_sync"})
+        _mark_client_delta()
     if degraded:
         items = degraded_items
     if items:
@@ -522,8 +746,14 @@ def run_turn(
         yield TurnEvent("references", {"items": final_refs})
 
     tokens = used_tokens
+    if scenario in AGENT_SCENARIOS:
+        tokens = sum(
+            int(call.get("total_tokens") or 0)
+            for call in timings.get("llm_calls", [])
+        )
     if not tokens and not degraded:
         tokens = estimate_tokens(raw_text)
+    persist_started = time.monotonic()
     assistant = ChatMessage(
         session_id=session.id,
         role="assistant",
@@ -537,6 +767,12 @@ def run_turn(
     session.updated_at = utcnow()
     db.commit()
     db.refresh(assistant)
+    timings["persist_ms"] += int((time.monotonic() - persist_started) * 1000)
+    timings["total_ms"] = int((time.monotonic() - started) * 1000)
+    logger.info("chat_turn_timing %s", json.dumps(
+        {"session_id": session.id, "scenario": scenario, **timings},
+        ensure_ascii=False, default=str,
+    ))
 
     yield TurnEvent(
         "done",
@@ -544,7 +780,8 @@ def run_turn(
             "message": _message_payload(assistant),
             "tokens_used": tokens,
             "degraded": degraded,
-            "latency_ms": int((time.monotonic() - started) * 1000),
+            "latency_ms": timings["total_ms"],
+            "timings": timings,
             "model": "" if degraded else getattr(adapter, "model", ""),
         },
     )
@@ -671,6 +908,7 @@ def complete_turn(
         "degraded": False,
         "tokens_used": 0,
         "latency_ms": 0,
+        "timings": {},
         "warnings": [],
         "error": "",
     }
@@ -704,6 +942,7 @@ def complete_turn(
                 result["degraded"] = bool(event.data.get("degraded"))
                 result["tokens_used"] = event.data.get("tokens_used", 0)
                 result["latency_ms"] = event.data.get("latency_ms", 0)
+                result["timings"] = event.data.get("timings") or {}
     finally:
         _release_streaming(session.id)
 

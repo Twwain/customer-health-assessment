@@ -96,6 +96,7 @@ class FakeAdapter:
         self.model = model
         self.calls: list[list] = []
         self.tool_args: list = []
+        self.extra_args: list = []
 
     def status(self):
         return {
@@ -111,6 +112,7 @@ class FakeAdapter:
     ):
         self.calls.append(list(messages))
         self.tool_args.append(tools)
+        self.extra_args.append(extra)
         if self.error:
             raise self.error
         for chunk in self.chunks:
@@ -236,6 +238,18 @@ def test_sanitize_keeps_normal_business_text():
     cleaned, hits = guardrails.sanitize_input(text)
     assert cleaned == text
     assert hits == []
+
+
+def test_streaming_sanitizer_masks_values_split_across_chunks():
+    sanitizer = guardrails.StreamingOutputSanitizer()
+    visible = "".join(
+        sanitizer.feed(chunk)
+        for chunk in ("请联系 13812", "345678，密钥: sk-abc", "def1234567890 后续处理。")
+    ) + sanitizer.flush()
+    assert "13812345678" not in visible
+    assert "sk-abcdef1234567890" not in visible
+    assert "138****5678" in visible
+    assert "***" in visible
 
 
 # ══════════════════════════ 上下文注入 ══════════════════════════════════════
@@ -746,6 +760,17 @@ def test_send_message_streams_sse(client, customer, fake_llm):
     done = events[-1][1]
     assert done["degraded"] is False
     assert done["message"]["role"] == "assistant"
+    timings = done["timings"]
+    assert timings["total_ms"] == done["latency_ms"]
+    assert timings["llm_call_count"] >= 1
+    assert timings["llm_calls"][0]["phase"] in {"reason", "direct"}
+    assert timings["llm_calls"][0]["prompt_chars"] > 0
+    assert timings["llm_calls"][0]["max_tokens"] == 2500
+    assert timings["time_to_first_client_delta_ms"] is not None
+    assert all(
+        key in timings
+        for key in ("scoring_ms", "context_ms", "rag_ms", "generation_ms", "persist_ms")
+    )
 
 
 def test_send_message_non_stream_returns_json(client, customer, fake_llm):
@@ -758,6 +783,20 @@ def test_send_message_non_stream_returns_json(client, customer, fake_llm):
     assert response.status_code == 200
     assert body["message"]["content"] == "你好，这是测试回复。"
     assert body["assessment"]["level"] == "高危"
+    assert body["timings"]["total_ms"] == body["latency_ms"]
+    assert fake_llm.extra_args[-1]["thinking"]["type"] == "disabled"
+
+
+def test_free_qa_stream_masks_sensitive_values_across_chunks(db, customer):
+    adapter = FakeAdapter(chunks=["联系电话 13812", "345678，密钥 sk-abc", "def1234567890"])
+    llm_adapter.set_chat_adapter(adapter)
+    session = chat_engine.create_session(db, customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, content="联系方式"))
+    visible = "".join(e.data["text"] for e in events if e.type == "delta")
+    assert "13812345678" not in visible
+    assert "sk-abcdef1234567890" not in visible
+    assert "138****5678" in visible
+    assert "***" in visible
 
 
 def test_send_empty_message_rejected(client, customer, fake_llm):
@@ -831,6 +870,8 @@ def test_status_endpoint_reports_availability(client, fake_llm):
     assert body["model"] == "fake-chat"
     assert "assessment" in body["scenarios"]
     assert body["prompt_version"]
+    assert body["chat_thinking_enabled"] is False
+    assert body["report_thinking_enabled"] is True
 
 
 def test_status_endpoint_reports_degraded(client, offline_llm):
@@ -982,6 +1023,40 @@ def test_chat_completion_retries_on_server_error(monkeypatch):
     assert len(fake.requests) == 2
 
 
+def test_chat_completion_removes_unsupported_thinking(monkeypatch):
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, text="unknown field thinking"),
+            _FakeResponse(json_data={"choices": [{"message": {"content": "兼容成功"}}]}),
+        ],
+    )
+    result = adapter.chat_completion(
+        [{"role": "user", "content": "hi"}],
+        extra={"thinking": {"type": "disabled"}},
+    )
+    assert result.content == "兼容成功"
+    assert "thinking" in fake.requests[0]["json"]
+    assert "thinking" not in fake.requests[1]["json"]
+
+
+def test_chat_completion_compat_fallback_works_with_zero_retries(monkeypatch):
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, text="unknown field thinking"),
+            _FakeResponse(json_data={"choices": [{"message": {"content": "ok"}}]}),
+        ],
+        max_retries=0,
+    )
+    result = adapter.chat_completion(
+        [{"role": "user", "content": "hi"}],
+        extra={"thinking": {"type": "disabled"}},
+    )
+    assert result.content == "ok"
+    assert len(fake.requests) == 2
+
+
 def test_chat_completion_does_not_retry_on_auth_error(monkeypatch):
     adapter, fake = _adapter(monkeypatch, [_FakeResponse(status_code=401, text="invalid key")])
     with pytest.raises(LLMUnavailableError):
@@ -1018,6 +1093,24 @@ def test_stream_disables_stream_options_when_gateway_rejects(monkeypatch):
     assert "".join(adapter.stream_chat_completion([{"role": "user", "content": "hi"}])) == "ok"
     assert "stream_options" in fake.requests[0]["json"]
     assert "stream_options" not in fake.requests[1]["json"]
+
+
+def test_stream_removes_unsupported_thinking(monkeypatch):
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, text="unknown field thinking"),
+            _FakeResponse(lines=['data: {"choices": [{"delta": {"content": "ok"}}]}']),
+        ],
+        stream_usage=False,
+    )
+    chunks = adapter.stream_chat_completion(
+        [{"role": "user", "content": "hi"}],
+        extra={"thinking": {"type": "disabled"}},
+    )
+    assert "".join(chunks) == "ok"
+    assert "thinking" in fake.requests[0]["json"]
+    assert "thinking" not in fake.requests[1]["json"]
 
 
 def test_stream_failure_raises_unavailable_for_degrade(monkeypatch):
@@ -1092,6 +1185,11 @@ def test_agent_loop_retrieves_then_traces_references(db, customer, fake_llm, mon
 
     items = next(e.data["items"] for e in events if e.type == "strategy")
     assert items[0]["title"] == "高层拜访"
+    visible = "".join(e.data["text"] for e in events if e.type == "delta")
+    assert "```json" not in visible
+    assert '"strategies"' not in visible
+    done = next(e for e in events if e.type == "done")
+    assert done.data["tokens_used"] == 128
 
 
 def test_agent_loop_degrades_when_llm_offline(db, customer, offline_llm):
@@ -1112,6 +1210,7 @@ def test_agent_loop_refines_when_missing_strategy_block(db, customer, fake_llm, 
     monkeypatch.setattr(tools, "rag_retrieve", lambda *a, **k: [])
     llm_adapter.set_chat_adapter(FakeAdapter(chunks=["只是一段普通回答，不含策略块。"]))
 
+    streamed_events = []
     result = generate(
         "strategy",
         context_builder.build_context(db, customer),
@@ -1119,10 +1218,15 @@ def test_agent_loop_refines_when_missing_strategy_block(db, customer, fake_llm, 
         db,
         adapter=llm_adapter.get_chat_adapter(),
         question="给点建议",
+        on_event=lambda event_type, data: streamed_events.append((event_type, data)),
     )
     assert result.iterations == 2  # reason + 1 次 refine
     assert result.degraded is False
     assert result.text  # 至少返回了文本，不空转
+    assert streamed_events[0][0] == "delta"
+    assert any(event_type == "replace" for event_type, _ in streamed_events)
+    assert result.timings["llm_calls"][0]["prompt_chars"] > 0
+    assert result.timings["llm_calls"][0]["max_tokens"] == 8000
 
 
 class _EmptyThenContentAdapter(FakeAdapter):

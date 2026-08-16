@@ -32,13 +32,15 @@ def rag_retrieve(
     k: int = 5,
     embed_func=None,
     store=None,
+    timings: dict[str, int] | None = None,
 ) -> list[RetrievedChunk]:
     """检索知识库，返回命中切片。空查询或异常时返回 []。"""
     if not query or not query.strip():
         return []
     try:
         return retrieve_knowledge(
-            query, customer=customer, top_k=k, db=db, embed_func=embed_func, store=store
+            query, customer=customer, top_k=k, db=db, embed_func=embed_func,
+            store=store, timings=timings,
         )
     except Exception:  # pragma: no cover - 检索故障不影响 Agent
         return []

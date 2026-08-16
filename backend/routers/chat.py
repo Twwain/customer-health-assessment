@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+import config
 from database import get_db
 from models import ChatMessage, ChatSession, Customer, MESSAGE_FEEDBACKS
 from schemas import (
@@ -288,6 +289,8 @@ def message_feedback(
 def llm_status():
     """LLM 可用性探测：前端据此显示"AI 就绪"或"已降级为规则引擎"。"""
     status = llm_adapter.llm_status()
+    status["chat_thinking_enabled"] = config.LLM_CHAT_THINKING_ENABLED
+    status["report_thinking_enabled"] = config.LLM_REPORT_THINKING_ENABLED
     try:
         templates = load_prompt_templates()
         status["prompt_version"] = templates.version

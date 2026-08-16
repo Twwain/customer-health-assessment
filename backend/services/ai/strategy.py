@@ -281,6 +281,10 @@ def generate(
     tools_enabled: bool = True,
     embed_func=None,
     store=None,
+    on_event=None,
+    thinking_enabled: bool = False,
+    retrieve_enabled: bool = True,
+    cancel_event=None,
 ):
     """运行评估 / 策略 Agent Loop，返回 ``graph_builder.AgentResult``。
 
@@ -290,7 +294,10 @@ def generate(
     from .graph_builder import AssessmentStrategyAgent
 
     agent = AssessmentStrategyAgent(
-        adapter=adapter, max_iterations=max_iterations, tools_enabled=tools_enabled
+        adapter=adapter, max_iterations=max_iterations, tools_enabled=tools_enabled,
+        on_event=on_event,
+        thinking_enabled=thinking_enabled,
+        cancel_event=cancel_event,
     )
     return agent.run(
         scenario,
@@ -300,4 +307,5 @@ def generate(
         question=question,
         embed_func=embed_func,
         store=store,
+        retrieve_enabled=retrieve_enabled,
     )

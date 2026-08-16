@@ -11,6 +11,7 @@ canonical 知识切片，附带来源供 📎 溯源。Embedding 不可用时静
 from __future__ import annotations
 
 import datetime
+import time
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -167,6 +168,7 @@ def build_knowledge_context(
     db: Session | None = None,
     embed_func=None,
     store=None,
+    timings: dict[str, int] | None = None,
 ) -> tuple[str, list[dict]]:
     """RAG 上下文。
 
@@ -185,12 +187,18 @@ def build_knowledge_context(
     except Exception:  # pragma: no cover - 导入失败兜底
         return NO_KNOWLEDGE_HINT, []
 
+    rag_started = time.monotonic()
     try:
         chunks = retrieve_knowledge(
-            query, customer=customer, top_k=config.RAG_TOP_K, db=db, embed_func=embed_func, store=store
+            query, customer=customer, top_k=config.RAG_TOP_K, db=db, embed_func=embed_func,
+            store=store, timings=timings,
         )
     except Exception:  # pragma: no cover - 检索失败兜底
+        if timings is not None:
+            timings["rag_ms"] = int((time.monotonic() - rag_started) * 1000)
         return NO_KNOWLEDGE_HINT, []
+    if timings is not None:
+        timings["rag_ms"] = int((time.monotonic() - rag_started) * 1000)
 
     if not chunks:
         return NO_KNOWLEDGE_HINT, []
@@ -246,6 +254,7 @@ def build_context(
     query: str = "",
     today: datetime.date | None = None,
     retrieve_knowledge: bool = True,
+    rag_timings: dict[str, int] | None = None,
 ) -> ChatContext:
     """组装一轮对话所需的全部事实上下文。
 
@@ -259,7 +268,7 @@ def build_context(
     if customer is None:
         # 未关联客户的自由问答同样走 RAG 检索（知识库问答不依赖客户上下文）
         if retrieve_knowledge:
-            knowledge_text, references = build_knowledge_context(query, db=db)
+            knowledge_text, references = build_knowledge_context(query, db=db, timings=rag_timings)
         return ChatContext(
             customer_text="## 客户上下文\n本次会话未关联具体客户，请基于通用客情方法论作答。",
             knowledge_text=knowledge_text,
@@ -285,7 +294,9 @@ def build_context(
         sections.append(metrics_text)
     customer_text = "\n\n".join(sections)
     if retrieve_knowledge:
-        knowledge_text, references = build_knowledge_context(query, customer=customer, db=db)
+        knowledge_text, references = build_knowledge_context(
+            query, customer=customer, db=db, timings=rag_timings
+        )
 
     return ChatContext(
         customer=customer,

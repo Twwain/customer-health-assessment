@@ -99,7 +99,7 @@ export function categoryIcon(cat: string): string {
   return "📄";
 }
 
-// ── 轻量 Markdown 渲染（覆盖本系统 Prompt 产出的结构：标题/列表/引用/加粗/代码）──
+// ── 轻量 Markdown 渲染（覆盖标题/列表/引用/表格/分隔线/行内样式）──────────
 
 function renderInline(text: string, keyBase: string): ReactNode[] {
   const nodes: ReactNode[] = [];
@@ -118,6 +118,50 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
   }
   if (last < text.length) nodes.push(text.slice(last));
   return nodes;
+}
+
+function tableCells(line: string): string[] {
+  let value = line.trim();
+  if (value.startsWith("|")) value = value.slice(1);
+  if (value.endsWith("|")) {
+    let slashes = 0;
+    for (let i = value.length - 2; i >= 0 && value[i] === "\\"; i--) slashes++;
+    if (slashes % 2 === 0) value = value.slice(0, -1);
+  }
+  const cells: string[] = [];
+  let cell = "";
+  let inCode = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch === "\\") {
+      let end = i;
+      while (value[end] === "\\") end++;
+      const slashCount = end - i;
+      cell += "\\".repeat(Math.floor(slashCount / 2));
+      if (value[end] === "|" && slashCount % 2 === 1) {
+        cell += "|";
+        i = end;
+      } else {
+        if (slashCount % 2 === 1) cell += "\\";
+        i = end - 1;
+      }
+    } else if (ch === "`") {
+      inCode = !inCode;
+      cell += ch;
+    } else if (ch === "|" && !inCode) {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += ch;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function isTableDivider(line: string): boolean {
+  const cells = tableCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
 export function renderMarkdown(text: string): ReactNode {
@@ -139,6 +183,46 @@ export function renderMarkdown(text: string): ReactNode {
     const line = lines[i];
     if (!line.trim()) {
       flushPara();
+      i++;
+      continue;
+    }
+    if (line.includes("|") && i + 1 < lines.length && isTableDivider(lines[i + 1])) {
+      flushPara();
+      const headers = tableCells(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        rows.push(tableCells(lines[i]));
+        i++;
+      }
+      const k = key++;
+      blocks.push(
+        <div className="md-table-wrap" key={k}>
+          <table>
+            <thead>
+              <tr>
+                {headers.map((cell, idx) => (
+                  <th key={idx}>{renderInline(cell, `th${k}-${idx}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIdx) => (
+                <tr key={rowIdx}>
+                  {headers.map((_, cellIdx) => (
+                    <td key={cellIdx}>{renderInline(row[cellIdx] || "", `td${k}-${rowIdx}-${cellIdx}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      flushPara();
+      blocks.push(<hr key={key++} />);
       i++;
       continue;
     }

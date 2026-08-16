@@ -241,7 +241,8 @@ class CompatAdapter:
 
     def _post_with_retry(self, path: str, payload: dict) -> dict:
         last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        while True:
             try:
                 with httpx.Client(timeout=self._timeout()) as client:
                     response = client.post(
@@ -251,13 +252,24 @@ class CompatAdapter:
                     detail = response.text[:300]
                     if response.status_code == 400 and "tools" in payload:
                         # 供应商不支持 function calling：去掉 tools 重试一次，
-                        # 避免整条对话被降级为规则引擎。
-                        payload = {k: v for k, v in payload.items() if k != "tools"}
+                        # 同时去掉可能不兼容的 thinking，避免两个扩展字段连续
+                        # 消耗有限的 HTTP 重试次数。
+                        payload = {
+                            k: v for k, v in payload.items()
+                            if k not in {"tools", "thinking"}
+                        }
+                        last_error = LLMError(f"HTTP 400: {detail}")
+                        continue
+                    if response.status_code == 400 and "thinking" in payload:
+                        # thinking 是部分模型的扩展字段；通用兼容网关不识别时
+                        # 去掉后重试，避免整轮对话被误判为不可用。
+                        payload = {k: v for k, v in payload.items() if k != "thinking"}
                         last_error = LLMError(f"HTTP 400: {detail}")
                         continue
                     if self._retryable_status(response.status_code) and attempt < self.max_retries:
+                        attempt += 1
                         last_error = LLMError(f"HTTP {response.status_code}: {detail}")
-                        time.sleep(self.retry_backoff * (2**attempt))
+                        time.sleep(self.retry_backoff * (2 ** (attempt - 1)))
                         continue
                     raise LLMUnavailableError(
                         self._http_error_message(response.status_code, detail)
@@ -268,9 +280,10 @@ class CompatAdapter:
             except Exception as exc:  # httpx.TimeoutException / ConnectError / JSON 解析等
                 last_error = exc
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_backoff * (2**attempt))
+                    attempt += 1
+                    time.sleep(self.retry_backoff * (2 ** (attempt - 1)))
                     continue
-        raise LLMUnavailableError(f"LLM 请求失败：{last_error}")
+                raise LLMUnavailableError(f"LLM 请求失败：{last_error}") from exc
 
     # ── 流式 ────────────────────────────────────────────────────────────
 
@@ -318,6 +331,9 @@ class CompatAdapter:
                 if exc.disable_stream_usage and self._stream_usage:
                     self._stream_usage = False
                     continue
+                if exc.disable_thinking and extra and "thinking" in extra:
+                    extra = {k: v for k, v in extra.items() if k != "thinking"}
+                    continue
                 if exc.retryable and attempt < self.max_retries:
                     attempt += 1
                     time.sleep(self.retry_backoff * (2**attempt))
@@ -343,6 +359,7 @@ class CompatAdapter:
                                 response.status_code == 400 and "stream_options" in payload
                             ),
                             disable_tools=(response.status_code == 400 and "tools" in payload),
+                            disable_thinking=(response.status_code == 400 and "thinking" in payload),
                             retryable=self._retryable_status(response.status_code),
                         )
                     for line in response.iter_lines():
@@ -386,7 +403,8 @@ class CompatAdapter:
             if emitted:
                 raise _StreamStarted() from exc
             raise _StreamRetry(
-                reason=str(exc), disable_stream_usage=False, disable_tools=False, retryable=True
+                reason=str(exc), disable_stream_usage=False, disable_tools=False,
+                disable_thinking=False, retryable=True
             ) from exc
 
     # ── Embedding ───────────────────────────────────────────────────────
@@ -407,12 +425,14 @@ class CompatAdapter:
 
 class _StreamRetry(Exception):
     def __init__(
-        self, *, reason: str, disable_stream_usage: bool, disable_tools: bool, retryable: bool
+        self, *, reason: str, disable_stream_usage: bool, disable_tools: bool,
+        disable_thinking: bool, retryable: bool
     ):
         super().__init__(reason)
         self.reason = reason
         self.disable_stream_usage = disable_stream_usage
         self.disable_tools = disable_tools
+        self.disable_thinking = disable_thinking
         self.retryable = retryable
 
 

@@ -15,7 +15,7 @@ import config
 from database import Base, get_db
 from models import AssessmentHistory, Customer
 from schemas import AlertItem, AssessmentResponse, DimensionScore, FactorScoreItem
-from services.ai import llm_adapter
+from services.ai import llm_adapter, tools
 from services.ai.llm_adapter import LLMUnavailableError
 from services.pdf_report import PdfReportGenerator
 from services.report_builder import build_report_data
@@ -78,6 +78,8 @@ class _FakeAdapter:
         self.available = available
         self.model = model
         self.calls = []
+        self.extra_args = []
+        self.tool_args = []
 
     def status(self):
         return {"available": self.available, "model": self.model}
@@ -86,6 +88,8 @@ class _FakeAdapter:
         self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None, tools=None, on_tool_calls=None
     ):
         self.calls.append(list(messages))
+        self.extra_args.append(extra)
+        self.tool_args.append(tools)
         if self.error:
             raise self.error
         for chunk in self.chunks:
@@ -141,8 +145,14 @@ def test_build_report_data_offline_uses_degraded_strategies(db, customer, offlin
     assert any("规则引擎" in (i.get("reference") or "") for i in report.strategy_items)
 
 
-def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm):
-    llm_adapter.set_chat_adapter(_FakeAdapter(chunks=[_STRATEGY_PAYLOAD]))
+def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm, monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "rag_retrieve",
+        lambda *args, **kwargs: pytest.fail("PDF Agent 不应重复执行 RAG"),
+    )
+    adapter = _FakeAdapter(chunks=[_STRATEGY_PAYLOAD])
+    llm_adapter.set_chat_adapter(adapter)
     report = build_report_data(db, customer, include_ai=True)
     assert report.degraded is False
     assert report.has_ai is True
@@ -154,6 +164,8 @@ def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm):
     assert by_title["立即安排高层回访"]["priority"] == "recommended"
     assert by_title["扩大合作面"]["priority"] == "long_term"
     assert report.trend is not None
+    assert adapter.extra_args[-1]["thinking"]["type"] == "enabled"
+    assert adapter.tool_args[-1] is None
 
 
 def test_build_report_data_ai_off_does_not_call_llm(db, customer, fake_llm):

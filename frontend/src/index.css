@@ -117,6 +117,14 @@ select:focus-visible {
   background: var(--color-surface-2); border-radius: 0 8px 8px 0;
   color: var(--color-ink-2);
 }
+.md hr { margin: 14px 0; border: 0; border-top: 1px solid var(--color-border); }
+.md-table-wrap { margin: 4px 0 14px; overflow-x: auto; border: 1px solid var(--color-border); border-radius: 8px; }
+.md table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 14px; line-height: 1.6; }
+.md th, .md td { padding: 9px 11px; border-right: 1px solid var(--color-border-soft); border-bottom: 1px solid var(--color-border-soft); text-align: left; vertical-align: top; }
+.md th:last-child, .md td:last-child { border-right: 0; }
+.md tbody tr:last-child td { border-bottom: 0; }
+.md th { background: var(--color-surface-2); color: var(--color-ink); font-weight: 600; white-space: nowrap; }
+.md tbody tr:nth-child(even) { background: color-mix(in srgb, var(--color-surface-2) 45%, transparent); }
 
 /* 抽屉遮罩 */
 .overlay-mask { position: fixed; inset: 0; background: rgba(15, 15, 15, .38); z-index: 600; }

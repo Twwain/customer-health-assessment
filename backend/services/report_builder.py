@@ -68,7 +68,19 @@ def build_report_data(
     )
     try:
         ctx = context_builder.build_context(db, customer, assessment=assessment, query=question)
-        gen = strategy_mod.generate(scenario, ctx, customer, db, adapter=adapter, question=question)
+        gen = strategy_mod.generate(
+            scenario,
+            ctx,
+            customer,
+            db,
+            adapter=adapter,
+            question=question,
+            # PDF 报告优先分析质量；上下文已预检索，关闭工具避免思考模式工具续轮
+            # 需要回传 reasoning_content 的协议复杂度与重复检索。
+            tools_enabled=False,
+            thinking_enabled=config.LLM_REPORT_THINKING_ENABLED,
+            retrieve_enabled=False,
+        )
         _body, items = strategy_mod.split_strategy_payload(gen.text)
         data.strategy_items = gen.degraded_items if gen.degraded else items
         data.references = list(gen.references or [])

@@ -10,6 +10,7 @@ Embedding 不可用时（缺 Key / 网络）**静默降级为空结果**，调�
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Sequence
 
 from config import RAG_RECALL_K, RAG_TOP_K, RAG_WINDOW
@@ -53,6 +54,7 @@ class KnowledgeRetriever:
         window: int | None = None,
         status: str = "canonical",
         db: Any | None = None,
+        timings: dict[str, int] | None = None,
     ) -> list[RetrievedChunk]:
         where: dict = {}
         if status:
@@ -60,12 +62,20 @@ class KnowledgeRetriever:
         if category:
             where["category"] = category
 
+        embedding_started = time.monotonic()
         try:
             qvec = self._embed([query])[0]
         except EmbeddingUnavailableError:
+            if timings is not None:
+                timings["embedding_ms"] = int((time.monotonic() - embedding_started) * 1000)
             return []
+        if timings is not None:
+            timings["embedding_ms"] = int((time.monotonic() - embedding_started) * 1000)
 
+        vector_started = time.monotonic()
         raw = self._store.query(qvec, top_k=recall_k, where=where)
+        if timings is not None:
+            timings["vector_query_ms"] = int((time.monotonic() - vector_started) * 1000)
         candidates = [
             RerankCandidate(
                 id=r["id"], content=r["content"], metadata=r["metadata"], base_score=r["score"]
@@ -73,7 +83,10 @@ class KnowledgeRetriever:
             for r in raw
         ]
         boost_industry = getattr(customer, "industry", None) or None
+        rerank_started = time.monotonic()
         ranked = self._reranker.rerank(query, candidates, boost_industry=boost_industry)
+        if timings is not None:
+            timings["rerank_ms"] = int((time.monotonic() - rerank_started) * 1000)
 
         window = RAG_WINDOW if window is None else window
         out: list[RetrievedChunk] = []
@@ -169,6 +182,7 @@ def retrieve_knowledge(
     embed_func=None,
     reranker: MetadataReranker | None = None,
     store: VectorStore | None = None,
+    timings: dict[str, int] | None = None,
 ) -> list[RetrievedChunk]:
     """便捷函数：一次性检索。"""
     return KnowledgeRetriever(store=store, embed_func=embed_func, reranker=reranker).retrieve(
@@ -179,4 +193,5 @@ def retrieve_knowledge(
         window=window,
         status=status,
         db=db,
+        timings=timings,
     )

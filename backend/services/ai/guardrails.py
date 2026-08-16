@@ -75,3 +75,42 @@ def sanitize_output(text: str) -> str:
     """出向：只脱敏不截断。"""
     cleaned, _ = sanitize_text(text or "")
     return cleaned
+
+
+class StreamingOutputSanitizer:
+    """增量脱敏器：保留可能跨 chunk 的敏感尾部，完成后再安全输出。"""
+
+    _TAIL_CHARS = 24
+    _TRAILING_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+$")
+    _OPEN_CREDENTIAL_RE = re.compile(
+        r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|token|密码|口令|密钥)"
+        r"\s*(?:[:=是为]|：)\s*[^\s，,；;、'\"]*$",
+        re.IGNORECASE,
+    )
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        self._pending += text or ""
+        cut = max(0, len(self._pending) - self._TAIL_CHARS)
+        for pattern in (self._TRAILING_TOKEN_RE, self._OPEN_CREDENTIAL_RE):
+            match = pattern.search(self._pending)
+            if match is not None:
+                cut = min(cut, match.start())
+        # 已形成完整敏感串但恰好横跨输出边界时，也必须整体留到下一轮。
+        for _, pattern in _PATTERNS:
+            for match in pattern.finditer(self._pending):
+                if match.start() < cut < match.end():
+                    cut = match.start()
+        for match in _PHONE_RE.finditer(self._pending):
+            if match.start() < cut < match.end():
+                cut = match.start()
+        if cut <= 0:
+            return ""
+        ready, self._pending = self._pending[:cut], self._pending[cut:]
+        return sanitize_output(ready)
+
+    def flush(self) -> str:
+        ready, self._pending = self._pending, ""
+        return sanitize_output(ready)

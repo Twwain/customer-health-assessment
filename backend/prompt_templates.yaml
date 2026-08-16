@@ -19,7 +19,7 @@ description: 客情评估智能体场景化 Prompt 模板集
 
 defaults:
   temperature: 0.3
-  max_tokens: 8000
+  max_tokens: 2500
   guardrails: |
     【输出护栏 — 必须遵守】
     1. 只依据「量化评估数据」与「知识库参考资料」作答；两者都没有提到的事实一律不要编造。
@@ -58,6 +58,7 @@ templates:
     name: 综合评估
     description: 注入基础客情分 + RAG 上下文，生成评估结论
     temperature: 0.25
+    # 当前推理模型会把隐藏推理 token 计入 completion；过低会在正文前耗尽并返回空内容。
     max_tokens: 8000
     system: |
       你是 客情评估智能体的「AI 评估结论生成器」。
