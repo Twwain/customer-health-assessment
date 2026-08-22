@@ -45,7 +45,7 @@ def customer(db):
         risk_signals="长期未联系；友商已介入",
         competitor_involvement=True,
         growth_potential="低",
-        custom_fields={},
+        custom_fields={"risk_07": "是但可控"},
     )
     db.add(c)
     db.commit()

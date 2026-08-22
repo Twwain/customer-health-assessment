@@ -149,7 +149,7 @@ def test_ppt_alerts_trigger():
         assert alerts["champion_missing"] == "medium"
 
 
-def test_legacy_alerts_trigger():
+def test_legacy_fields_do_not_trigger_alerts():
     for eng in engines():
         c = base_customer(
             last_contact_date=datetime.date.today() - datetime.timedelta(days=100),
@@ -159,15 +159,7 @@ def test_legacy_alerts_trigger():
             risk_signals="预算削减",
         )
         result = eng.evaluate(c)
-        ids = [a.id for a in result.alerts]
-        assert ids == [
-            "stale_contact",
-            "competitor_involved",
-            "payment_abnormal",
-            "low_satisfaction",
-            "risk_signal",
-        ]
-        assert result.suggestions[0] == "建议尽快安排客户拜访或沟通"
+        assert result.alerts == []
 
 
 def test_no_alerts_on_healthy_customer():

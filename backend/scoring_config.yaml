@@ -1283,7 +1283,7 @@ dimensions:
 
 # ── 风险预警规则（顺序即展示顺序）────────────────────────────────────────────
 # level：high=红 / medium=黄 / low=蓝（前端 AlertBadge 色彩编码）
-# 来源：自动预警条件（字段级可落地部分）+ 保留原有高频预警
+# 来源：仅使用当前客情因子配置（custom_fields）生成预警
 # when.op 支持：truthy / falsy / is_true / is_false / empty / eq / ne /
 #               lt / lte / gt / gte / in / not_in / contains /
 #               days_since_gt / days_since_gt_or_empty
@@ -1358,53 +1358,6 @@ alerts:
       value: 无
     message: "客户内部缺少 Champion，方案推进缺乏内部推手"
     suggestion: "建议识别并培养决策层 Champion"
-
-  - id: stale_contact
-    level: high
-    when:
-      field: last_contact_date
-      op: days_since_gt_or_empty
-      value: 90
-    message: "超过90天未联系客户，关系存在疏远风险"
-    suggestion: "建议尽快安排客户拜访或沟通"
-
-  - id: competitor_involved
-    level: high
-    when:
-      field: competitor_involvement
-      op: is_true
-    message: "竞品已介入，客户存在被挖角风险"
-    suggestion: "建议加强客情维护，突出自身差异化优势"
-
-  - id: payment_abnormal
-    level: medium
-    when:
-      field: payment_status
-      op: in
-      value: [部分逾期, 严重逾期]
-    message: "回款状态异常：{value}"
-    suggestion: "建议跟进回款进度，评估是否需要调整合作模式"
-
-  - id: low_satisfaction
-    level: high
-    when:
-      all:
-        - field: customer_satisfaction
-          op: gt
-          value: 0
-        - field: customer_satisfaction
-          op: lte
-          value: 4
-    message: "客户满意度较低({value}/10)，存在流失风险"
-    suggestion: "建议深入了解客户不满原因并制定改善计划"
-
-  - id: risk_signal
-    level: medium
-    when:
-      field: risk_signals
-      op: truthy
-    message: "存在风险信号：{value}"
-    suggestion: "建议针对风险信号制定应对方案"
 
 # ── 机会点建议（不产生预警，仅追加建议）──────────────────────────────────────
 opportunities:

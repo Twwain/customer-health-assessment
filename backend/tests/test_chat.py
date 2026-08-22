@@ -77,7 +77,7 @@ def customer(db):
         risk_signals="长期未联系；友商已介入",
         competitor_involvement=True,
         growth_potential="低",
-        custom_fields={},
+        custom_fields={"risk_07": "是但可控"},
     )
     db.add(c)
     db.commit()
@@ -261,7 +261,7 @@ def test_context_contains_quantitative_facts(db, customer):
     assert "示例汽车集团" in ctx.customer_text
     assert "12.5" in ctx.customer_text          # 基础客情分（空因子最低分口径）
     assert "KCR 关键客户关系" in ctx.customer_text
-    assert "竞品已介入" in ctx.customer_text
+    assert "竞品POC/试点" in ctx.customer_text
     assert "未检索到相关知识" in ctx.knowledge_text
 
 

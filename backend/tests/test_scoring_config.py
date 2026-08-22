@@ -205,8 +205,30 @@ def test_alerts_cover_ppt_triggers():
     assert alerts["champion_missing"] == "medium"
 
 
-def test_legacy_alerts_still_work():
-    """保留的高频预警：超90天未联系 / 满意度低 / 竞品介入 / 回款异常 / 风险信号。"""
+def test_all_alerts_use_current_factor_config():
+    """每条预警的叶子条件都必须引用当前启用的客情因子。"""
+    config = load_scoring_config()
+    enabled_fields = {
+        factor.field
+        for dimension in config.enabled_dimensions
+        for factor in dimension.enabled_factors
+    }
+
+    def leaves(condition):
+        if condition.children:
+            for child in condition.children:
+                yield from leaves(child)
+        else:
+            yield condition
+
+    for alert in config.alerts:
+        for condition in leaves(alert.when):
+            assert condition.source == "custom_fields", alert.id
+            assert condition.field in enabled_fields, alert.id
+
+
+def test_legacy_fields_do_not_trigger_alerts():
+    """旧版客户字段不再参与预警，预警完全由当前客情因子驱动。"""
     c = make_customer(
         last_contact_date=datetime.date.today() - datetime.timedelta(days=120),
         customer_satisfaction=3,
@@ -215,14 +237,7 @@ def test_legacy_alerts_still_work():
         risk_signals="预算削减",
     )
     result = HealthScoreEngine().evaluate(c)
-    assert [a.id for a in result.alerts] == [
-        "stale_contact",
-        "competitor_involved",
-        "payment_abnormal",
-        "low_satisfaction",
-        "risk_signal",
-    ]
-    assert result.suggestions[0] == "建议尽快安排客户拜访或沟通"
+    assert result.alerts == []
 
 
 def test_opportunity_suggestion_appended_last():
