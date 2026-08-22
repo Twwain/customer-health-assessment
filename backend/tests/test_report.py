@@ -56,12 +56,8 @@ def customer(db):
         contact_phone="13812345678",
         cooperation_years=1.2,
         contact_frequency="不定期",
-        last_contact_date=datetime.date.today() - datetime.timedelta(days=200),
         customer_satisfaction=3,
         contract_amount=50,
-        payment_status="严重逾期",
-        risk_signals="长期未联系；友商已介入",
-        competitor_involvement=True,
         growth_potential="低",
         custom_fields={},
     )

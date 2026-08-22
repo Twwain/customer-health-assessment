@@ -93,6 +93,7 @@ frontend/lint_out.txt
 # Local agent / tooling config (not for git)
 .codebuddy/
 .codex/
+.codex_tmp
 
 # Local dev process artifacts (not for git)
 dev_process/

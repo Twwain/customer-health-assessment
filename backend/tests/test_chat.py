@@ -4,7 +4,6 @@
 多轮上下文窗口、LLM 降级兜底、SSE 事件协议、会话与反馈接口。
 """
 
-import datetime
 import json
 
 import pytest
@@ -70,12 +69,8 @@ def customer(db):
         contact_phone="13812345678",
         cooperation_years=1.2,
         contact_frequency="不定期",
-        last_contact_date=datetime.date.today() - datetime.timedelta(days=200),
         customer_satisfaction=3,
         contract_amount=50,
-        payment_status="严重逾期",
-        risk_signals="长期未联系；友商已介入",
-        competitor_involvement=True,
         growth_potential="低",
         custom_fields={"risk_07": "是但可控"},
     )
@@ -270,17 +265,14 @@ def test_context_excludes_personal_phone(db, customer):
     assert customer.contact_phone not in ctx.customer_text
 
 
-def test_context_marks_legacy_fields_as_facts_not_alert_sources(db, customer):
+def test_context_excludes_removed_legacy_fields(db, customer):
     ctx = context_builder.build_context(db, customer)
-    assert "历史基础字段，仅供事实查询" in ctx.customer_text
-    for label in ("最近联系：", "回款状态：", "竞品介入：", "风险信号："):
-        assert label in ctx.customer_text
-    assert "不得据此生成规则预警" in ctx.customer_text
+    for label in ("最近联系：", "回款状态：", "竞品介入："):
+        assert label not in ctx.customer_text
 
     profile = tools.profile_query(customer)
-    assert profile["payment_status"] == customer.payment_status
-    assert profile["competitor_involvement"] is customer.competitor_involvement
-    assert "仅供事实查询" in profile["risk_policy"]
+    for field in ("last_contact_date", "payment_status", "competitor_involvement", "risk_signals"):
+        assert field not in profile
 
 
 def test_context_without_customer_is_generic(db):
@@ -435,10 +427,8 @@ def test_degraded_strategies_for_healthy_customer(db):
         customer_name="某省政务云",
         cooperation_years=6,
         contact_frequency="每周",
-        last_contact_date=datetime.date.today(),
         customer_satisfaction=9,
         contract_amount=800,
-        payment_status="正常",
         growth_potential="高",
         custom_fields={},
     )
@@ -1397,7 +1387,6 @@ def _make_customer(db, name, industry, satisfaction=5, **kwargs):
         contact_frequency=kwargs.get("contact_frequency", "每月"),
         customer_satisfaction=satisfaction,
         contract_amount=kwargs.get("contract_amount", 100),
-        payment_status=kwargs.get("payment_status", "正常"),
         growth_potential=kwargs.get("growth_potential", "中"),
         custom_fields={},
     )

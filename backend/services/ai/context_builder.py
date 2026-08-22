@@ -94,8 +94,8 @@ def fmt_score(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def _customer_profile(c: Customer, today: datetime.date) -> str:
-    """客户基础信息；旧版字段仅供事实查询，不参与规则预警。"""
+def _customer_profile(c: Customer) -> str:
+    """客户基础信息。"""
     lines = [
         "## 客户基础信息",
         f"- 客户名称：{c.customer_name}",
@@ -110,17 +110,6 @@ def _customer_profile(c: Customer, today: datetime.date) -> str:
         f"- 增长潜力：{c.growth_potential or '未填写'}",
     ]
 
-    lines.append("- 以下为历史基础字段，仅供事实查询；不得据此生成规则预警或推断风险等级：")
-    if c.last_contact_date:
-        days = (today - c.last_contact_date).days
-        lines.append(f"  - 最近联系：{c.last_contact_date.isoformat()}（距今 {days} 天）")
-    else:
-        lines.append("  - 最近联系：无记录")
-    lines += [
-        f"  - 回款状态：{c.payment_status or '未填写'}",
-        f"  - 竞品介入：{'是' if c.competitor_involvement else '否'}",
-        f"  - 风险信号：{c.risk_signals or '无'}",
-    ]
     if c.notes:
         lines.append(f"- 备注：{c.notes}")
 
@@ -326,7 +315,7 @@ def build_context(
         )
 
     sections = [
-        _customer_profile(customer, today),
+        _customer_profile(customer),
         _assessment_section(assessment),
         _trend_section(trend),
     ]

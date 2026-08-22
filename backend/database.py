@@ -5,6 +5,7 @@ import sqlite3
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy import inspect, text
 
 DB_PATH = os.getenv("DB_PATH", "sqlite:///./customer_health.db")
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}" if not DB_PATH.startswith("sqlite") else DB_PATH
@@ -41,6 +42,30 @@ def utcnow() -> datetime.datetime:
 
 class Base(DeclarativeBase):
     pass
+
+
+LEGACY_CUSTOMER_COLUMNS = (
+    "last_contact_date",
+    "payment_status",
+    "risk_signals",
+    "competitor_involvement",
+)
+
+
+def migrate_drop_legacy_customer_columns(target_engine: Engine = engine) -> int:
+    """幂等删除已被新版客情因子取代的客户旧字段。"""
+    inspector = inspect(target_engine)
+    if "customers" not in inspector.get_table_names():
+        return 0
+
+    existing = {column["name"] for column in inspector.get_columns("customers")}
+    removed = 0
+    with target_engine.begin() as connection:
+        for column in LEGACY_CUSTOMER_COLUMNS:
+            if column in existing:
+                connection.execute(text(f'ALTER TABLE customers DROP COLUMN "{column}"'))
+                removed += 1
+    return removed
 
 
 def get_db():

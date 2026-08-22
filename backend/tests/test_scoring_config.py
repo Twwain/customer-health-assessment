@@ -6,7 +6,6 @@
 3. 通过 custom_fields 注册新因子即可参与计分
 """
 
-import datetime
 import textwrap
 
 import pytest
@@ -30,12 +29,8 @@ def make_customer(**overrides) -> Customer:
     c.industry = "政务"
     c.cooperation_years = 3
     c.contact_frequency = "每月"
-    c.last_contact_date = datetime.date.today() - datetime.timedelta(days=5)
     c.customer_satisfaction = 8
     c.contract_amount = 100
-    c.payment_status = "正常"
-    c.risk_signals = None
-    c.competitor_involvement = False
     c.growth_potential = "中"
     c.custom_fields = {}
     for k, v in overrides.items():
@@ -275,19 +270,6 @@ def test_all_alerts_use_current_factor_config():
         for condition in leaves(alert.when):
             assert condition.field in enabled_factors, alert.id
             assert condition.source == enabled_factors[condition.field].source, alert.id
-
-
-def test_removed_legacy_fields_do_not_trigger_alerts():
-    """旧字段不再预警，但当前 HIS-09 满意度因子仍正常预警。"""
-    c = make_customer(
-        last_contact_date=datetime.date.today() - datetime.timedelta(days=120),
-        customer_satisfaction=3,
-        competitor_involvement=True,
-        payment_status="部分逾期",
-        risk_signals="预算削减",
-    )
-    result = HealthScoreEngine().evaluate(c)
-    assert [a.id for a in result.alerts] == ["low_satisfaction"]
 
 
 def test_opportunity_suggestion_appended_last():

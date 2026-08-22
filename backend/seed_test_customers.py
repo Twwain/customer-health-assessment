@@ -21,16 +21,12 @@
 
 from __future__ import annotations
 
-import datetime
-
 from database import SessionLocal
 from models import Customer
 from services import assessment_history
 from services.scoring import get_scoring_strategy, load_scoring_config
 
 TEST_PREFIX = "测试-"
-TODAY = datetime.date.today()
-
 # 每个测试客户：名称、行业、目标总分。
 # 因子取值为离散档位，分数呈阶跃分布（如 76.5 与 96.2 之间无中间值），
 # 故目标分选取各等级区间内的可达值，使命名与最终等级严格对应：
@@ -85,26 +81,19 @@ def _custom_fields_for_t(config, t):
 
 def _model_fields_for_t(t):
     """依据 t 生成与展示相关的模型列（不影响分数，仅增强真实感）。"""
-    days_since = int((1 - t) * 150) + 3
     sat = _clamp(round(t * 8 + 2), 1, 10)
     if t >= 0.7:
-        freq, payment, risk, competitor, growth = "每周", "正常", "", False, "高"
+        freq, growth = "每周", "高"
     elif t >= 0.4:
         freq = "每月"
-        payment = "正常"
-        risk = "" if t >= 0.55 else "回款节奏放缓"
-        competitor, growth = t < 0.5, "中"
+        growth = "中"
     else:
-        freq, payment, risk, competitor, growth = "每季度", ("坏账风险" if t < 0.2 else "逾期"), "高层变动、预算收缩，存在流失风险", True, "低"
+        freq, growth = "每季度", "低"
     return {
         "cooperation_years": round(t * 7 + 0.5, 1),
         "contact_frequency": freq,
-        "last_contact_date": TODAY - datetime.timedelta(days=days_since),
         "customer_satisfaction": sat,
         "contract_amount": round(t * 500 + 20, 1),
-        "payment_status": payment,
-        "risk_signals": risk,
-        "competitor_involvement": competitor,
         "growth_potential": growth,
     }
 

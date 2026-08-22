@@ -38,12 +38,8 @@ def customer(db):
         industry="制造",
         cooperation_years=1.2,
         contact_frequency="不定期",
-        last_contact_date=datetime.date.today() - datetime.timedelta(days=200),
         customer_satisfaction=3,
         contract_amount=50,
-        payment_status="严重逾期",
-        risk_signals="长期未联系；友商已介入",
-        competitor_involvement=True,
         growth_potential="低",
         custom_fields={"risk_07": "是但可控"},
     )
@@ -158,7 +154,6 @@ def test_changed_factor_creates_new_record(db, customer):
 def test_trend_arrow_up_after_improvement(db, customer):
     assessment_history.record_assessment(db, customer)
     customer.customer_satisfaction = 9
-    customer.payment_status = "正常"
     db.commit()
     assessment_history.record_assessment(db, customer)
 

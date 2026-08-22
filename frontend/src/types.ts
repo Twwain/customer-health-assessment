@@ -8,12 +8,8 @@ export interface CustomerResponse {
   contact_phone: string;
   cooperation_years: number;
   contact_frequency: string;
-  last_contact_date: string | null;
   customer_satisfaction: number;
   contract_amount: number;
-  payment_status: string;
-  risk_signals: string;
-  competitor_involvement: boolean;
   growth_potential: string;
   notes: string;
   custom_fields: Record<string, unknown>;

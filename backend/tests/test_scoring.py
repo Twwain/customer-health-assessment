@@ -8,8 +8,6 @@
 5. 两种引擎（RuleBasedStrategy / HealthScoreEngine）输出一致
 """
 
-import datetime
-
 import pytest
 
 from models import Customer
@@ -24,12 +22,8 @@ def base_customer(**overrides):
     c.customer_name = "测试客户"
     c.cooperation_years = 3
     c.contact_frequency = "每月"
-    c.last_contact_date = datetime.date.today() - datetime.timedelta(days=5)
     c.customer_satisfaction = 8
     c.contract_amount = 100
-    c.payment_status = "正常"
-    c.risk_signals = None
-    c.competitor_involvement = False
     c.growth_potential = "中"
     c.custom_fields = {}
     for k, v in overrides.items():
@@ -179,19 +173,6 @@ def test_expanded_alerts_cover_all_dimensions():
     for eng in engines():
         alerts = {a.id: a.level for a in eng.evaluate(base_customer(custom_fields=custom_fields)).alerts}
         assert alerts == expected
-
-
-def test_removed_legacy_fields_do_not_trigger_alerts():
-    for eng in engines():
-        c = base_customer(
-            last_contact_date=datetime.date.today() - datetime.timedelta(days=100),
-            customer_satisfaction=3,
-            competitor_involvement=True,
-            payment_status="部分逾期",
-            risk_signals="预算削减",
-        )
-        result = eng.evaluate(c)
-        assert [a.id for a in result.alerts] == ["low_satisfaction"]
 
 
 def test_no_alerts_on_healthy_customer():

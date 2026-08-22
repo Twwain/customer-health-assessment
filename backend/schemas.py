@@ -10,12 +10,8 @@ class CustomerBase(BaseModel):
     contact_phone: str = Field(default="", max_length=20)
     cooperation_years: float = Field(default=0, ge=0)
     contact_frequency: str = Field(default="每月")
-    last_contact_date: datetime.date | None = None
     customer_satisfaction: int = Field(default=5, ge=1, le=10)
     contract_amount: float = Field(default=0, ge=0)
-    payment_status: str = Field(default="正常")
-    risk_signals: str = Field(default="", max_length=500)
-    competitor_involvement: bool = False
     growth_potential: str = Field(default="中")
     notes: str = Field(default="")
     custom_fields: dict = Field(default_factory=dict)
@@ -32,12 +28,8 @@ class CustomerUpdate(BaseModel):
     contact_phone: str | None = Field(None, max_length=20)
     cooperation_years: float | None = Field(None, ge=0)
     contact_frequency: str | None = None
-    last_contact_date: datetime.date | None = None
     customer_satisfaction: int | None = Field(None, ge=1, le=10)
     contract_amount: float | None = Field(None, ge=0)
-    payment_status: str | None = None
-    risk_signals: str | None = Field(None, max_length=500)
-    competitor_involvement: bool | None = None
     growth_potential: str | None = None
     notes: str | None = None
     custom_fields: dict | None = None

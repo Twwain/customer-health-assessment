@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from database import engine, Base, SessionLocal
+from database import engine, Base, SessionLocal, migrate_drop_legacy_customer_columns
 from routers import assessment, chat, customers, knowledge
 
 def _migrate_legacy_data() -> None:
@@ -19,7 +19,9 @@ def _migrate_legacy_data() -> None:
 
     logger = logging.getLogger(__name__)
     db = SessionLocal()
-    steps: list[tuple[str, Any]] = []
+    steps: list[tuple[str, Any]] = [
+        ("删除 customers 旧版客情字段", migrate_drop_legacy_customer_columns),
+    ]
     try:
         from services.rag.knowledge_base import (
             migrate_add_industry_column,
@@ -29,11 +31,11 @@ def _migrate_legacy_data() -> None:
         from services.rag.vector_store import get_vector_store
 
         store = get_vector_store()
-        steps = [
+        steps.extend([
             ("补 knowledge_items.industry 列", lambda: migrate_add_industry_column(db, store=store)),
             ("校正历史知识分类名", lambda: migrate_legacy_categories(db, store=store)),
             ("seed 知识状态提升为 canonical", lambda: migrate_seed_knowledge_status(db, store=store)),
-        ]
+        ])
     except Exception as exc:  # pragma: no cover - 依赖导入失败不影响启动
         logger.warning("数据迁移准备失败：%s", exc)
     try:
