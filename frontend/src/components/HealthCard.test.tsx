@@ -17,7 +17,7 @@ function assessmentWithAlerts(count: number): AssessmentResponse {
     risk_alerts: Array.from({ length: count }, (_, i) => `预警 ${i + 1}`),
     alerts: Array.from({ length: count }, (_, i) => ({
       id: `alert_${i + 1}`,
-      level: i < 5 ? "high" : "medium",
+      level: i === count - 1 ? "high" : "medium",
       message: `预警 ${i + 1}`,
     })),
     suggestions: [],
@@ -27,16 +27,16 @@ function assessmentWithAlerts(count: number): AssessmentResponse {
 }
 
 describe("HealthCard alert preview", () => {
-  it("shows eight alerts by default and can expand the full list", async () => {
+  it("prioritizes high alerts in the preview and can expand the full list", async () => {
     const user = userEvent.setup();
     render(<HealthCard assessment={assessmentWithAlerts(10)} showTrendButton={false} />);
 
-    expect(screen.getByText(/预警 8/)).toBeInTheDocument();
-    expect(screen.queryByText(/预警 9/)).not.toBeInTheDocument();
+    expect(screen.getByText(/预警 10/)).toBeInTheDocument();
+    expect(screen.queryByText(/预警 8/)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "查看其余 2 项" }));
 
-    expect(screen.getByText(/预警 9/)).toBeInTheDocument();
+    expect(screen.getByText(/预警 8/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "收起预警" })).toBeInTheDocument();
   });
 });

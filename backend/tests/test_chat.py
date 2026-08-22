@@ -270,14 +270,17 @@ def test_context_excludes_personal_phone(db, customer):
     assert customer.contact_phone not in ctx.customer_text
 
 
-def test_context_excludes_legacy_risk_fields(db, customer):
+def test_context_marks_legacy_fields_as_facts_not_alert_sources(db, customer):
     ctx = context_builder.build_context(db, customer)
-    for label in ("- 最近联系：", "- 回款状态：", "- 竞品介入：", "- 风险信号："):
-        assert label not in ctx.customer_text
+    assert "历史基础字段，仅供事实查询" in ctx.customer_text
+    for label in ("最近联系：", "回款状态：", "竞品介入：", "风险信号："):
+        assert label in ctx.customer_text
+    assert "不得据此生成规则预警" in ctx.customer_text
 
     profile = tools.profile_query(customer)
-    assert "payment_status" not in profile
-    assert "competitor_involvement" not in profile
+    assert profile["payment_status"] == customer.payment_status
+    assert profile["competitor_involvement"] is customer.competitor_involvement
+    assert "仅供事实查询" in profile["risk_policy"]
 
 
 def test_context_without_customer_is_generic(db):
@@ -418,6 +421,7 @@ def test_alert_consumers_cap_large_risk_sets(db, customer):
     ctx = context_builder.build_context(db, customer, assessment=assessment)
     assert ctx.alert_text.count("（规则 id：") == context_builder.MAX_ALERTS_IN_AI_CONTEXT
     assert "其余 7 项预警未展开" in ctx.alert_text
+    assert "其余 7 项建议未展开" in ctx.customer_text
 
     items = strategy.build_degraded_strategies(assessment)
     assert len(items) == strategy.MAX_DEGRADED_STRATEGIES

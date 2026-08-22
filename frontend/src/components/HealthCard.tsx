@@ -14,6 +14,7 @@ interface HealthCardProps {
 }
 
 const ALERT_PREVIEW_LIMIT = 8;
+const ALERT_LEVEL_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
 
 function dimColor(pct: number): string {
   return pct >= 70 ? "#1AAE39" : pct >= 40 ? "#DD5B00" : "#E03131";
@@ -31,8 +32,12 @@ export default function HealthCard({
   const [alertsExpanded, setAlertsExpanded] = useState(false);
   const color = assessment.level_color || levelColor(assessment.level);
   const t = trend ? trendMeta(trend.latest_score, trend.previous_score) : null;
-  const visibleAlerts = alertsExpanded ? assessment.alerts : assessment.alerts.slice(0, ALERT_PREVIEW_LIMIT);
-  const hiddenAlertCount = assessment.alerts.length - visibleAlerts.length;
+  const prioritizedAlerts = assessment.alerts
+    .map((alert, index) => ({ alert, index }))
+    .sort((a, b) => (ALERT_LEVEL_ORDER[a.alert.level] ?? 9) - (ALERT_LEVEL_ORDER[b.alert.level] ?? 9) || a.index - b.index)
+    .map(({ alert }) => alert);
+  const visibleAlerts = alertsExpanded ? prioritizedAlerts : prioritizedAlerts.slice(0, ALERT_PREVIEW_LIMIT);
+  const hiddenAlertCount = prioritizedAlerts.length - visibleAlerts.length;
 
   return (
     <div className="rounded-xl border border-border bg-surface p-4">

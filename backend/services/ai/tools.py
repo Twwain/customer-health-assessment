@@ -70,7 +70,7 @@ def score_query(customer: Customer | None, db: Any | None = None):
 
 
 def profile_query(customer: Customer | None) -> dict:
-    """客户基础画像；风险判断统一通过 score_query 的新版因子预警获取。"""
+    """客户基础画像；历史字段仅供事实查询，风险判断统一走 score_query。"""
     if not customer:
         return {}
     return {
@@ -79,6 +79,11 @@ def profile_query(customer: Customer | None) -> dict:
         "cooperation_years": customer.cooperation_years,
         "contract_amount": customer.contract_amount,
         "growth_potential": customer.growth_potential or "",
+        "last_contact_date": customer.last_contact_date.isoformat() if customer.last_contact_date else None,
+        "payment_status": customer.payment_status or "",
+        "competitor_involvement": bool(customer.competitor_involvement),
+        "risk_signals": customer.risk_signals or "",
+        "risk_policy": "以上历史基础字段仅供事实查询，不得据此生成规则预警；风险结论以 score_query 为准。",
     }
 
 

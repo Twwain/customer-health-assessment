@@ -20,7 +20,7 @@ import config
 from models import Customer
 from schemas import AssessmentResponse, AssessmentTrendResponse
 from services import assessment_history
-from services.scoring import get_scoring_strategy
+from services.scoring import get_scoring_strategy, load_scoring_config
 
 NO_KNOWLEDGE_HINT = (
     "## 知识库参考资料\n"
@@ -63,6 +63,28 @@ def _alerts_for_ai(assessment: AssessmentResponse) -> tuple[list, int]:
     return selected, max(0, len(ordered) - len(selected))
 
 
+def _suggestions_for_ai(assessment: AssessmentResponse, selected_alerts: list) -> tuple[list[str], int]:
+    """只保留已展示预警的建议与机会建议，避免建议泄露被裁剪的预警。"""
+    scoring_config = load_scoring_config()
+    alert_suggestion_by_id = {rule.id: rule.suggestion for rule in scoring_config.alerts}
+    all_alert_suggestions = {rule.suggestion for rule in scoring_config.alerts if rule.suggestion}
+
+    candidates: list[str] = []
+    for alert in selected_alerts:
+        suggestion = alert_suggestion_by_id.get(alert.id, "")
+        if suggestion and suggestion in assessment.suggestions and suggestion not in candidates:
+            candidates.append(suggestion)
+
+    # 非预警规则产生的建议属于机会点，排在风险处置建议之后。
+    for suggestion in assessment.suggestions:
+        if suggestion not in all_alert_suggestions and suggestion not in candidates:
+            candidates.append(suggestion)
+
+    unique_total = len(dict.fromkeys(assessment.suggestions))
+    selected = candidates[:MAX_ALERTS_IN_AI_CONTEXT]
+    return selected, max(0, unique_total - len(selected))
+
+
 def fmt_score(value: float) -> str:
     """分数展示口径：最多两位小数并去尾零（0.233333→0.23，30.0→30）。
 
@@ -72,8 +94,8 @@ def fmt_score(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def _customer_profile(c: Customer) -> str:
-    """客户基础信息，不注入旧版风险判断字段与联系电话等隐私字段。"""
+def _customer_profile(c: Customer, today: datetime.date) -> str:
+    """客户基础信息；旧版字段仅供事实查询，不参与规则预警。"""
     lines = [
         "## 客户基础信息",
         f"- 客户名称：{c.customer_name}",
@@ -86,6 +108,18 @@ def _customer_profile(c: Customer) -> str:
     lines += [
         f"- 年度合同金额：{c.contract_amount} 万元",
         f"- 增长潜力：{c.growth_potential or '未填写'}",
+    ]
+
+    lines.append("- 以下为历史基础字段，仅供事实查询；不得据此生成规则预警或推断风险等级：")
+    if c.last_contact_date:
+        days = (today - c.last_contact_date).days
+        lines.append(f"  - 最近联系：{c.last_contact_date.isoformat()}（距今 {days} 天）")
+    else:
+        lines.append("  - 最近联系：无记录")
+    lines += [
+        f"  - 回款状态：{c.payment_status or '未填写'}",
+        f"  - 竞品介入：{'是' if c.competitor_involvement else '否'}",
+        f"  - 风险信号：{c.risk_signals or '无'}",
     ]
     if c.notes:
         lines.append(f"- 备注：{c.notes}")
@@ -103,11 +137,12 @@ def _assessment_section(a: AssessmentResponse) -> str:
     for d in a.dimensions:
         lines.append(f"  - {d.name}：{fmt_score(d.score)}/{fmt_score(d.max_score)}")
 
+    selected_alerts: list = []
     if a.alerts:
         lines.append("- 规则引擎预警：")
         level_cn = {"high": "高", "medium": "中", "low": "低"}
-        alerts, omitted = _alerts_for_ai(a)
-        for alert in alerts:
+        selected_alerts, omitted = _alerts_for_ai(a)
+        for alert in selected_alerts:
             lines.append(f"  - [{level_cn.get(alert.level, alert.level)}] {alert.message}")
         if omitted:
             lines.append(f"  - 其余 {omitted} 项预警未展开，请以结构化评估结果为准")
@@ -116,8 +151,11 @@ def _assessment_section(a: AssessmentResponse) -> str:
 
     if a.suggestions:
         lines.append("- 规则引擎建议（供参考，可在此基础上深化）：")
-        for s in a.suggestions:
+        suggestions, omitted = _suggestions_for_ai(a, selected_alerts)
+        for s in suggestions:
             lines.append(f"  - {s}")
+        if omitted:
+            lines.append(f"  - 其余 {omitted} 项建议未展开")
 
     return "\n".join(lines)
 
@@ -288,7 +326,7 @@ def build_context(
         )
 
     sections = [
-        _customer_profile(customer),
+        _customer_profile(customer, today),
         _assessment_section(assessment),
         _trend_section(trend),
     ]
