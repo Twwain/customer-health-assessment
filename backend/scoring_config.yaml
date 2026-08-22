@@ -1283,7 +1283,7 @@ dimensions:
 
 # ── 风险预警规则（顺序即展示顺序）────────────────────────────────────────────
 # level：high=红 / medium=黄 / low=蓝（前端 AlertBadge 色彩编码）
-# 来源：仅使用当前客情因子配置（custom_fields）生成预警
+# 来源：仅使用当前已启用的客情因子配置生成预警
 # when.op 支持：truthy / falsy / is_true / is_false / empty / eq / ne /
 #               lt / lte / gt / gte / in / not_in / contains /
 #               days_since_gt / days_since_gt_or_empty
@@ -1358,6 +1358,150 @@ alerts:
       value: 无
     message: "客户内部缺少 Champion，方案推进缺乏内部推手"
     suggestion: "建议识别并培养决策层 Champion"
+
+  - id: low_satisfaction
+    level: high
+    when:
+      all:
+        - field: customer_satisfaction
+          source: model
+          op: gt
+          value: 0
+        - field: customer_satisfaction
+          source: model
+          op: lte
+          value: 4
+    message: "客户满意度较低({value}/10)，存在流失风险"
+    suggestion: "建议深入了解客户不满原因并制定改善计划"
+
+  - id: key_person_support_critical
+    level: high
+    when:
+      field: kcr_07
+      source: custom_fields
+      op: eq
+      value: "<20%支持"
+    message: "关键人支持度低于20%，决策链缺少有效支持"
+    suggestion: "建议重新识别关键人立场，制定反对者转化与支持者培育计划"
+
+  - id: executive_coverage_gap
+    level: medium
+    when:
+      field: kcr_03
+      source: custom_fields
+      op: eq
+      value: "<40%"
+    message: "高层CXO/VP覆盖率低于40%，高层关系存在明显断层"
+    suggestion: "建议制定高层关系拓展计划，优先覆盖经济决策者与业务负责人"
+
+  - id: frontline_backup_missing
+    level: medium
+    when:
+      field: er_09
+      source: custom_fields
+      op: eq
+      value: "0人"
+    message: "基层关系无备份，当前对接关系存在单点风险"
+    suggestion: "建议至少建立2名可独立对接的基层联系人"
+
+  - id: executive_visit_missing
+    level: medium
+    when:
+      field: or_02
+      source: custom_fields
+      op: eq
+      value: "0次"
+    message: "近12个月无高层互访，组织级关系维护不足"
+    suggestion: "建议安排双方VP及以上管理层正式会晤，明确战略合作议题"
+
+  - id: decision_criteria_unknown
+    level: medium
+    when:
+      field: ci_03
+      source: custom_fields
+      op: eq
+      value: 不了解
+    message: "不了解客户采购决策标准，方案存在失焦风险"
+    suggestion: "建议补齐决策标准、权重与评审流程，并完成方案对齐"
+
+  - id: payment_cycle_over_90
+    level: high
+    when:
+      field: his_07
+      source: custom_fields
+      op: eq
+      value: ">90天"
+    message: "平均回款周期超过90天，现金流与信用风险较高"
+    suggestion: "建议由销售与财务联合制定回款计划，核查逾期原因与风险敞口"
+
+  - id: lifecycle_decline_accelerating
+    level: high
+    when:
+      field: his_09b
+      source: custom_fields
+      op: eq
+      value: 衰退加速
+    message: "客户生命周期进入加速衰退阶段，合作规模存在持续收缩风险"
+    suggestion: "建议启动客户挽回计划，重新评估需求、价值空间与资源投入"
+
+  - id: competitive_position_critical
+    level: high
+    when:
+      any:
+        - field: risk_02
+          source: custom_fields
+          op: eq
+          value: "≥第4名"
+        - field: risk_03
+          source: custom_fields
+          op: eq
+          value: 大幅落后
+        - field: risk_04
+          source: custom_fields
+          op: eq
+          value: 易替换
+    message: "竞争地位已进入危险区，存在较高替换或出局风险"
+    suggestion: "建议启动竞争专项，明确差距、关键决策人和差异化反制动作"
+
+  - id: delivery_quality_failure
+    level: high
+    when:
+      any:
+        - field: svc_01
+          source: custom_fields
+          op: eq
+          value: 0项达标
+        - field: svc_02
+          source: custom_fields
+          op: eq
+          value: "<80%"
+    message: "项目交付或验收质量未达底线，客户满意度存在恶化风险"
+    suggestion: "建议立即建立交付整改清单，明确责任人、完成时间与客户验收标准"
+
+  - id: service_sla_failure
+    level: high
+    when:
+      any:
+        - field: svc_03
+          source: custom_fields
+          op: eq
+          value: 未达标
+        - field: svc_04
+          source: custom_fields
+          op: eq
+          value: 未达标
+    message: "故障响应或解决效率未达标，服务连续性风险较高"
+    suggestion: "建议启动SLA专项整改，复盘响应链路并提升一次解决率"
+
+  - id: customer_followup_missing
+    level: medium
+    when:
+      field: svc_06
+      source: custom_fields
+      op: eq
+      value: 无回访
+    message: "项目交付后无客户回访，服务闭环缺失"
+    suggestion: "建议建立标准化回访机制并跟踪问题闭环与客户反馈"
 
 # ── 机会点建议（不产生预警，仅追加建议）──────────────────────────────────────
 opportunities:

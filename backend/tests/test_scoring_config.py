@@ -205,11 +205,44 @@ def test_alerts_cover_ppt_triggers():
     assert alerts["champion_missing"] == "medium"
 
 
+def test_expanded_alerts_cover_all_dimensions():
+    """高价值扩展预警覆盖 KCR/ER/OR/CI/HIS/RISK/SVC 七个维度。"""
+    c = make_customer(
+        custom_fields={
+            "kcr_03": "<40%",
+            "kcr_07": "<20%支持",
+            "er_09": "0人",
+            "or_02": "0次",
+            "ci_03": "不了解",
+            "his_07": ">90天",
+            "his_09b": "衰退加速",
+            "risk_02": "≥第4名",
+            "svc_01": "0项达标",
+            "svc_03": "未达标",
+            "svc_06": "无回访",
+        }
+    )
+    alerts = {a.id: a.level for a in HealthScoreEngine().evaluate(c).alerts}
+    assert alerts == {
+        "key_person_support_critical": "high",
+        "executive_coverage_gap": "medium",
+        "frontline_backup_missing": "medium",
+        "executive_visit_missing": "medium",
+        "decision_criteria_unknown": "medium",
+        "payment_cycle_over_90": "high",
+        "lifecycle_decline_accelerating": "high",
+        "competitive_position_critical": "high",
+        "delivery_quality_failure": "high",
+        "service_sla_failure": "high",
+        "customer_followup_missing": "medium",
+    }
+
+
 def test_all_alerts_use_current_factor_config():
-    """每条预警的叶子条件都必须引用当前启用的客情因子。"""
+    """每条预警的叶子条件都必须引用当前启用因子，并使用其真实数据来源。"""
     config = load_scoring_config()
-    enabled_fields = {
-        factor.field
+    enabled_factors = {
+        factor.field: factor
         for dimension in config.enabled_dimensions
         for factor in dimension.enabled_factors
     }
@@ -223,12 +256,12 @@ def test_all_alerts_use_current_factor_config():
 
     for alert in config.alerts:
         for condition in leaves(alert.when):
-            assert condition.source == "custom_fields", alert.id
-            assert condition.field in enabled_fields, alert.id
+            assert condition.field in enabled_factors, alert.id
+            assert condition.source == enabled_factors[condition.field].source, alert.id
 
 
-def test_legacy_fields_do_not_trigger_alerts():
-    """旧版客户字段不再参与预警，预警完全由当前客情因子驱动。"""
+def test_removed_legacy_fields_do_not_trigger_alerts():
+    """旧字段不再预警，但当前 HIS-09 满意度因子仍正常预警。"""
     c = make_customer(
         last_contact_date=datetime.date.today() - datetime.timedelta(days=120),
         customer_satisfaction=3,
@@ -237,7 +270,7 @@ def test_legacy_fields_do_not_trigger_alerts():
         risk_signals="预算削减",
     )
     result = HealthScoreEngine().evaluate(c)
-    assert result.alerts == []
+    assert [a.id for a in result.alerts] == ["low_satisfaction"]
 
 
 def test_opportunity_suggestion_appended_last():

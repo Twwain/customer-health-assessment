@@ -149,7 +149,39 @@ def test_ppt_alerts_trigger():
         assert alerts["champion_missing"] == "medium"
 
 
-def test_legacy_fields_do_not_trigger_alerts():
+def test_expanded_alerts_cover_all_dimensions():
+    custom_fields = {
+        "kcr_03": "<40%",
+        "kcr_07": "<20%支持",
+        "er_09": "0人",
+        "or_02": "0次",
+        "ci_03": "不了解",
+        "his_07": ">90天",
+        "his_09b": "衰退加速",
+        "risk_02": "≥第4名",
+        "svc_01": "0项达标",
+        "svc_03": "未达标",
+        "svc_06": "无回访",
+    }
+    expected = {
+        "key_person_support_critical": "high",
+        "executive_coverage_gap": "medium",
+        "frontline_backup_missing": "medium",
+        "executive_visit_missing": "medium",
+        "decision_criteria_unknown": "medium",
+        "payment_cycle_over_90": "high",
+        "lifecycle_decline_accelerating": "high",
+        "competitive_position_critical": "high",
+        "delivery_quality_failure": "high",
+        "service_sla_failure": "high",
+        "customer_followup_missing": "medium",
+    }
+    for eng in engines():
+        alerts = {a.id: a.level for a in eng.evaluate(base_customer(custom_fields=custom_fields)).alerts}
+        assert alerts == expected
+
+
+def test_removed_legacy_fields_do_not_trigger_alerts():
     for eng in engines():
         c = base_customer(
             last_contact_date=datetime.date.today() - datetime.timedelta(days=100),
@@ -159,7 +191,7 @@ def test_legacy_fields_do_not_trigger_alerts():
             risk_signals="预算削减",
         )
         result = eng.evaluate(c)
-        assert result.alerts == []
+        assert [a.id for a in result.alerts] == ["low_satisfaction"]
 
 
 def test_no_alerts_on_healthy_customer():
