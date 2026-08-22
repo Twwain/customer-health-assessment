@@ -56,7 +56,7 @@ def _reset_cache():
 
 def test_default_config_loads():
     config = load_scoring_config()
-    assert config.version == "2026.08"
+    assert config.version == "2026.08.22"
     assert config.source_path.endswith("scoring_config.yaml")
 
 
@@ -284,7 +284,7 @@ def test_opportunity_suggestion_appended_last():
 
 
 def test_config_version_returned_in_assessment():
-    assert HealthScoreEngine().evaluate(make_customer()).config_version == "2026.08"
+    assert HealthScoreEngine().evaluate(make_customer()).config_version == "2026.08.22"
 
 
 # ── 3. 改配置即改算法（§11.1 首条验收）────────────────────────────────────

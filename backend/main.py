@@ -19,9 +19,7 @@ def _migrate_legacy_data() -> None:
 
     logger = logging.getLogger(__name__)
     db = SessionLocal()
-    steps: list[tuple[str, Any]] = [
-        ("删除 customers 旧版客情字段", migrate_drop_legacy_customer_columns),
-    ]
+    steps: list[tuple[str, Any]] = []
     try:
         from services.rag.knowledge_base import (
             migrate_add_industry_column,
@@ -53,6 +51,8 @@ def _migrate_legacy_data() -> None:
 async def lifespan(_: FastAPI):
     """应用启动时初始化数据库；单纯导入 ``main`` 不再产生写库副作用。"""
     Base.metadata.create_all(bind=engine)
+    # 结构迁移是当前模型契约的一部分，失败时必须阻止服务启动，不能带病运行。
+    migrate_drop_legacy_customer_columns()
     _migrate_legacy_data()
     yield
 

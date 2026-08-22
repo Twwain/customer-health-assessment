@@ -48,6 +48,8 @@ def _is_duplicate(last: AssessmentHistory, assessment: AssessmentResponse, snaps
     return (
         abs(last.total_score - assessment.total_score) < TREND_EPSILON
         and (last.factor_snapshot or {}) == snapshot
+        and last.config_version == assessment.config_version
+        and (last.risk_alerts or []) == list(assessment.risk_alerts)
     )
 
 

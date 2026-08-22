@@ -91,6 +91,20 @@ def test_unchanged_assessment_is_not_duplicated(db, customer):
     assert db.query(AssessmentHistory).count() == 1
 
 
+def test_config_or_alert_change_creates_new_snapshot(db, customer):
+    assessment = get_scoring_strategy().evaluate(customer)
+    assert assessment_history.record_assessment(db, customer, assessment) is not None
+
+    new_version = assessment.model_copy(update={"config_version": "next-version"})
+    assert assessment_history.record_assessment(db, customer, new_version) is not None
+
+    new_alerts = new_version.model_copy(
+        update={"risk_alerts": [*new_version.risk_alerts, "新增预警"]}
+    )
+    assert assessment_history.record_assessment(db, customer, new_alerts) is not None
+    assert db.query(AssessmentHistory).count() == 3
+
+
 def test_overview_uses_latest_snapshot_without_live_rescoring(db, customer, monkeypatch):
     record = assessment_history.record_assessment(db, customer)
     expected_score = record.total_score
