@@ -70,7 +70,7 @@ def score_query(customer: Customer | None, db: Any | None = None):
 
 
 def profile_query(customer: Customer | None) -> dict:
-    """客户画像（行业 / 合作年限 / 回款 / 竞品等），供 Agent 判断上下文。"""
+    """客户基础画像；风险判断统一通过 score_query 的新版因子预警获取。"""
     if not customer:
         return {}
     return {
@@ -78,8 +78,6 @@ def profile_query(customer: Customer | None) -> dict:
         "industry": customer.industry or "",
         "cooperation_years": customer.cooperation_years,
         "contract_amount": customer.contract_amount,
-        "payment_status": customer.payment_status or "",
-        "competitor_involvement": bool(customer.competitor_involvement),
         "growth_potential": customer.growth_potential or "",
     }
 

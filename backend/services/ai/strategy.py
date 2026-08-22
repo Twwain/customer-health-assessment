@@ -19,6 +19,7 @@ from services.scoring import load_scoring_config
 
 PRIORITIES = ("recommended", "alternative", "long_term")
 URGENCIES = ("high", "medium", "low")
+MAX_DEGRADED_STRATEGIES = 10
 
 PRIORITY_ALIASES = {
     "recommended": "recommended",
@@ -231,7 +232,7 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
         )
 
     items.sort(key=_sort_key)
-    return items
+    return items[:MAX_DEGRADED_STRATEGIES]
 
 
 _GROUP_TITLES = {

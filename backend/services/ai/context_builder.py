@@ -29,6 +29,8 @@ NO_KNOWLEDGE_HINT = (
 )
 
 TREND_LABEL = {"up": "↑ 上升", "down": "↓ 下降", "flat": "→ 持平"}
+MAX_ALERTS_IN_AI_CONTEXT = 12
+_ALERT_LEVEL_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
 @dataclass
@@ -51,10 +53,14 @@ class ChatContext:
 # ── 分段渲染 ────────────────────────────────────────────────────────────────
 
 
-def _fmt_date(value) -> str:
-    if isinstance(value, (datetime.date, datetime.datetime)):
-        return value.strftime("%Y-%m-%d")
-    return str(value or "未记录")
+def _alerts_for_ai(assessment: AssessmentResponse) -> tuple[list, int]:
+    """按等级稳定排序并限制注入量，完整预警仍保留在 assessment 中。"""
+    ordered = sorted(
+        enumerate(assessment.alerts),
+        key=lambda pair: (_ALERT_LEVEL_ORDER.get(pair[1].level, 9), pair[0]),
+    )
+    selected = [alert for _, alert in ordered[:MAX_ALERTS_IN_AI_CONTEXT]]
+    return selected, max(0, len(ordered) - len(selected))
 
 
 def fmt_score(value: float) -> str:
@@ -66,8 +72,8 @@ def fmt_score(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def _customer_profile(c: Customer, today: datetime.date) -> str:
-    """客户基础信息。刻意不含联系电话等个人隐私字段。"""
+def _customer_profile(c: Customer) -> str:
+    """客户基础信息，不注入旧版风险判断字段与联系电话等隐私字段。"""
     lines = [
         "## 客户基础信息",
         f"- 客户名称：{c.customer_name}",
@@ -77,18 +83,9 @@ def _customer_profile(c: Customer, today: datetime.date) -> str:
         f"- 沟通频率：{c.contact_frequency or '未填写'}",
     ]
 
-    if c.last_contact_date:
-        days = (today - c.last_contact_date).days
-        lines.append(f"- 最近联系：{_fmt_date(c.last_contact_date)}（距今 {days} 天）")
-    else:
-        lines.append("- 最近联系：无记录")
-
     lines += [
         f"- 年度合同金额：{c.contract_amount} 万元",
-        f"- 回款状态：{c.payment_status or '未填写'}",
         f"- 增长潜力：{c.growth_potential or '未填写'}",
-        f"- 竞品介入：{'是' if c.competitor_involvement else '否'}",
-        f"- 风险信号：{c.risk_signals or '无'}",
     ]
     if c.notes:
         lines.append(f"- 备注：{c.notes}")
@@ -109,8 +106,11 @@ def _assessment_section(a: AssessmentResponse) -> str:
     if a.alerts:
         lines.append("- 规则引擎预警：")
         level_cn = {"high": "高", "medium": "中", "low": "低"}
-        for alert in a.alerts:
+        alerts, omitted = _alerts_for_ai(a)
+        for alert in alerts:
             lines.append(f"  - [{level_cn.get(alert.level, alert.level)}] {alert.message}")
+        if omitted:
+            lines.append(f"  - 其余 {omitted} 项预警未展开，请以结构化评估结果为准")
     else:
         lines.append("- 规则引擎预警：无")
 
@@ -148,8 +148,11 @@ def build_alert_context(
     lines = ["## 待解读的预警"]
     if assessment.alerts:
         level_cn = {"high": "高", "medium": "中", "low": "低"}
-        for alert in assessment.alerts:
+        alerts, omitted = _alerts_for_ai(assessment)
+        for alert in alerts:
             lines.append(f"- [{level_cn.get(alert.level, alert.level)}] {alert.message}（规则 id：{alert.id}）")
+        if omitted:
+            lines.append(f"- 其余 {omitted} 项预警未展开，请优先解读以上高等级预警")
     else:
         lines.append("- 当前无触发的预警规则，请说明客户整体处于可控状态，并指出需要持续观察的指标。")
 
@@ -285,7 +288,7 @@ def build_context(
         )
 
     sections = [
-        _customer_profile(customer, today),
+        _customer_profile(customer),
         _assessment_section(assessment),
         _trend_section(trend),
     ]

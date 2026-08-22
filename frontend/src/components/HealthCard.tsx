@@ -13,6 +13,8 @@ interface HealthCardProps {
   onEditFactors?: () => void;
 }
 
+const ALERT_PREVIEW_LIMIT = 8;
+
 function dimColor(pct: number): string {
   return pct >= 70 ? "#1AAE39" : pct >= 40 ? "#DD5B00" : "#E03131";
 }
@@ -26,8 +28,11 @@ export default function HealthCard({
   onEditFactors,
 }: HealthCardProps) {
   const [trendOpen, setTrendOpen] = useState(false);
+  const [alertsExpanded, setAlertsExpanded] = useState(false);
   const color = assessment.level_color || levelColor(assessment.level);
   const t = trend ? trendMeta(trend.latest_score, trend.previous_score) : null;
+  const visibleAlerts = alertsExpanded ? assessment.alerts : assessment.alerts.slice(0, ALERT_PREVIEW_LIMIT);
+  const hiddenAlertCount = assessment.alerts.length - visibleAlerts.length;
 
   return (
     <div className="rounded-xl border border-border bg-surface p-4">
@@ -78,7 +83,18 @@ export default function HealthCard({
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         {assessment.alerts.length > 0 ? (
-          assessment.alerts.map((a, i) => <AlertBadge key={i} level={a.level} message={a.message} />)
+          <>
+            {visibleAlerts.map((a) => <AlertBadge key={a.id} level={a.level} message={a.message} />)}
+            {assessment.alerts.length > ALERT_PREVIEW_LIMIT && (
+              <button
+                type="button"
+                className="rounded border border-border px-1.5 py-0.5 text-[12px] text-muted transition hover:border-accent hover:text-accent"
+                onClick={() => setAlertsExpanded((value) => !value)}
+              >
+                {alertsExpanded ? "收起预警" : `查看其余 ${hiddenAlertCount} 项`}
+              </button>
+            )}
+          </>
         ) : (
           <span className="text-[12px] text-muted">— 无预警</span>
         )}

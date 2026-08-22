@@ -238,6 +238,23 @@ def test_expanded_alerts_cover_all_dimensions():
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "alert_id"),
+    [
+        ("risk_02", "≥第4名", "competitive_position_critical"),
+        ("risk_03", "大幅落后", "competitive_position_critical"),
+        ("risk_04", "易替换", "competitive_position_critical"),
+        ("svc_01", "0项达标", "delivery_quality_failure"),
+        ("svc_02", "<80%", "delivery_quality_failure"),
+        ("svc_03", "未达标", "service_sla_failure"),
+        ("svc_04", "未达标", "service_sla_failure"),
+    ],
+)
+def test_composite_alert_each_branch(field, value, alert_id):
+    alerts = HealthScoreEngine().evaluate(make_customer(custom_fields={field: value})).alerts
+    assert [a.id for a in alerts] == [alert_id]
+
+
 def test_all_alerts_use_current_factor_config():
     """每条预警的叶子条件都必须引用当前启用因子，并使用其真实数据来源。"""
     config = load_scoring_config()

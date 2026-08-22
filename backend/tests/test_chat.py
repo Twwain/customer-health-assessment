@@ -270,6 +270,16 @@ def test_context_excludes_personal_phone(db, customer):
     assert customer.contact_phone not in ctx.customer_text
 
 
+def test_context_excludes_legacy_risk_fields(db, customer):
+    ctx = context_builder.build_context(db, customer)
+    for label in ("- 最近联系：", "- 回款状态：", "- 竞品介入：", "- 风险信号："):
+        assert label not in ctx.customer_text
+
+    profile = tools.profile_query(customer)
+    assert "payment_status" not in profile
+    assert "competitor_involvement" not in profile
+
+
 def test_context_without_customer_is_generic(db):
     ctx = context_builder.build_context(db, None)
     assert ctx.assessment is None
@@ -376,6 +386,42 @@ def test_degraded_strategies_from_rule_engine(db, customer):
     assert "✅ 推荐策略" in markdown
     assert "原因：" not in markdown
     assert "预期：" not in markdown
+
+
+def test_alert_consumers_cap_large_risk_sets(db, customer):
+    customer.customer_satisfaction = 3
+    customer.custom_fields = {
+        "risk_08b": "高(<60%)",
+        "risk_08c": "危机",
+        "risk_07": "是且进展顺利",
+        "risk_08": "≥2次或重大投诉",
+        "risk_05": "≥2人变动",
+        "risk_06": "下降≥20%",
+        "kcr_08": "无",
+        "kcr_07": "<20%支持",
+        "kcr_03": "<40%",
+        "er_09": "0人",
+        "or_02": "0次",
+        "ci_03": "不了解",
+        "his_07": ">90天",
+        "his_09b": "衰退加速",
+        "risk_02": "≥第4名",
+        "svc_01": "0项达标",
+        "svc_03": "未达标",
+        "svc_06": "无回访",
+    }
+    db.commit()
+
+    assessment = tools.score_query(customer)
+    assert len(assessment.alerts) == 19
+
+    ctx = context_builder.build_context(db, customer, assessment=assessment)
+    assert ctx.alert_text.count("（规则 id：") == context_builder.MAX_ALERTS_IN_AI_CONTEXT
+    assert "其余 7 项预警未展开" in ctx.alert_text
+
+    items = strategy.build_degraded_strategies(assessment)
+    assert len(items) == strategy.MAX_DEGRADED_STRATEGIES
+    assert all(item["priority"] == "recommended" for item in items)
 
 
 def test_degraded_strategies_for_healthy_customer(db):
