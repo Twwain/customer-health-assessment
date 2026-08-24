@@ -19,7 +19,14 @@ def _migrate_legacy_data() -> None:
 
     logger = logging.getLogger(__name__)
     db = SessionLocal()
-    steps: list[tuple[str, Any]] = []
+    from services import assessment_history as assessment_history_service
+
+    steps: list[tuple[str, Any]] = [
+        (
+            "补当前评分配置快照",
+            lambda: assessment_history_service.backfill_current_config_snapshots(db),
+        ),
+    ]
     try:
         from services.rag.knowledge_base import (
             migrate_add_industry_column,

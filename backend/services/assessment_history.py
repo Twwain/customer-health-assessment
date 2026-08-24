@@ -108,6 +108,50 @@ def record_assessment(
     return record
 
 
+def backfill_current_config_snapshots(db: Session) -> int:
+    """为缺少当前评分配置快照的客户补齐一次评估结果。
+
+    配置版本升级后，总览与等级筛选只读取当前版本快照。这里在启动迁移阶段
+    一次性回填缺失客户，避免每次请求都退化为全量实时评分。已有当前版本
+    快照的客户会被跳过，因此重复启动不会产生重复记录。
+    """
+    scoring = get_scoring_strategy()
+    config_version = scoring.config.version
+    current_snapshot_customers = (
+        db.query(AssessmentHistory.customer_id)
+        .filter(AssessmentHistory.config_version == config_version)
+        .distinct()
+        .subquery()
+    )
+    customers = (
+        db.query(Customer)
+        .outerjoin(
+            current_snapshot_customers,
+            Customer.id == current_snapshot_customers.c.customer_id,
+        )
+        .filter(current_snapshot_customers.c.customer_id.is_(None))
+        .all()
+    )
+
+    created = 0
+    for customer in customers:
+        assessment = scoring.evaluate(customer)
+        record_assessment(
+            db,
+            customer,
+            assessment,
+            assessed_by="system",
+            trigger="config_upgrade",
+            skip_if_unchanged=False,
+            commit=False,
+        )
+        created += 1
+
+    if created:
+        db.commit()
+    return created
+
+
 def attach_strategy_snapshot(db: Session, customer_id: int, items: list, commit: bool = True) -> bool:
     """把 AI 生成的策略回写到最近一条评估快照。
 

@@ -105,6 +105,40 @@ def test_config_or_alert_change_creates_new_snapshot(db, customer):
     assert db.query(AssessmentHistory).count() == 3
 
 
+def test_backfill_current_config_snapshots_is_idempotent(db, customer):
+    assessment = get_scoring_strategy().evaluate(customer)
+    old_assessment = assessment.model_copy(update={"config_version": "previous-version"})
+    assessment_history.record_assessment(
+        db,
+        customer,
+        old_assessment,
+        skip_if_unchanged=False,
+    )
+
+    assert assessment_history.backfill_current_config_snapshots(db) == 1
+    records = assessment_history.list_history(db, customer.id)
+    assert len(records) == 2
+    assert records[0].config_version == assessment.config_version
+    assert records[0].trigger == "config_upgrade"
+
+    assert assessment_history.backfill_current_config_snapshots(db) == 0
+    assert db.query(AssessmentHistory).count() == 2
+
+
+def test_backfill_skips_customer_with_current_config_snapshot(db, customer, monkeypatch):
+    assessment_history.record_assessment(db, customer)
+
+    class SnapshotOnlyStrategy:
+        config = get_scoring_strategy().config
+
+        def evaluate(self, _customer):
+            raise AssertionError("已有当前版本快照的客户不应重新评分")
+
+    monkeypatch.setattr(assessment_history, "get_scoring_strategy", lambda: SnapshotOnlyStrategy())
+    assert assessment_history.backfill_current_config_snapshots(db) == 0
+    assert db.query(AssessmentHistory).count() == 1
+
+
 def test_overview_uses_latest_snapshot_without_live_rescoring(db, customer, monkeypatch):
     record = assessment_history.record_assessment(db, customer)
     expected_score = record.total_score
