@@ -69,6 +69,8 @@ export default function Chat() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pendingScenario = useRef<Scenario | null>(null);
   const pollRef = useRef<number | null>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
@@ -153,6 +155,7 @@ export default function Chat() {
   const sendTurn = async (id: number, endpoint: string, body: Record<string, unknown>) => {
     if (busyRef.current) return;
     busyRef.current = true;
+    followLatestRef.current = true;
     setBusy(true);
     setError(null);
     if (body.content) {
@@ -241,6 +244,16 @@ export default function Chat() {
 
   // 组件卸载时停止恢复轮询
   useEffect(() => () => stopPolling(), []);
+
+  // 默认跟随最新消息；用户主动向上查看历史后暂停，回到底部附近时恢复。
+  useEffect(() => {
+    if (!followLatestRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const list = messageListRef.current;
+      if (list) list.scrollTop = list.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, stream, resuming, busy, error]);
 
   const runQuick = (scenario: Scenario) => {
     if (!sessionIdNum) return;
@@ -465,7 +478,16 @@ export default function Chat() {
       </div>
 
       {/* 消息区 */}
-      <div className="min-h-0 flex-1 overflow-y-auto bg-bg">
+      <div
+        ref={messageListRef}
+        data-testid="chat-message-list"
+        className="min-h-0 flex-1 overflow-y-auto bg-bg"
+        onScroll={(event) => {
+          const list = event.currentTarget;
+          const distanceToBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+          followLatestRef.current = distanceToBottom <= 64;
+        }}
+      >
         <div className="mx-auto max-w-[860px] space-y-4 px-4 py-4">
           {display.map((m, i) => {
             const isStream = stream != null && i === display.length - 1;

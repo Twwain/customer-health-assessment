@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { UiFeedbackProvider } from "../components/UiFeedback";
+import type { ChatEvent } from "../types";
 import Chat from "./Chat";
 
-const { deleteSession } = vi.hoisted(() => ({ deleteSession: vi.fn() }));
+const { deleteSession, streamChat } = vi.hoisted(() => ({
+  deleteSession: vi.fn(),
+  streamChat: vi.fn(),
+}));
 
 vi.mock("../api", () => ({
-  streamChat: vi.fn(),
+  streamChat,
   customers: {
     assessment: vi.fn().mockResolvedValue(null),
     trend: vi.fn().mockResolvedValue(null),
@@ -41,7 +45,10 @@ function renderChat() {
 }
 
 describe("Chat 核心操作", () => {
-  beforeEach(() => deleteSession.mockReset().mockResolvedValue(undefined));
+  beforeEach(() => {
+    deleteSession.mockReset().mockResolvedValue(undefined);
+    streamChat.mockReset().mockResolvedValue(undefined);
+  });
 
   it("删除会话先经过应用内确认框，取消时不调用接口", async () => {
     renderChat();
@@ -59,5 +66,52 @@ describe("Chat 核心操作", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(7));
     expect(await screen.findByText("会话首页")).toBeInTheDocument();
+  });
+
+  it("发送消息和流式内容更新时自动滚动到最新位置", async () => {
+    streamChat.mockImplementation(async (_url, _body, onEvent) => {
+      onEvent({ type: "delta", data: { text: "流式回复" } });
+    });
+    renderChat();
+    await screen.findByText("测试会话");
+
+    const messageList = screen.getByTestId("chat-message-list");
+    Object.defineProperty(messageList, "scrollHeight", { configurable: true, value: 800 });
+    Object.defineProperty(messageList, "clientHeight", { configurable: true, value: 200 });
+
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), {
+      target: { value: "你好" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+
+    await screen.findByText("流式回复");
+    await waitFor(() => expect(messageList.scrollTop).toBe(800));
+  });
+
+  it("用户向上查看历史时不强制滚回底部", async () => {
+    let emit: ((event: ChatEvent) => void) | undefined;
+    streamChat.mockImplementation(async (_url, _body, onEvent) => {
+      emit = onEvent;
+    });
+    renderChat();
+    await screen.findByText("测试会话");
+
+    const messageList = screen.getByTestId("chat-message-list");
+    Object.defineProperty(messageList, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(messageList, "clientHeight", { configurable: true, value: 200 });
+
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), {
+      target: { value: "你好" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+    await waitFor(() => expect(streamChat).toHaveBeenCalled());
+    await waitFor(() => expect(messageList.scrollTop).toBe(1000));
+
+    messageList.scrollTop = 100;
+    fireEvent.scroll(messageList);
+    act(() => emit?.({ type: "delta", data: { text: "继续生成" } }));
+
+    await screen.findByText("继续生成");
+    expect(messageList.scrollTop).toBe(100);
   });
 });
