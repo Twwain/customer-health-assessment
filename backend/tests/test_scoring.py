@@ -1,8 +1,8 @@
-"""配置驱动评分引擎端到端测试（7 维度 × 60 因子）。
+"""配置驱动评分引擎端到端测试（7 维度 × 28 因子）。
 
 覆盖：
 1. 默认空因子客户的最低分口径（客观事实驱动，无记录即低分）
-2. 60 因子全取最高档 → 总分 100 / 健康
+2. 28 因子全取最高档 → 总分 100 / 健康
 3. 代表性因子分档规则、RISK 风险因子扣分
 4. 自动预警触发、机会点建议
 5. 两种引擎（RuleBasedStrategy / HealthScoreEngine）输出一致
@@ -44,7 +44,7 @@ def _dim_score(result, key):
 def test_empty_factors_score_minimum():
     for eng in engines():
         result = eng.evaluate(base_customer())
-        assert result.total_score == pytest.approx(13.1)
+        assert result.total_score == pytest.approx(8.8)
         assert result.level == "高危"
         assert result.max_score == 100
 
@@ -92,87 +92,55 @@ def test_ci_dimension_is_zero_without_insight_data():
 
 
 def test_his_09_satisfaction_brackets():
-    """HIS-09 满意度调研（模型列 1-10）：9/7/6 三档 + 默认低档。"""
+    """HIS-09 接收模板中的 NPS 原始分。"""
     for eng in engines():
-        for rating, tail in ((10, "+0.9分"), (8, "+0.63分"), (6, "+0.36分"), (3, "+0.09分")):
-            dim = _dim_score(eng.evaluate(base_customer(customer_satisfaction=rating)), "his")
-            assert any(d.startswith("客户满意度") and d.endswith(tail) for d in dim.details)
+        for rating, tail in ((85, "10分"), (75, "7分"), (65, "4分"), (55, "1分")):
+            dim = _dim_score(
+                eng.evaluate(base_customer(custom_fields={"his_09": str(rating)})),
+                "his",
+            )
+            assert any(d.startswith("NPS/满意度") and d.endswith(tail) for d in dim.details)
 
 
 def test_risk_factors_worst_case_lowers_score():
-    """RISK 风险信号因子全取最差档 → 维度分 12 → 1.08。"""
+    """RISK 风险信号五因子取最差档。"""
     c = base_customer(
         custom_fields={
             "risk_05": "≥2人变动",
             "risk_06": "下降≥20%",
             "risk_07": "是且进展顺利",
-            "risk_08": "≥2次或重大投诉",
             "risk_08b": "高(<60%)",
             "risk_08c": "危机",
         }
     )
     for eng in engines():
         dim = _dim_score(eng.evaluate(c), "risk")
-        assert dim.score == pytest.approx(1.08)
+        assert dim.score == pytest.approx(0.72)
 
 
 # ── 预警与建议 ─────────────────────────────────────────────────────────────
 
 
 def test_ppt_alerts_trigger():
-    """自动预警（字段级可落地部分）全部触发，级别正确。"""
+    """V3.0 原始字段与评分阈值预警全部触发。"""
     c = base_customer(
         custom_fields={
-            "kcr_08": "无",
+            "kcr_02": "[3,2,-1,1]",
             "risk_05": "≥2人变动",
             "risk_06": "下降≥20%",
             "risk_07": "是且进展顺利",
-            "risk_08": "≥2次或重大投诉",
             "risk_08b": "高(<60%)",
             "risk_08c": "危机",
         }
     )
     for eng in engines():
         alerts = {a.id: a.level for a in eng.evaluate(c).alerts}
-        assert alerts["ces_deterioration"] == "high"
-        assert alerts["customer_business_crisis"] == "high"
-        assert alerts["competitor_poc"] == "high"
-        assert alerts["relationship_deterioration"] == "high"
-        assert alerts["key_person_churn"] == "medium"
-        assert alerts["interaction_decline"] == "medium"
-        assert alerts["champion_missing"] == "medium"
-
-
-def test_expanded_alerts_cover_all_dimensions():
-    custom_fields = {
-        "kcr_03": "<40%",
-        "kcr_07": "<20%支持",
-        "er_09": "0人",
-        "or_02": "0次",
-        "ci_03": "不了解",
-        "his_07": ">90天",
-        "his_09b": "衰退加速",
-        "risk_02": "≥第4名",
-        "svc_01": "0项达标",
-        "svc_03": "未达标",
-        "svc_06": "无回访",
-    }
-    expected = {
-        "key_person_support_critical": "high",
-        "executive_coverage_gap": "medium",
-        "frontline_backup_missing": "medium",
-        "executive_visit_missing": "medium",
-        "decision_criteria_unknown": "medium",
-        "payment_cycle_over_90": "high",
-        "lifecycle_decline_accelerating": "high",
-        "competitive_position_critical": "high",
-        "delivery_quality_failure": "high",
-        "service_sla_failure": "high",
-        "customer_followup_missing": "medium",
-    }
-    for eng in engines():
-        alerts = {a.id: a.level for a in eng.evaluate(base_customer(custom_fields=custom_fields)).alerts}
-        assert alerts == expected
+        assert alerts["key_person_opposition"] == "high"
+        assert alerts["kcr_dimension_low"] == "high"
+        assert alerts["risk_dimension_low"] == "high"
+        assert alerts["ci_dimension_low"] == "high"
+        assert alerts["ces_critical"] == "high"
+        assert alerts["customer_business_risk_critical"] == "high"
 
 
 def test_no_alerts_on_healthy_customer():
@@ -180,17 +148,6 @@ def test_no_alerts_on_healthy_customer():
     for eng in engines():
         result = eng.evaluate(c)
         assert result.risk_alerts == []
-
-
-def test_opportunity_suggestions():
-    c = base_customer(
-        custom_fields={"his_04": "≥50%", "his_09b": "成长期", "kcr_07": "≥60%支持且无反对"},
-        customer_satisfaction=8,
-    )
-    for eng in engines():
-        result = eng.evaluate(c)
-        assert any(s.startswith("该客户钱包份额高") for s in result.suggestions)
-        assert any(s.startswith("客户处于成长期") for s in result.suggestions)
 
 
 # ── 响应形状与引擎一致性 ─────────────────────────────────────────────────────

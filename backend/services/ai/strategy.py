@@ -182,7 +182,11 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
     if assessment is None:
         return []
 
-    rules = {rule.id: rule for rule in load_scoring_config().alerts}
+    config = load_scoring_config()
+    rules = {
+        rule.id: rule
+        for rule in (*config.alerts, *config.score_alerts, *config.trend_alerts)
+    }
     items: list[dict] = []
 
     for alert in assessment.alerts:

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from database import utcnow
 from models import AssessmentHistory, Customer
 from schemas import (
+    AlertItem,
     AssessmentHistoryItem,
     AssessmentResponse,
     AssessmentTrendResponse,
@@ -26,6 +27,75 @@ from services.scoring import get_scoring_strategy, load_scoring_config
 
 # 趋势判定阈值：分差小于该值视为持平
 TREND_EPSILON = 0.05
+
+
+def _quarter_index(value: datetime.datetime) -> int:
+    """把时间转换为单调递增的季度编号，便于判断季度是否连续。"""
+    return value.year * 4 + (value.month - 1) // 3
+
+
+def apply_trend_alerts(
+    db: Session,
+    customer: Customer,
+    assessment: AssessmentResponse,
+    *,
+    as_of: datetime.datetime | None = None,
+) -> AssessmentResponse:
+    """把依赖历史快照的最新版预警合并进本次评估结果。
+
+    同一季度只取最后一次评估；“连续两个季度下降 > 10”要求最近三个连续季度
+    的两次环比均下降，且首尾累计降幅严格大于 10 分。
+    """
+    config = load_scoring_config()
+    if not config.trend_alerts:
+        return assessment
+
+    as_of = as_of or utcnow()
+    records = (
+        db.query(AssessmentHistory)
+        .filter(
+            AssessmentHistory.customer_id == customer.id,
+            AssessmentHistory.config_version == assessment.config_version,
+            AssessmentHistory.assessed_at <= as_of,
+        )
+        .order_by(AssessmentHistory.assessed_at.asc(), AssessmentHistory.id.asc())
+        .all()
+    )
+    quarter_scores: dict[int, float] = {
+        _quarter_index(record.assessed_at): float(record.total_score)
+        for record in records
+    }
+    quarter_scores[_quarter_index(as_of)] = float(assessment.total_score)
+
+    existing_ids = {alert.id for alert in assessment.alerts}
+    for rule in config.trend_alerts:
+        required_points = rule.consecutive_quarters + 1
+        ordered = sorted(quarter_scores.items())
+        if len(ordered) < required_points:
+            continue
+        window = ordered[-required_points:]
+        quarter_ids = [quarter for quarter, _ in window]
+        scores = [score for _, score in window]
+        if any(
+            right - left != 1
+            for left, right in zip(quarter_ids, quarter_ids[1:])
+        ):
+            continue
+        if not all(newer < older for older, newer in zip(scores, scores[1:])):
+            continue
+        drop = scores[0] - scores[-1]
+        if drop <= rule.drop_gt or rule.id in existing_ids:
+            continue
+
+        score_text = " → ".join(f"{score:g}" for score in scores)
+        message = rule.message.format(drop=f"{drop:g}", scores=score_text)
+        assessment.alerts.append(AlertItem(id=rule.id, level=rule.level, message=message))
+        assessment.risk_alerts.append(message)
+        if rule.suggestion and rule.suggestion not in assessment.suggestions:
+            assessment.suggestions.append(rule.suggestion)
+        existing_ids.add(rule.id)
+
+    return assessment
 
 
 def build_factor_snapshot(customer: Customer) -> dict[str, Any]:
@@ -71,6 +141,7 @@ def record_assessment(
     """
     if assessment is None:
         assessment = get_scoring_strategy().evaluate(customer)
+    apply_trend_alerts(db, customer, assessment)
 
     snapshot = build_factor_snapshot(customer)
 

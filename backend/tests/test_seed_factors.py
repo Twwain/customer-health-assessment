@@ -4,6 +4,7 @@
 必须同步，本测试自动暴露不一致，避免人工双处核对遗漏。
 """
 
+import json
 import pytest
 
 from models import Customer
@@ -35,9 +36,14 @@ def test_seed_values_are_valid_options():
         for field, value in profile.items():
             factor = by_field[field]
             if factor.input.options:
-                assert value in factor.input.options, (
-                    f"{name} 档位 {field}={value!r} 不在配置 options 中"
-                )
+                if factor.input.type == "key_person_levels":
+                    levels = json.loads(value)
+                    assert len(levels) == 5
+                    assert all(str(level) in factor.input.options for level in levels)
+                else:
+                    assert value in factor.input.options, (
+                        f"{name} 档位 {field}={value!r} 不在配置 options 中"
+                    )
 
 
 def test_seed_profiles_land_in_expected_levels():

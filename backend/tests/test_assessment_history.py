@@ -56,7 +56,7 @@ def test_record_assessment_writes_snapshot(db, customer):
     record = assessment_history.record_assessment(db, customer, assessed_by="pytest")
     assert record is not None
     assert record.customer_id == customer.id
-    assert record.total_score == 12.5           # 空因子最低分口径（仅满意度 3 → 0.09）
+    assert record.total_score == 10.0           # 仅 RISK-07=是但可控，其余因子最低档
     assert record.level == "高危"
     assert record.assessed_by == "pytest"
     assert len(record.dimensions) == 7
@@ -67,19 +67,18 @@ def test_factor_snapshot_covers_all_registered_factors(db, customer):
     record = assessment_history.record_assessment(db, customer)
     snapshot = record.factor_snapshot
     for field in (
-        "customer_satisfaction",
         "kcr_01",
-        "kcr_03b",
+        "kcr_10b",
         "er_01",
         "or_01",
         "ci_01",
-        "his_01",
-        "his_09b",
-        "risk_01",
+        "his_02",
+        "his_09",
+        "risk_05",
         "risk_08b",
         "risk_08c",
-        "svc_01",
-        "svc_06b",               # 新增 custom_fields 因子也会入快照
+        "svc_03",
+        "svc_05",
     ):
         assert field in snapshot
     assert snapshot["kcr_01"] is None  # 未填报的 custom_fields 因子以 None 入快照
@@ -188,11 +187,11 @@ def test_force_record_when_unchanged(db, customer):
 
 def test_changed_factor_creates_new_record(db, customer):
     assessment_history.record_assessment(db, customer)
-    customer.customer_satisfaction = 9
+    customer.custom_fields = {**customer.custom_fields, "his_09": "90"}
     db.commit()
     record = assessment_history.record_assessment(db, customer, trigger="factor_update")
     assert record is not None
-    assert record.total_score > 12.5
+    assert record.total_score > 10.0
     assert db.query(AssessmentHistory).count() == 2
 
 
@@ -201,7 +200,7 @@ def test_changed_factor_creates_new_record(db, customer):
 
 def test_trend_arrow_up_after_improvement(db, customer):
     assessment_history.record_assessment(db, customer)
-    customer.customer_satisfaction = 9
+    customer.custom_fields = {**customer.custom_fields, "his_09": "90"}
     db.commit()
     assessment_history.record_assessment(db, customer)
 
@@ -216,10 +215,10 @@ def test_trend_arrow_up_after_improvement(db, customer):
 
 
 def test_trend_arrow_down_after_deterioration(db, customer):
-    customer.customer_satisfaction = 9
+    customer.custom_fields = {**customer.custom_fields, "his_09": "90"}
     db.commit()
     assessment_history.record_assessment(db, customer)
-    customer.customer_satisfaction = 2
+    customer.custom_fields = {**customer.custom_fields, "his_09": "55"}
     db.commit()
     assessment_history.record_assessment(db, customer)
 
@@ -250,14 +249,82 @@ def test_trend_level_lines_exclude_zero_threshold(db, customer):
 
 
 def test_history_is_ordered_desc_and_limited(db, customer):
-    for score in (4, 5, 6, 7):
-        customer.customer_satisfaction = score
+    for score in (55, 65, 75, 85):
+        customer.custom_fields = {**customer.custom_fields, "his_09": str(score)}
         db.commit()
         assessment_history.record_assessment(db, customer)
 
     records = assessment_history.list_history(db, customer.id, limit=2)
     assert len(records) == 2
     assert records[0].total_score > records[1].total_score
+
+
+def _add_quarter_snapshot(db, customer, assessment, score, assessed_at):
+    record = AssessmentHistory(
+        customer_id=customer.id,
+        assessed_by="pytest",
+        trigger="manual",
+        total_score=score,
+        max_score=100,
+        level="亚健康",
+        level_color="#F59E0B",
+        dimensions=[],
+        risk_alerts=[],
+        factor_snapshot={},
+        strategy_snapshot=[],
+        config_version=assessment.config_version,
+        assessed_at=assessed_at,
+    )
+    db.add(record)
+    db.commit()
+
+
+def test_two_consecutive_quarter_declines_over_ten_trigger_alert(db, customer):
+    assessment = get_scoring_strategy().evaluate(customer).model_copy(
+        update={"total_score": 69, "alerts": [], "risk_alerts": [], "suggestions": []}
+    )
+    _add_quarter_snapshot(db, customer, assessment, 80, datetime.datetime(2026, 3, 31))
+    _add_quarter_snapshot(db, customer, assessment, 74, datetime.datetime(2026, 6, 30))
+
+    assessment_history.apply_trend_alerts(
+        db, customer, assessment, as_of=datetime.datetime(2026, 8, 24)
+    )
+
+    alert = next(a for a in assessment.alerts if a.id == "consecutive_two_quarter_decline")
+    assert alert.level == "high"
+    assert "累计下降 11 分" in alert.message
+    assert "80 → 74 → 69" in alert.message
+    assert alert.message in assessment.risk_alerts
+    assert any("跨季度客情复盘" in item for item in assessment.suggestions)
+
+    # 多个消费者重复合并历史预警时必须保持幂等。
+    assessment_history.apply_trend_alerts(
+        db, customer, assessment, as_of=datetime.datetime(2026, 8, 24)
+    )
+    assert [a.id for a in assessment.alerts].count("consecutive_two_quarter_decline") == 1
+
+
+@pytest.mark.parametrize(
+    ("first_date", "scores"),
+    [
+        (datetime.datetime(2026, 3, 31), (80, 75, 70)),  # 累计恰好10，不满足 >10
+        (datetime.datetime(2026, 3, 31), (80, 70, 71)),  # 第二个季度未继续下降
+        (datetime.datetime(2025, 12, 31), (80, 70, 60)), # 缺少2026Q1，季度不连续
+    ],
+)
+def test_quarter_decline_alert_rejects_non_matching_history(
+    db, customer, first_date, scores
+):
+    assessment = get_scoring_strategy().evaluate(customer).model_copy(
+        update={"total_score": scores[2], "alerts": [], "risk_alerts": [], "suggestions": []}
+    )
+    _add_quarter_snapshot(db, customer, assessment, scores[0], first_date)
+    _add_quarter_snapshot(db, customer, assessment, scores[1], datetime.datetime(2026, 6, 30))
+
+    assessment_history.apply_trend_alerts(
+        db, customer, assessment, as_of=datetime.datetime(2026, 8, 24)
+    )
+    assert "consecutive_two_quarter_decline" not in {a.id for a in assessment.alerts}
 
 
 # ── 新增模型可用性────────────────────────────────────────────────

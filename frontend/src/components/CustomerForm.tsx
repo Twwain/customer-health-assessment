@@ -29,11 +29,33 @@ function getBase(customer: CustomerResponse, config: FactorConfigResponse): Reco
   return base;
 }
 
+const KEY_PERSON_OPTIONS = [
+  { value: "3", label: "3 - 教练级" },
+  { value: "2", label: "2 - 强支持" },
+  { value: "1", label: "1 - 支持" },
+  { value: "0", label: "0 - 中立" },
+  { value: "-1", label: "-1 - 反对" },
+];
+
+function parseKeyPersonLevels(value: unknown): string[] {
+  let raw: unknown = value;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      raw = JSON.parse(value);
+    } catch {
+      raw = value.replace(/^\[|\]$/g, "").split(",").map((item) => item.trim());
+    }
+  }
+  const allowed = new Set(KEY_PERSON_OPTIONS.map((option) => option.value));
+  const values = Array.isArray(raw) ? raw.slice(0, 5).map(String) : [];
+  return Array.from({ length: 5 }, (_, index) => allowed.has(values[index]) ? values[index] : "");
+}
+
 export default function CustomerForm({ customer, config, value, onChange, readOnly }: CustomerFormProps) {
   const base = getBase(customer, config);
   const merged: Record<string, unknown> = { ...base, ...value };
   const enabledDims = config.dimensions.filter((d) => d.enabled);
-  // 客情因子按维度折叠，默认全部收起（60 个因子全展开影响录入体验）
+  // 客情因子按维度折叠，默认全部收起（28 个因子全展开仍会影响录入体验）
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(enabledDims.map((d) => [d.key, true]))
   );
@@ -58,9 +80,12 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
     dim.factors.filter((f) => {
       const v = merged[f.field];
       if (v === undefined || v === null || v === "" || v === false) return false;
-      // select：只有合法选项才算已填（0 / "0" / 历史遗留数字都会渲染为“未选择”）
+      // select：只有新版配置中的合法选项才算已填。
       if (f.input.type === "select") {
         return typeof v === "string" && f.input.options.includes(v);
+      }
+      if (f.input.type === "key_person_levels") {
+        return parseKeyPersonLevels(v).every(Boolean);
       }
       // slider：0 表示未选择（后端清空时存 0）
       if (f.input.type === "slider") return v !== 0 && v !== "0";
@@ -331,8 +356,41 @@ function FactorField({
         {factor.input.unit && <span className="text-[13px] text-muted">{factor.input.unit}</span>}
       </div>
     );
+  } else if (t === "key_person_levels") {
+    const levels = parseKeyPersonLevels(value);
+    control = (
+      <div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
+          {levels.map((level, index) => (
+            <div key={index}>
+              <label className="mb-1 block text-[12px] text-muted" htmlFor={`${factor.field}-${index}`}>
+                关键人 {index + 1}
+              </label>
+              <select
+                id={`${factor.field}-${index}`}
+                aria-label={`关键人 ${index + 1} 等级`}
+                className={inputCls}
+                value={level}
+                disabled={readOnly}
+                onChange={(e) => {
+                  const next = [...levels];
+                  next[index] = e.target.value;
+                  onChange(next);
+                }}
+              >
+                <option value="">未选择</option>
+                {KEY_PERSON_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+        <div className="mt-1 text-[12px] text-muted">平均等级及最终映射分数由后端自动计算</div>
+      </div>
+    );
   } else if (t === "select") {
-    // 非合法选项（含 0 / "0" / 历史遗留数字）统一显示为“未选择”
+    // 非新版合法选项统一显示为“未选择”，保存时只能提交标准下拉值。
     const raw = String(value ?? "");
     const val = factor.input.options.includes(raw) ? raw : "";
     control = (

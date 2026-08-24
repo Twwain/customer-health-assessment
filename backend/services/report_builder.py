@@ -43,6 +43,7 @@ def build_report_data(
     """汇总单客户报告的全部数据；``include_ai=False`` 时只产出量化评估 + 趋势。"""
     engine = get_scoring_strategy()
     assessment = engine.evaluate(customer)
+    assessment_history.apply_trend_alerts(db, customer, assessment)
     trend = assessment_history.build_trend(
         db, customer, limit=config.CHAT_TREND_POINTS, fallback_assessment=assessment
     )

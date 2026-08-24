@@ -29,6 +29,7 @@ from services.ai import tools
 from services.ai.strategy import generate
 from services.rag.retriever import RetrievedChunk
 from services.rag.vector_store import InMemoryVectorStore
+from seed_factors import GOOD_FACTORS
 
 
 # ══════════════════════════ 夹具 ════════════════════════════════════════════
@@ -254,9 +255,9 @@ def test_context_contains_quantitative_facts(db, customer):
     ctx = context_builder.build_context(db, customer)
     assert ctx.assessment is not None
     assert "示例汽车集团" in ctx.customer_text
-    assert "12.5" in ctx.customer_text          # 基础客情分（空因子最低分口径）
+    assert "10" in ctx.customer_text            # 当前 V3.0 基础客情分
     assert "KCR 关键客户关系" in ctx.customer_text
-    assert "竞品POC/试点" in ctx.customer_text
+    assert "RISK 竞争态势与风险信号" in ctx.customer_text
     assert "未检索到相关知识" in ctx.knowledge_text
 
 
@@ -284,7 +285,7 @@ def test_context_without_customer_is_generic(db):
 def test_alert_context_lists_alerts(db, customer):
     ctx = context_builder.build_context(db, customer)
     assert "待解读的预警" in ctx.alert_text
-    assert "竞品" in ctx.alert_text
+    assert "RISK维度" in ctx.alert_text
 
 
 # ══════════════════════════ 策略解析与降级 ══════════════════════════════════
@@ -383,41 +384,40 @@ def test_degraded_strategies_from_rule_engine(db, customer):
     assert "预期：" not in markdown
 
 
-def test_alert_consumers_cap_large_risk_sets(db, customer):
-    customer.customer_satisfaction = 3
+def test_alert_consumers_include_complete_v3_set(db, customer):
     customer.custom_fields = {
+        "kcr_02": "[3,2,-1,1]",
         "risk_08b": "高(<60%)",
         "risk_08c": "危机",
         "risk_07": "是且进展顺利",
-        "risk_08": "≥2次或重大投诉",
         "risk_05": "≥2人变动",
         "risk_06": "下降≥20%",
         "kcr_08": "无",
         "kcr_07": "<20%支持",
-        "kcr_03": "<40%",
-        "er_09": "0人",
         "or_02": "0次",
-        "ci_03": "不了解",
-        "his_07": ">90天",
-        "his_09b": "衰退加速",
-        "risk_02": "≥第4名",
-        "svc_01": "0项达标",
-        "svc_03": "未达标",
-        "svc_06": "无回访",
+        "ci_03": "0项",
+        "svc_03": "",
     }
     db.commit()
 
     assessment = tools.score_query(customer)
-    assert len(assessment.alerts) == 19
+    assert {alert.id for alert in assessment.alerts} == {
+        "key_person_opposition",
+        "kcr_dimension_low",
+        "risk_dimension_low",
+        "ci_dimension_low",
+        "ces_critical",
+        "customer_business_risk_critical",
+    }
 
     ctx = context_builder.build_context(db, customer, assessment=assessment)
-    assert ctx.alert_text.count("（规则 id：") == context_builder.MAX_ALERTS_IN_AI_CONTEXT
-    assert "其余 7 项预警未展开" in ctx.alert_text
-    assert "其余 7 项建议未展开" in ctx.customer_text
+    assert ctx.alert_text.count("（规则 id：") == 6
+    assert "预警未展开" not in ctx.alert_text
 
     items = strategy.build_degraded_strategies(assessment)
-    assert len(items) == strategy.MAX_DEGRADED_STRATEGIES
-    assert all(item["priority"] == "recommended" for item in items)
+    assert len(items) <= strategy.MAX_DEGRADED_STRATEGIES
+    assert {item["priority"] for item in items} <= set(strategy.PRIORITIES)
+    assert any(item["priority"] == "recommended" for item in items)
 
 
 def test_degraded_strategies_for_healthy_customer(db):
@@ -430,7 +430,7 @@ def test_degraded_strategies_for_healthy_customer(db):
         customer_satisfaction=9,
         contract_amount=800,
         growth_potential="高",
-        custom_fields={},
+        custom_fields=dict(GOOD_FACTORS),
     )
     db.add(healthy)
     db.commit()
@@ -461,7 +461,7 @@ def test_complete_turn_persists_messages(db, customer, fake_llm):
     assert result["degraded"] is False
     assert result["tokens_used"] == 128
     assert result["message"]["content"] == "你好，这是测试回复。"
-    assert result["assessment"]["total_score"] == 12.5
+    assert result["assessment"]["total_score"] == 10.0
 
     messages = db.query(ChatMessage).order_by(ChatMessage.id).all()
     assert [m.role for m in messages] == ["user", "assistant"]
@@ -475,7 +475,7 @@ def test_turn_injects_quantitative_context_into_prompt(db, customer, fake_llm):
     sent = fake_llm.calls[-1]
     assert sent[0].role == "system"
     assert "客情评估智能体" in sent[0].content
-    assert "12.5" in sent[-1].content            # 基础客情分进了本轮 user prompt
+    assert "10" in sent[-1].content              # 基础客情分进了本轮 user prompt
     assert "未检索到相关知识" in sent[-1].content  # 防幻觉提示
 
 
@@ -515,7 +515,7 @@ def test_assessment_scenario_records_history(db, customer, fake_llm):
     record = db.query(AssessmentHistory).one()
     assert record.trigger == "ai_assessment"
     assert record.assessed_by == "ai"
-    assert record.total_score == 12.5
+    assert record.total_score == 10.0
 
 
 @pytest.mark.parametrize(
@@ -565,7 +565,7 @@ def test_degrades_to_rule_engine_when_llm_unavailable(db, customer, offline_llm)
     assert result["degraded"] is True
     content = result["message"]["content"]
     assert "规则引擎兜底结果" in content
-    assert "12.5" in content
+    assert "10 / 100" in content
     assert "KCR 关键客户关系" in content
     assert result["warnings"]
 
@@ -794,7 +794,7 @@ def test_send_message_streams_sse(client, customer, fake_llm):
     assert text == "你好，这是测试回复。"
 
     context = next(data for name, data in events if name == "context")
-    assert context["assessment"]["total_score"] == 12.5
+    assert context["assessment"]["total_score"] == 10.0
     assert context["trend"]["level"] == "高危"
 
     done = events[-1][1]

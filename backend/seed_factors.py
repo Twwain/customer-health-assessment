@@ -1,4 +1,4 @@
-"""客情因子演示数据（7 维度 × 60 因子，由评分配置动态生成）。
+"""客情因子演示数据（7 维度 × 28 因子，由评分配置动态生成）。
 
 三档画像 GOOD（健康）/ MEDIUM（亚健康）/ RISKY（高危）的因子取值从
 ``backend/scoring_config.yaml`` 的打分规则自动推导：
@@ -57,10 +57,35 @@ def _threshold_value(brackets, rank):
 
 
 def _rank_value(factor, rank):
+    if factor.input.type == "key_person_levels":
+        return {
+            "best": "[3,3,3,3,3]",
+            "mid": "[1,1,1,1,1]",
+            "worst": "[0,0,0,0,0]",
+        }[rank]
     rule = factor.rule
-    if rule.type == "mapping":
-        return _mapping_value(list((rule.params.get("map") or {}).items()), rank)
+    if rule.type in ("mapping", "support_distribution"):
+        mapping = rule.params.get("map") or {}
+        options = factor.input.options or []
+        items = [(option, mapping[option]) for option in options if option in mapping]
+        return _mapping_value(items or list(mapping.items()), rank)
     if rule.type == "threshold":
+        # V3.0 前端统一下拉；选项按“高分档 → 低分档”排列，演示数据也直接
+        # 使用下拉值，避免页面把 seed 的原始数字显示成兼容性“当前值”。
+        options = factor.input.options or []
+        if options:
+            from services.scoring.rules import evaluate_factor
+
+            scored = [(option, evaluate_factor(factor, option).score) for option in options]
+            score_levels = sorted({score for _, score in scored})
+            target = (
+                score_levels[-1]
+                if rank == "best"
+                else score_levels[0]
+                if rank == "worst"
+                else score_levels[len(score_levels) // 2]
+            )
+            return next(option for option, score in scored if score == target)
         return _threshold_value(rule.params.get("brackets", []), rank)
     opts = factor.input.options or []
     if not opts:

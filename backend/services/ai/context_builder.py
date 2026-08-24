@@ -66,8 +66,13 @@ def _alerts_for_ai(assessment: AssessmentResponse) -> tuple[list, int]:
 def _suggestions_for_ai(assessment: AssessmentResponse, selected_alerts: list) -> tuple[list[str], int]:
     """只保留已展示预警的建议与机会建议，避免建议泄露被裁剪的预警。"""
     scoring_config = load_scoring_config()
-    alert_suggestion_by_id = {rule.id: rule.suggestion for rule in scoring_config.alerts}
-    all_alert_suggestions = {rule.suggestion for rule in scoring_config.alerts if rule.suggestion}
+    alert_rules = (
+        *scoring_config.alerts,
+        *scoring_config.score_alerts,
+        *scoring_config.trend_alerts,
+    )
+    alert_suggestion_by_id = {rule.id: rule.suggestion for rule in alert_rules}
+    all_alert_suggestions = {rule.suggestion for rule in alert_rules if rule.suggestion}
 
     candidates: list[str] = []
     for alert in selected_alerts:
@@ -122,7 +127,7 @@ def _assessment_section(a: AssessmentResponse) -> str:
         f"- 总分：{fmt_score(a.total_score)} / {fmt_score(a.max_score)}，等级「{a.level}」，评分配置版本 {a.config_version or 'n/a'}",
         "- 维度明细：",
     ]
-    # 只注入维度得分，不逐条罗列因子明细（60 个因子的明细会让结论淹没在数据里）
+    # 只注入维度得分，不逐条罗列因子明细（完整因子明细会让结论淹没在数据里）
     for d in a.dimensions:
         lines.append(f"  - {d.name}：{fmt_score(d.score)}/{fmt_score(d.max_score)}")
 
@@ -307,6 +312,7 @@ def build_context(
 
     if assessment is None:
         assessment = get_scoring_strategy().evaluate(customer)
+    assessment_history.apply_trend_alerts(db, customer, assessment)
 
     trend = None
     if include_trend:

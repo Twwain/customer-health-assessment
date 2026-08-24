@@ -1,6 +1,8 @@
 import datetime
 import io
+import json
 import logging
+import re
 from typing import Any
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
@@ -66,6 +68,8 @@ def _rule_text(f: FactorConfig) -> str:
         return "；".join(parts)
     if rule.type == "mapping":
         return "；".join(f"{k} → {v}分" for k, v in (params.get("map") or {}).items())
+    if rule.type == "support_distribution":
+        return "支持≥60%且无反对 → 10分；有反对者降档 → 8分；支持40-59% → 8分；支持20-39% → 6分；支持<20% → 3分"
     if rule.type == "days_since":
         parts = []
         for b in params.get("brackets", []):
@@ -92,55 +96,118 @@ def _rule_text(f: FactorConfig) -> str:
 
 
 def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
-    """构造导入模板工作簿：基础字段 + 因子列（下拉引用隐藏「选项源」工作表）。"""
+    """构造与 V3.0 填报文件一致的三表 Excel 模板。"""
     from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.datavalidation import DataValidation
 
-    base = ["客户名称", "行业", "对接人", "联系电话", "备注"]
-    headers = list(base)
-    factor_cols: list[tuple[int, list[str]]] = []
+    factors = []
     for dim in config.dimensions:
         for f in dim.factors:
-            if f.input.type == "readonly" or not f.input.options:
+            if f.input.type == "readonly":
                 continue
-            factor_cols.append((len(headers) + 1, list(f.input.options)))
-            headers.append(f.label)
+            factors.append((dim, f))
+
+    base = ["客户名称", "行业", "客户规模", "生命周期阶段"]
+    headers = list(base)
+    for _, factor in factors:
+        code, _, name = factor.label.partition(" ")
+        headers.append(f"{code}\n{name or factor.label}")
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "客户导入模板"
-    ws.append(headers)
+    guide = wb.active
+    guide.title = "使用说明"
+    guide_rows = [
+        ["《客情因子填报模板 V3.0》使用说明", ""],
+        ["目的", "按精简后的28个因子填写原子指标原始值，由系统自动映射评分"],
+        ["操作步骤", "1. 阅读【因子定义表】；2. 在【客户数据表】每个客户填写一行；3. 保持数据自洽并完成脱敏"],
+        ["核心原则", "只填原始值，不填0-10分；客户名称、人名一律脱敏"],
+    ]
+    for row in guide_rows:
+        guide.append(row)
+    guide.column_dimensions["A"].width = 18
+    guide.column_dimensions["B"].width = 90
+    guide["A1"].font = Font(bold=True, size=15, color="17365D")
+    guide["B1"].font = Font(bold=True, size=15, color="17365D")
+    for row in guide.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
 
-    # 示例行：因子列填第一个可选项，方便用户对照填写
-    sample = ["示例科技有限公司", "制造业", "张三", "13800000000", "重点跟进客户"]
-    for _, options in factor_cols:
-        sample.append(options[0] if options else "")
-    ws.append(sample)
+    definitions = wb.create_sheet("因子定义表")
+    definition_headers = [
+        "维度", "维度权重", "编号", "因子名称", "原子指标（填什么）",
+        "打分映射规则（0-10）", "填报示例", "数据来源", "频率", "填报人",
+    ]
+    definitions.append(definition_headers)
+    for dim, factor in factors:
+        code, _, name = factor.label.partition(" ")
+        definitions.append([
+            dim.name.split(" ", 1)[-1], f"{dim.max_score}%", code, name or factor.label,
+            factor.description, _rule_text(factor), factor.example,
+            f"{factor.source_role}填报" if factor.source_role != "系统" else "系统自动抓取",
+            factor.frequency, "",
+        ])
 
-    # 因子列下拉校验：可选项写入隐藏的「选项源」工作表，下拉直接引用该区域。
-    # 相比内联公式（"a,b,c"），引用区域不受 Excel 255 字符公式上限约束，
-    # 选项含逗号/引号也不会破坏公式（allow_blank：留空按未填写处理）。
+    data_ws = wb.create_sheet("客户数据表")
+    hints = ["虚构", "政府/金融/教育/大企业等", "大/中/小", "导入/成长/成熟/衰退"]
+    for _, factor in factors:
+        source = f"{factor.source_role}填报" if factor.source_role != "系统" else "系统自动抓取"
+        hints.append(f"{factor.description}（{source}·{factor.frequency}）")
+    data_ws.append(hints)
+    data_ws.append(headers)
+    data_ws.append([
+        "示例-某省政务云客户", "政府", "大", "成长",
+        *[_standardize_import_factor_value(factor, factor.example) for _, factor in factors],
+    ])
+
     opt_ws = wb.create_sheet("选项源")
     opt_ws.sheet_state = "hidden"
-    for idx, (col, options) in enumerate(factor_cols, start=1):
+    option_index = 0
+    for factor_offset, (_, factor) in enumerate(factors, start=len(base) + 1):
+        options = list(factor.input.options)
+        # KCR-02 单元格填写五人等级列表，不能套用单值下拉验证。
+        if not options or factor.input.type == "key_person_levels":
+            continue
+        option_index += 1
         for row, opt in enumerate(options, start=1):
-            opt_ws.cell(row=row, column=idx, value=opt)
+            opt_ws.cell(row=row, column=option_index, value=opt)
         dv = DataValidation(
             type="list",
-            formula1=f"'选项源'!${get_column_letter(idx)}$1:${get_column_letter(idx)}${len(options)}",
+            formula1=(
+                f"'选项源'!${get_column_letter(option_index)}$1:"
+                f"${get_column_letter(option_index)}${len(options)}"
+            ),
             allow_blank=True,
             showErrorMessage=True,
             errorTitle="无效选项",
             error="请从下拉列表中选择有效选项",
         )
-        ws.add_data_validation(dv)
-        letter = get_column_letter(col)
-        dv.add(f"{letter}2:{letter}1048576")
+        data_ws.add_data_validation(dv)
+        letter = get_column_letter(factor_offset)
+        dv.add(f"{letter}3:{letter}1048576")
 
-    for i in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(i)].width = 22
-    ws.freeze_panes = "A2"
+    dark_fill = PatternFill("solid", fgColor="17365D")
+    light_fill = PatternFill("solid", fgColor="D9E2F3")
+    for sheet, header_row in ((definitions, 1), (data_ws, 2)):
+        for cell in sheet[header_row]:
+            cell.fill = dark_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for cell in data_ws[1]:
+        cell.fill = light_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.font = Font(size=9, color="666666")
+    definitions.freeze_panes = "A2"
+    data_ws.freeze_panes = "E3"
+    for column in range(1, len(headers) + 1):
+        letter = get_column_letter(column)
+        data_ws.column_dimensions[letter].width = 16 if column <= len(base) else 22
+    for column, width in enumerate([18, 12, 12, 25, 42, 42, 42, 16, 10, 12], start=1):
+        definitions.column_dimensions[get_column_letter(column)].width = width
+    for row in definitions.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -151,11 +218,7 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
 # 注意：本路由必须声明在 `/{customer_id}` 之前，否则会被当成客户 ID 解析
 @router.get("/import-template")
 def download_import_template():
-    """下载 Excel 导入模板：因子列带数据校验下拉框（可选项来自 scoring_config.yaml）。
-
-    与 `POST /api/customers/import` 的表头识别一致：基础字段 + 各因子 label；
-    下拉可选项即因子 input.options，避免手填非法枚举值。
-    """
+    """下载 V3.0 Excel 填报模板。"""
     config = load_scoring_config()
     buf, _ = _build_import_workbook(config)
     return Response(
@@ -163,11 +226,28 @@ def download_import_template():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": (
-                'attachment; filename="import-template.xlsx"; '
-                f"filename*=UTF-8''{quote('客户导入模板.xlsx')}"
+                'attachment; filename="factor-template-v3.xlsx"; '
+                f"filename*=UTF-8''{quote('客情因子填报模板_v3.0.xlsx')}"
             )
         },
     )
+
+
+@router.post("/import")
+def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """批量导入 CSV 或 V3.0 Excel 填报文件。"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请选择文件")
+
+    content = file.file.read()
+    filename = file.filename.lower()
+    if filename.endswith(".csv"):
+        return _import_csv(content, db)
+    if filename.endswith(".xls"):
+        raise HTTPException(status_code=400, detail="不支持老版 .xls 格式，请另存为 .xlsx")
+    if filename.endswith(".xlsx"):
+        return _import_excel(content, db)
+    raise HTTPException(status_code=400, detail="仅支持 CSV 或 Excel(.xlsx) 文件")
 
 
 @router.get("", response_model=CustomerListResponse)
@@ -403,6 +483,52 @@ def _validate_choice(factor: FactorConfig, value: Any) -> Any:
     return value
 
 
+def _standardize_import_factor_value(factor: FactorConfig, value: Any) -> str:
+    """把 V3.0 XLSX 的原子指标值归档到新版标准下拉分档。
+
+    前端/API 仍只接受 options；仅导入流程允许模板中的精确百分比、次数和
+    分布列表，并在入库前转换为唯一标准档位，避免把示例值扩张成下拉选项。
+    """
+    if factor.input.type == "key_person_levels":
+        return _parse_key_person_levels(factor, value)
+
+    text = "" if value is None else str(value).strip()
+    if not text or text in factor.input.options:
+        return text
+    if factor.rule.type not in {"threshold", "support_distribution"}:
+        _validate_choice(factor, text)
+
+    from services.scoring.rules import evaluate_factor
+
+    if not re.search(r"-?\d", text):
+        _validate_choice(factor, text)
+    target_score = evaluate_factor(factor, text).score
+    candidates = [
+        option
+        for option in factor.input.options
+        if evaluate_factor(factor, option).score == target_score
+    ]
+
+    if factor.field == "kcr_07":
+        support_match = re.search(r"支持[^\d]*(\d+(?:\.\d+)?)\s*%", text)
+        oppose_match = re.search(r"反对[^\d]*(\d+(?:\.\d+)?)\s*%", text)
+        support = float(support_match.group(1)) if support_match else -1
+        oppose = float(oppose_match.group(1)) if oppose_match else 0
+        if support >= 60:
+            wanted = "支持≥60%但有反对" if oppose > 0 else "支持≥60%且无反对"
+        elif support >= 40:
+            wanted = "40-59%支持"
+        elif support >= 20:
+            wanted = "20-39%支持"
+        else:
+            wanted = "<20%支持"
+        candidates = [option for option in candidates if option == wanted]
+
+    if not candidates:
+        _validate_choice(factor, text)
+    return candidates[0]
+
+
 def _validate_range(factor: FactorConfig, number: float) -> float:
     spec = factor.input
     if spec.min is not None and number < float(spec.min):
@@ -444,6 +570,30 @@ def _parse_bool(value: Any) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y", "是")
 
 
+def _parse_key_person_levels(factor: FactorConfig, value: Any) -> str:
+    """校验 KCR-02 的五位关键人等级，并存为评分器可解析的 JSON 列表。"""
+    raw = value
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            raw = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            raw = [item.strip() for item in text.strip("[]").split(",") if item.strip()]
+    if not isinstance(raw, (list, tuple)) or len(raw) != 5:
+        raise HTTPException(status_code=400, detail=f"因子「{factor.label}」必须填写 5 位关键人等级")
+
+    levels: list[int] = []
+    for item in raw:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"因子「{factor.label}」等级只能为 3、2、1、0、-1")
+        if isinstance(item, bool) or str(number) != str(item).strip() or number not in {3, 2, 1, 0, -1}:
+            raise HTTPException(status_code=400, detail=f"因子「{factor.label}」等级只能为 3、2、1、0、-1")
+        levels.append(number)
+    return json.dumps(levels, ensure_ascii=False, separators=(",", ":"))
+
+
 def _coerce_by_column(factor: FactorConfig, column: Any, value: Any) -> Any:
     """按 Customer 模型列类型做类型转换与校验。"""
     col_type = column.type
@@ -471,6 +621,8 @@ def _coerce_by_input(factor: FactorConfig, value: Any) -> Any:
     """custom_fields 扩展因子按 input.type 做类型转换。"""
     input_type = factor.input.type
 
+    if input_type == "key_person_levels":
+        return None if _is_blank(value) else _parse_key_person_levels(factor, value)
     if input_type == "bool":
         return _parse_bool(value)
     if input_type == "date":
@@ -499,28 +651,6 @@ def delete_customer(customer_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.post("/import")
-def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """批量导入（同步 def：解析 + 写库较重，交给 FastAPI 线程池，避免阻塞事件循环）。
-
-    仅支持 .csv（UTF-8 / GBK 自动回退）与 .xlsx；老版 .xls 需另存为 .xlsx。
-    """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="请选择文件")
-
-    content = file.file.read()
-    filename = file.filename.lower()
-
-    if filename.endswith(".csv"):
-        return _import_csv(content, db)
-    elif filename.endswith(".xls"):
-        raise HTTPException(status_code=400, detail="不支持老版 .xls 格式，请在 Excel 中另存为 .xlsx 后重试")
-    elif filename.endswith(".xlsx"):
-        return _import_excel(content, db)
-    else:
-        raise HTTPException(status_code=400, detail="仅支持 CSV 或 Excel(.xlsx) 文件")
-
-
 def _import_csv(content: bytes, db: Session):
     import csv
 
@@ -541,25 +671,41 @@ def _import_excel(content: bytes, db: Session):
         wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Excel 文件无法解析：{exc}")
-    ws = wb.active
+    ws = wb["客户数据表"] if "客户数据表" in wb.sheetnames else wb.active
     if ws is None:
         raise HTTPException(status_code=400, detail="Excel 中没有可用的工作表")
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         raise HTTPException(status_code=400, detail="文件为空")
 
-    headers = [str(h) if h else "" for h in rows[0]]
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(rows[:10])
+            if any(str(value).strip() == "客户名称" for value in row if value is not None)
+        ),
+        None,
+    )
+    if header_index is None:
+        raise HTTPException(
+            status_code=400,
+            detail="未找到‘客户名称’表头；V3.0 模板请填写‘客户数据表’工作表",
+        )
+
+    headers = [str(h).strip() if h is not None else "" for h in rows[header_index]]
     records = []
-    for row in rows[1:]:
+    for row in rows[header_index + 1:]:
+        if not any(value not in (None, "") for value in row):
+            continue
         record = {}
         for i, value in enumerate(row):
             if i < len(headers):
                 record[headers[i]] = value
         records.append(record)
-    return _process_rows(records, db)
+    return _process_rows(records, db, start_row=header_index + 2)
 
 
-def _process_rows(records: list[dict], db: Session):
+def _process_rows(records: list[dict], db: Session, *, start_row: int = 2):
     """批量写入客户行。
 
     因子列（含 custom_fields 扩展因子）统一走与「编辑因子」相同的
@@ -571,6 +717,7 @@ def _process_rows(records: list[dict], db: Session):
     config = load_scoring_config()
     factor_by_field: dict[str, Any] = {}
     factor_by_label: dict[str, Any] = {}
+    factor_by_code: dict[str, Any] = {}
     for dim in config.dimensions:
         for f in dim.factors:
             if f.input.type == "readonly":  # 派生/共享因子（如回款逾期扣分）不单独成列
@@ -578,6 +725,8 @@ def _process_rows(records: list[dict], db: Session):
             # setdefault 保留首次出现：可编辑因子（带 options）优先于同名 readonly 因子
             factor_by_field.setdefault(f.field, f)
             factor_by_label.setdefault(f.label, f)
+            code = f.label.split(" ", 1)[0].upper()
+            factor_by_code.setdefault(code, f)
 
     # 基础（非因子）字段：中文表头 -> 模型列
     base_map = {
@@ -587,6 +736,7 @@ def _process_rows(records: list[dict], db: Session):
         "联系电话": "contact_phone",
         "备注": "notes",
     }
+    base_custom_fields = {"客户规模", "生命周期阶段"}
     # 兼容旧模板里与配置 label 不一致的历史中文表头
     legacy_factor_headers = {
         "客户满意度": "customer_satisfaction",
@@ -605,18 +755,26 @@ def _process_rows(records: list[dict], db: Session):
             for cn_key, val in row.items():
                 if val is None or val == "":
                     continue
+                cn_key = str(cn_key).strip()
                 en = base_map.get(cn_key)
                 if en:
                     data[en] = str(val).strip()
                     continue
+                if cn_key in base_custom_fields:
+                    custom_fields[cn_key] = str(val).strip()
+                    continue
 
                 # 因子识别：先按配置 label，再按遗留中文表头，最后按英文 field
-                factor = factor_by_label.get(cn_key) or factor_by_field.get(
-                    legacy_factor_headers.get(cn_key, cn_key)
-                )
+                code_match = re.match(r"^([A-Za-z]+-\d+[A-Za-z]?)", cn_key)
+                factor = factor_by_label.get(cn_key)
+                if factor is None and code_match:
+                    factor = factor_by_code.get(code_match.group(1).upper())
+                if factor is None:
+                    factor = factor_by_field.get(legacy_factor_headers.get(cn_key, cn_key))
                 if factor is None:
                     factor = factor_by_field.get(cn_key)
                 if factor is not None and factor.input.editable:
+                    val = _standardize_import_factor_value(factor, val)
                     if factor.source == "custom_fields":
                         custom_fields[factor.field] = _coerce_by_input(factor, val)
                     else:
@@ -637,7 +795,7 @@ def _process_rows(records: list[dict], db: Session):
                 data["custom_fields"] = custom_fields
 
             if "customer_name" not in data:
-                errors.append(f"第{i + 2}行缺少客户名称")
+                errors.append(f"第{start_row + i}行缺少客户名称")
                 continue
 
             customer = Customer(**data)
@@ -645,7 +803,7 @@ def _process_rows(records: list[dict], db: Session):
             imported.append(customer)
             created += 1
         except Exception as e:
-            errors.append(f"第{i + 2}行: {str(e)}")
+            errors.append(f"第{start_row + i}行: {str(e)}")
 
     db.commit()
 

@@ -57,7 +57,15 @@ def strip_sub_dimension_annotation(description: str) -> str:
     return text.strip("，,、 \t")
 
 
-VALID_RULE_TYPES = {"threshold", "mapping", "days_since", "linear", "penalty", "constant"}
+VALID_RULE_TYPES = {
+    "threshold",
+    "mapping",
+    "support_distribution",
+    "days_since",
+    "linear",
+    "penalty",
+    "constant",
+}
 VALID_CONDITION_OPS = {
     "truthy", "falsy", "is_true", "is_false", "empty",
     "eq", "ne", "lt", "lte", "gt", "gte",
@@ -66,6 +74,10 @@ VALID_CONDITION_OPS = {
 }
 VALID_ALERT_LEVELS = {"high", "medium", "low"}
 VALID_SOURCES = {"model", "custom_fields"}
+VALID_AGGREGATIONS = {"sum", "average"}
+VALID_SCORE_ALERT_TARGETS = {"total", "dimension", "factor"}
+VALID_SCORE_ALERT_OPS = {"lt", "lte", "gt", "gte", "eq"}
+VALID_TREND_ALERT_TYPES = {"consecutive_quarter_decline"}
 
 
 class ScoringConfigError(ValueError):
@@ -106,6 +118,8 @@ class FactorConfig:
     source: str = "model"           # model / custom_fields
     source_role: str = ""           # 因子来源角色：销售 / 研发 / 市场 / HR ...
     description: str = ""
+    example: str = ""
+    frequency: str = ""
     enabled: bool = True
     input: InputSpec = dc_field(default_factory=InputSpec)
     rule: RuleConfig = dc_field(default_factory=lambda: RuleConfig("constant", {"score": 0}))
@@ -118,6 +132,7 @@ class DimensionConfig:
     max_score: float
     enabled: bool = True
     description: str = ""
+    aggregation: str = "sum"        # sum=因子贡献分求和；average=因子原始分均值后按维度权重折算
     base_score: float = 0.0
     base_detail: str = ""
     clamp_min: float | None = None
@@ -165,6 +180,33 @@ class OpportunityConfig:
 
 
 @dataclass(frozen=True)
+class ScoreAlertConfig:
+    """基于评分结果而非原始字段的预警。维度值统一换算为 0-100。"""
+
+    id: str
+    level: str
+    target: str
+    key: str
+    op: str
+    value: float
+    message: str
+    suggestion: str = ""
+
+
+@dataclass(frozen=True)
+class TrendAlertConfig:
+    """依赖历史评估快照的趋势预警。"""
+
+    id: str
+    level: str
+    type: str
+    consecutive_quarters: int
+    drop_gt: float
+    message: str
+    suggestion: str = ""
+
+
+@dataclass(frozen=True)
 class ScoringConfig:
     version: str
     updated_at: str
@@ -172,6 +214,8 @@ class ScoringConfig:
     levels: list[LevelConfig]
     dimensions: list[DimensionConfig]
     alerts: list[AlertConfig]
+    score_alerts: list[ScoreAlertConfig]
+    trend_alerts: list[TrendAlertConfig]
     opportunities: list[OpportunityConfig]
     source_path: str = ""
 
@@ -312,6 +356,8 @@ def _parse_factor(raw: Any, ctx: str) -> FactorConfig:
         source=source,
         source_role=str(raw.get("source_role", "")),
         description=str(raw.get("description", "")),
+        example=str(raw.get("example", "")),
+        frequency=str(raw.get("frequency", "")),
         enabled=bool(raw.get("enabled", True)),
         input=_parse_input(raw.get("input"), f"{ctx}.{field_name}"),
         rule=_parse_rule(raw.get("rule"), f"{ctx}.{field_name}"),
@@ -334,12 +380,19 @@ def _parse_dimension(raw: Any, index: int) -> DimensionConfig:
     if not isinstance(factors_raw, list):
         raise ScoringConfigError(f"{ctx} 的 `factors` 必须是数组")
 
+    aggregation = str(raw.get("aggregation", "sum"))
+    if aggregation not in VALID_AGGREGATIONS:
+        raise ScoringConfigError(
+            f"{ctx} 的 aggregation=`{aggregation}` 不受支持，可用：{sorted(VALID_AGGREGATIONS)}"
+        )
+
     return DimensionConfig(
         key=key,
         name=name,
         max_score=float(_require(raw, "max_score", ctx)),
         enabled=bool(raw.get("enabled", True)),
         description=str(raw.get("description", "")),
+        aggregation=aggregation,
         base_score=float(raw.get("base_score", 0) or 0),
         base_detail=str(raw.get("base_detail", "")),
         clamp_min=clamp.get("min"),
@@ -414,6 +467,71 @@ def _parse_opportunity(raw: Any, index: int) -> OpportunityConfig:
     )
 
 
+def _parse_score_alert(raw: Any, index: int) -> ScoreAlertConfig:
+    if not isinstance(raw, dict):
+        raise ScoringConfigError(f"score_alerts[{index}] 必须是对象")
+
+    alert_id = str(raw.get("id") or f"score_alert_{index}")
+    ctx = f"score_alerts[{alert_id}]"
+    level = str(raw.get("level", "medium"))
+    if level not in VALID_ALERT_LEVELS:
+        raise ScoringConfigError(
+            f"{ctx} 的 level=`{level}` 不受支持，可用：{sorted(VALID_ALERT_LEVELS)}"
+        )
+    target = str(_require(raw, "target", ctx))
+    if target not in VALID_SCORE_ALERT_TARGETS:
+        raise ScoringConfigError(
+            f"{ctx} 的 target=`{target}` 不受支持，可用：{sorted(VALID_SCORE_ALERT_TARGETS)}"
+        )
+    op = str(raw.get("op", "lt"))
+    if op not in VALID_SCORE_ALERT_OPS:
+        raise ScoringConfigError(
+            f"{ctx} 的 op=`{op}` 不受支持，可用：{sorted(VALID_SCORE_ALERT_OPS)}"
+        )
+
+    return ScoreAlertConfig(
+        id=alert_id,
+        level=level,
+        target=target,
+        key=str(raw.get("key", "")),
+        op=op,
+        value=float(_require(raw, "value", ctx)),
+        message=str(_require(raw, "message", ctx)),
+        suggestion=str(raw.get("suggestion", "")),
+    )
+
+
+def _parse_trend_alert(raw: Any, index: int) -> TrendAlertConfig:
+    if not isinstance(raw, dict):
+        raise ScoringConfigError(f"trend_alerts[{index}] 必须是对象")
+
+    alert_id = str(raw.get("id") or f"trend_alert_{index}")
+    ctx = f"trend_alerts[{alert_id}]"
+    level = str(raw.get("level", "medium"))
+    if level not in VALID_ALERT_LEVELS:
+        raise ScoringConfigError(
+            f"{ctx} 的 level=`{level}` 不受支持，可用：{sorted(VALID_ALERT_LEVELS)}"
+        )
+    alert_type = str(_require(raw, "type", ctx))
+    if alert_type not in VALID_TREND_ALERT_TYPES:
+        raise ScoringConfigError(
+            f"{ctx} 的 type=`{alert_type}` 不受支持，可用：{sorted(VALID_TREND_ALERT_TYPES)}"
+        )
+    consecutive_quarters = int(raw.get("consecutive_quarters", 2))
+    if consecutive_quarters < 1:
+        raise ScoringConfigError(f"{ctx} 的 consecutive_quarters 必须大于等于 1")
+
+    return TrendAlertConfig(
+        id=alert_id,
+        level=level,
+        type=alert_type,
+        consecutive_quarters=consecutive_quarters,
+        drop_gt=float(_require(raw, "drop_gt", ctx)),
+        message=str(_require(raw, "message", ctx)),
+        suggestion=str(raw.get("suggestion", "")),
+    )
+
+
 def parse_scoring_config(raw: Any, source_path: str = "") -> ScoringConfig:
     """把已解析的 YAML 字典转换为强类型配置对象，并做完整性校验。"""
     if not isinstance(raw, dict):
@@ -454,6 +572,36 @@ def parse_scoring_config(raw: Any, source_path: str = "") -> ScoringConfig:
     if len(set(alert_ids)) != len(alert_ids):
         raise ScoringConfigError(f"alerts 的 id 存在重复：{sorted(set(a for a in alert_ids if alert_ids.count(a) > 1))}")
 
+    score_alerts_raw = raw.get("score_alerts") or []
+    if not isinstance(score_alerts_raw, list):
+        raise ScoringConfigError("`score_alerts` 必须是数组")
+    score_alerts = [_parse_score_alert(a, i) for i, a in enumerate(score_alerts_raw)]
+    score_alert_ids = [a.id for a in score_alerts]
+    duplicate_score_ids = sorted(
+        set(a for a in score_alert_ids if score_alert_ids.count(a) > 1)
+    )
+    if duplicate_score_ids:
+        raise ScoringConfigError(f"score_alerts 的 id 存在重复：{duplicate_score_ids}")
+    duplicate_all_alert_ids = sorted(set(alert_ids) & set(score_alert_ids))
+    if duplicate_all_alert_ids:
+        raise ScoringConfigError(f"alerts 与 score_alerts 的 id 重复：{duplicate_all_alert_ids}")
+
+    trend_alerts_raw = raw.get("trend_alerts") or []
+    if not isinstance(trend_alerts_raw, list):
+        raise ScoringConfigError("`trend_alerts` 必须是数组")
+    trend_alerts = [_parse_trend_alert(a, i) for i, a in enumerate(trend_alerts_raw)]
+    trend_alert_ids = [a.id for a in trend_alerts]
+    duplicate_trend_ids = sorted(
+        set(a for a in trend_alert_ids if trend_alert_ids.count(a) > 1)
+    )
+    if duplicate_trend_ids:
+        raise ScoringConfigError(f"trend_alerts 的 id 存在重复：{duplicate_trend_ids}")
+    duplicate_any_ids = sorted(
+        (set(alert_ids) | set(score_alert_ids)) & set(trend_alert_ids)
+    )
+    if duplicate_any_ids:
+        raise ScoringConfigError(f"预警规则的 id 跨类型重复：{duplicate_any_ids}")
+
     opportunities_raw = raw.get("opportunities") or []
     if not isinstance(opportunities_raw, list):
         raise ScoringConfigError("`opportunities` 必须是数组")
@@ -469,6 +617,8 @@ def parse_scoring_config(raw: Any, source_path: str = "") -> ScoringConfig:
         levels=levels,
         dimensions=dimensions,
         alerts=alerts,
+        score_alerts=score_alerts,
+        trend_alerts=trend_alerts,
         opportunities=opportunities,
         source_path=source_path,
     )

@@ -123,7 +123,9 @@ def _get_customer(customer_id: int, db: Session) -> Customer:
 
 @router.get("/{customer_id}", response_model=AssessmentResponse)
 def get_assessment(customer_id: int, db: Session = Depends(get_db)):
-    return get_scoring_strategy().evaluate(_get_customer(customer_id, db))
+    customer = _get_customer(customer_id, db)
+    assessment = get_scoring_strategy().evaluate(customer)
+    return assessment_history.apply_trend_alerts(db, customer, assessment)
 
 
 @router.post("/{customer_id}/snapshot", response_model=AssessmentHistoryItem)

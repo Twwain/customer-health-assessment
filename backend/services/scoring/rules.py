@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime
+import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any
 
@@ -115,6 +116,36 @@ def _to_number(value: Any) -> float | None:
         return None
 
 
+_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _metric_number(value: Any, parser: str = "number") -> float | None:
+    """从填报模板的原子指标文本中提取可比较数值。"""
+    text = _stringify(value).strip()
+    if parser == "average_list":
+        if isinstance(value, (list, tuple)):
+            numbers = [_to_number(item) for item in value]
+            valid = [number for number in numbers if number is not None]
+            return sum(valid) / len(valid) if valid else None
+        bracketed = re.search(r"[\[【](.*?)[\]】]", text)
+        if bracketed:
+            numbers = [float(item) for item in _NUMBER_PATTERN.findall(bracketed.group(1))]
+            return sum(numbers) / len(numbers) if numbers else None
+        average = re.search(r"平均(?:为|值)?\s*(-?\d+(?:\.\d+)?)", text)
+        if average:
+            return float(average.group(1))
+
+    number = _to_number(value)
+    if number is None:
+        match = _NUMBER_PATTERN.search(text)
+        number = float(match.group(0)) if match else None
+    if number is None:
+        return None
+    if parser == "percent" and isinstance(value, (int, float)) and 0 <= number <= 1:
+        return number * 100
+    return number
+
+
 def _to_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -205,7 +236,7 @@ def evaluate_factor(
 
 
 def _rule_threshold(params: dict, value: Any, today: datetime.date) -> tuple[float, list[str]]:
-    number = _to_number(value)
+    number = _metric_number(value, str(params.get("parser", "number")))
     if number is not None:
         for bracket in params.get("brackets", []):
             if _bracket_matches(bracket, number):
@@ -222,7 +253,7 @@ def _rule_threshold(params: dict, value: Any, today: datetime.date) -> tuple[flo
 def _rule_mapping(params: dict, value: Any, today: datetime.date) -> tuple[float, list[str]]:
     table = params.get("map") or {}
     hit = True
-    if value in table:
+    if isinstance(value, (str, int, float, bool)) and value in table:
         score = table[value]
     elif _stringify(value) in table:
         score = table[_stringify(value)]
@@ -235,6 +266,41 @@ def _rule_mapping(params: dict, value: Any, today: datetime.date) -> tuple[float
 
     detail = render_detail(params.get("detail", ""), value=value, score=score)
     return float(score), [detail] if detail else []
+
+
+def _rule_support_distribution(
+    params: dict,
+    value: Any,
+    today: datetime.date,
+) -> tuple[float, list[str]]:
+    """解析“支持62.5%且反对12.5%”并按支持/反对分布计分。"""
+    table = params.get("map") or {}
+    text = _stringify(value).strip()
+    if text in table:
+        score = float(table[text])
+    else:
+        support_match = re.search(r"支持[^\d]*(\d+(?:\.\d+)?)\s*%", text)
+        oppose_match = re.search(r"反对[^\d]*(\d+(?:\.\d+)?)\s*%", text)
+        support = float(support_match.group(1)) if support_match else None
+        oppose = float(oppose_match.group(1)) if oppose_match else 0.0
+        if support is None:
+            score = float(params.get("default_score", 3))
+        elif support >= 60:
+            # 文档示例明确“有反对者降档”：62.5% 支持、12.5% 反对计 8 分。
+            score = float(
+                params.get("top_score", 10)
+                if oppose <= 0
+                else params.get("opposition_downgrade_score", 8)
+            )
+        elif support >= 40:
+            score = float(params.get("score_40", 8))
+        elif support >= 20:
+            score = float(params.get("score_20", 6))
+        else:
+            score = float(params.get("score_low", 3))
+
+    detail = render_detail(params.get("detail", ""), value=value, score=score)
+    return score, [detail] if detail else []
 
 
 def _rule_days_since(params: dict, value: Any, today: datetime.date) -> tuple[float, list[str]]:
@@ -300,6 +366,7 @@ def _rule_constant(params: dict, value: Any, today: datetime.date) -> tuple[floa
 _RULE_HANDLERS = {
     "threshold": _rule_threshold,
     "mapping": _rule_mapping,
+    "support_distribution": _rule_support_distribution,
     "days_since": _rule_days_since,
     "linear": _rule_linear,
     "penalty": _rule_penalty,
@@ -329,6 +396,14 @@ def evaluate_dimension(
         score += result.score
         details.extend(result.details)
         factor_scores.append(result)
+
+    if dimension.aggregation == "average":
+        raw_average = (
+            sum(item.score for item in factor_scores) / len(factor_scores)
+            if factor_scores
+            else 0.0
+        )
+        score = float(dimension.base_score) + raw_average * float(dimension.max_score) / 10.0
 
     if dimension.clamp_min is not None:
         score = max(float(dimension.clamp_min), score)

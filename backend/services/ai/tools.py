@@ -66,7 +66,12 @@ def score_query(customer: Customer | None, db: Any | None = None):
         return None
     from services.scoring import get_scoring_strategy
 
-    return get_scoring_strategy().evaluate(customer)
+    assessment = get_scoring_strategy().evaluate(customer)
+    if db is not None:
+        from services import assessment_history
+
+        assessment_history.apply_trend_alerts(db, customer, assessment)
+    return assessment
 
 
 def profile_query(customer: Customer | None) -> dict:

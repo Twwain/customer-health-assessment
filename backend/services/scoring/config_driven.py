@@ -48,7 +48,7 @@ class ConfigDrivenStrategy(ScoringStrategy):
         results = [evaluate_dimension(dim, c, today) for dim in config.enabled_dimensions]
         total = sum(r.score for r in results)
         level, color = self._level(total, config)
-        alerts, suggestions = self._analyze(c, config, today)
+        alerts, suggestions = self._analyze(c, config, today, results, total)
         sub_map = {}
         for dim in config.enabled_dimensions:
             for f in dim.factors:
@@ -74,6 +74,8 @@ class ConfigDrivenStrategy(ScoringStrategy):
         c: Customer,
         config: ScoringConfig,
         today: datetime.date,
+        results: list[DimensionResult],
+        total: float,
     ) -> tuple[list[AlertItem], list[str]]:
         """按配置生成风险预警与建议（顺序即配置顺序）。"""
         alerts: list[AlertItem] = []
@@ -90,6 +92,45 @@ class ConfigDrivenStrategy(ScoringStrategy):
                     id=rule.id,
                     level=rule.level,
                     message=render_detail(rule.message, value=value),
+                )
+            )
+            if rule.suggestion:
+                suggestions.append(rule.suggestion)
+
+        dimensions = {result.key: result for result in results}
+        factors = {
+            factor.field: factor
+            for result in results
+            for factor in result.factor_scores
+        }
+        comparisons = {
+            "lt": lambda left, right: left < right,
+            "lte": lambda left, right: left <= right,
+            "gt": lambda left, right: left > right,
+            "gte": lambda left, right: left >= right,
+            "eq": lambda left, right: left == right,
+        }
+        for rule in config.score_alerts:
+            if rule.target == "total":
+                value = float(total)
+            elif rule.target == "dimension":
+                result = dimensions.get(rule.key)
+                if result is None or not result.max_score:
+                    continue
+                value = result.score / result.max_score * 100.0
+            else:
+                factor = factors.get(rule.key)
+                if factor is None:
+                    continue
+                value = factor.score
+
+            if not comparisons[rule.op](value, rule.value):
+                continue
+            alerts.append(
+                AlertItem(
+                    id=rule.id,
+                    level=rule.level,
+                    message=render_detail(rule.message, value=round(value, 1)),
                 )
             )
             if rule.suggestion:

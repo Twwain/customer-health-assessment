@@ -1,1540 +1,627 @@
-# ==============================================================================
-# 客情评估智能体 — 量化评估引擎评分配置
-# ------------------------------------------------------------------------------
-# 7 个评估维度 × 60 个因子，
-# 融合 MCR 三维体系 + MEDDIC / 决策流程方法论 / Customer Health Score /
-# CES / BANT / RFM / CSM / SAM 八大框架。
-#
-# 维度 / 因子 / 权重 / 打分规则 / 预警 / 等级阈值全部配置化：
-# 修改本文件后重启服务即生效，**无需改动任何代码**。
-#
-# 计分口径（四级计算模型，折算进本引擎的「维度求和」模型）：
-#   因子原始得分 0-10 → 按 二级维度权重 × 组内因子均权 × 一级维度权重 折算为本因子分值
-#   维度得分 = 组内各因子分值之和（满分 = 一级权重分，7 维合计 100）
-#   总分 = 各维度得分之和（满分 100）
-#
-# 新增一个因子只需三步：
-#   ① 若为新字段：在 Customer 模型加列，或直接使用 custom_fields（设 source: custom_fields）
-#   ② 在下面对应维度的 factors 中注册字段、权重、input（供前端动态渲染表单）与 rule
-#   ③ 重启服务，评分引擎与 GET /api/customers/factor-config 自动读取
-#
-# ------------------------------------------------------------------------------
-# 支持的打分规则类型（rule.type）
-# ------------------------------------------------------------------------------
-#   threshold  数值分档。brackets 按顺序匹配，命中即止；支持 gte/gt/lte/lt/eq。
-#              （加载时自动规范化顺序：纯 gte/gt 按阈值降序、纯 lte/lt 按升序）
-#   mapping    枚举映射。map 精确匹配取分，未命中用 default_score。
-#   days_since 日期距今天数分档。empty 处理空值，brackets 用 lte/gte 匹配天数。
-#   linear     线性换算。score = value * multiplier + offset，可选 clamp。
-#   penalty    条件扣分。when: truthy / falsy / is_true / is_false，命中才计分与记明细。
-#   constant   固定分（用于占位因子）。
-#
-# detail 为明细文案模板，可用占位符：{value} 原始值 · {score} 本因子得分 · {days} 距今天数
-# ------------------------------------------------------------------------------
-# 说明：weight = 该因子在本维度中的满分（已按二级维度权重折算），
-#       仅用于展示与校验；实际得分由 rule 计算。
-# ==============================================================================
+# 客情健康度评分配置 V3.0
+# 来源：《客情健康度评估_因子精简版V3.0.docx》
+# 计算口径：因子原始值 -> 0-10 分；维度内算术平均；7 个维度加权汇总为 0-100 分。
 
-version: "2026.08.22"
-updated_at: "2026-08-22"
-description: "客情健康度评分配置 — 7 维度加权模型（满分 100，共 60 因子）"
+version: "2026.08.24-v3"
+updated_at: "2026-08-24"
+description: "客情健康度评分配置 V3.0（7 维度、28 因子、维度内等权）"
 
-# ── 等级阈值（按 min_score 从高到低匹配）─────────────────────────────────────
 levels:
-  - name: 健康
-    min_score: 80
-    color: "#22c55e"
-  - name: 亚健康
-    min_score: 60
-    color: "#eab308"
-  - name: 风险
-    min_score: 40
-    color: "#f97316"
-  - name: 高危
-    min_score: 0
-    color: "#ef4444"
+  - {name: 健康, min_score: 80, color: "#22c55e"}
+  - {name: 亚健康, min_score: 60, color: "#eab308"}
+  - {name: 风险, min_score: 40, color: "#f97316"}
+  - {name: 高危, min_score: 0, color: "#ef4444"}
 
-# ── 评分维度 ────────────────────────────────────────────────────────────────
 dimensions:
-
-  # ① KCR 关键客户关系（权重 30%，MCR + MEDDIC + 决策流程方法论）────────────
   - key: kcr
     name: KCR 关键客户关系
     max_score: 30
-    enabled: true
-    description: 决策链覆盖 · 信息互通与信任深度 · 决策支持与影响力（AR 为主，月度填报）
+    aggregation: average
+    description: 销售（AR）与客户决策链关键岗位人员的关系深度
     factors:
-
-      # 二级维度：决策链覆盖度（28% → 组内 4 因子均权，每个满分 2.1）
       - field: kcr_01
         label: KCR-01 决策链识别完整度
-        weight: 2.1
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：已识别决策链人数占比（二级维度：决策链覆盖度）
+        frequency: 月度
+        description: 已识别决策链人数 / 应识别决策链人数（%）
+        example: "87.5%"
         input:
           type: select
-          options: ["100%", "≥80%", "≥60%", "≥40%", "<40%"]
+          unit: "%"
+          options: ["100%", "80-99%", "60-79%", "40-59%", "0-39%"]
         rule:
-          type: mapping
-          map:
-            "100%": 2.1
-            "≥80%": 1.68
-            "≥60%": 1.26
-            "≥40%": 0.84
-            "<40%": 0.21
-          detail: "已识别占比 {value}%（100%）：+{score}分"
-          default_score: 0.21
+          type: threshold
+          parser: percent
+          brackets:
+            - {eq: 100, score: 10, detail: "决策链识别 {value}：{score}分"}
+            - {gte: 80, score: 8, detail: "决策链识别 {value}：{score}分"}
+            - {gte: 60, score: 6, detail: "决策链识别 {value}：{score}分"}
+            - {gte: 40, score: 4, detail: "决策链识别 {value}：{score}分"}
+          default: {score: 1, detail: "决策链识别 {value}：{score}分"}
 
       - field: kcr_02
         label: KCR-02 关键人客情等级分布
-        weight: 2.1
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：各关键人客情等级加权平均（-1~3，二级维度：决策链覆盖度）
+        frequency: 月度
+        description: 各关键人客情等级平均（-1反对/0中立/1支持/2强支持/3教练级）
+        example: "[3,2,2,1,1]"
         input:
-          type: select
-          options: ["≥2", "1.5-1.9", "1-1.4", "0.5-0.9", "<0.5"]
+          type: key_person_levels
+          options: ["3", "2", "1", "0", "-1"]
         rule:
-          type: mapping
-          map:
-            "≥2": 2.1
-            "1.5-1.9": 1.68
-            "1-1.4": 1.26
-            "0.5-0.9": 0.84
-            "<0.5": 0.21
-          detail: "客情等级均值 {value}（≥2）：+{score}分"
-          default_score: 0.21
+          type: threshold
+          parser: average_list
+          brackets:
+            - {gte: 2, score: 10, detail: "关键人客情等级 {value}：{score}分"}
+            - {gte: 1.5, score: 8, detail: "关键人客情等级 {value}：{score}分"}
+            - {gte: 1, score: 6, detail: "关键人客情等级 {value}：{score}分"}
+            - {gte: 0.5, score: 4, detail: "关键人客情等级 {value}：{score}分"}
+          default: {score: 1, detail: "关键人客情等级 {value}：{score}分"}
 
-      - field: kcr_03
-        label: KCR-03 高层CXO/VP覆盖率
-        weight: 2.1
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：已建立稳定联系的高层占比（二级维度：决策链覆盖度）
-        input:
-          type: select
-          options: ["100%", "≥80%", "≥60%", "≥40%", "<40%"]
-        rule:
-          type: mapping
-          map:
-            "100%": 2.1
-            "≥80%": 1.68
-            "≥60%": 1.26
-            "≥40%": 0.84
-            "<40%": 0.21
-          detail: "高层覆盖率 {value}%（100%）：+{score}分"
-          default_score: 0.21
-
-      - field: kcr_03b
-        label: KCR-03B 经济决策者识别度
-        weight: 2.1
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：是否识别 EB（Economic Buyer）并评估对其影响力（MEDDIC，二级维度：决策链覆盖度）
-        input:
-          type: select
-          options: [已识别且影响力≥2级, 已识别影响力1级, 不确定, 未识别]
-        rule:
-          type: mapping
-          map:
-            已识别且影响力≥2级: 2.1
-            已识别影响力1级: 1.47
-            不确定: 0.63
-            未识别: 0
-          default_score: 0
-          detail: "经济决策者识别度「{value}」：+{score}分"
-
-      # 二级维度：信息互通与信任深度（32% → 组内 3 因子均权，每个满分 3.2）
       - field: kcr_04
-        label: KCR-04 内幕信息共享度
-        weight: 3.2
+        label: KCR-04 信息共享度
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：90 天内客户主动分享非公开信息次数（二级维度：信息互通与信任深度）
-        input:
-          type: select
-          options: ["≥3次", "2次", "1次", "0次"]
+        frequency: 月度
+        description: 90天内客户主动分享非公开信息次数
+        example: "2次"
+        input: {type: select, options: ["≥3次", "2次", "1次", "0次"]}
         rule:
-          type: mapping
-          map:
-            "≥3次": 3.2
-            "2次": 2.24
-            "1次": 1.28
-            "0次": 0.32
-          detail: "90天内主动分享 {value} 次（≥3次）：+{score}分"
-          default_score: 0.32
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 3, score: 10, detail: "90天内信息共享 {value}：{score}分"}
+            - {gte: 2, score: 7, detail: "90天内信息共享 {value}：{score}分"}
+            - {gte: 1, score: 4, detail: "90天内信息共享 {value}：{score}分"}
+            - {gte: 0, score: 1, detail: "90天内信息共享 {value}：{score}分"}
+          default: {score: 1, detail: "90天内信息共享 {value}：{score}分"}
 
-      - field: kcr_05
-        label: KCR-05 决策链信息透明
-        weight: 3.2
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：能否绘制完整决策链权力地图（含时间线）（二级维度：信息互通与信任深度）
-        input:
-          type: select
-          options: [完整含时间线, 部分, 否]
-        rule:
-          type: mapping
-          map:
-            完整含时间线: 3.2
-            部分: 1.92
-            否: 0.32
-          default_score: 0.32
-          detail: "决策链信息透明「{value}」：+{score}分"
-
-      - field: kcr_06
-        label: KCR-06 非正式互动深度
-        weight: 3.2
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：非工作场合互动次数 + 私人联系方式（二级维度：信息互通与信任深度）
-        input:
-          type: select
-          options: [≥3次且有私人联系方式, 1-2次且有私人联系方式, 仅工作场合, 无私人联系]
-        rule:
-          type: mapping
-          map:
-            "≥3次且有私人联系方式": 3.2
-            1-2次且有私人联系方式: 2.24
-            仅工作场合: 1.28
-            无私人联系: 0.32
-          default_score: 0.32
-          detail: "非正式互动深度「{value}」：+{score}分"
-
-      # 二级维度：决策支持与影响力（40% → 组内 5 因子均权，每个满分 2.4）
       - field: kcr_07
         label: KCR-07 关键人支持度分布
-        weight: 2.4
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：支持者人数占比（决策流程方法论分类）（二级维度：决策支持与影响力）
+        frequency: 月度
+        description: 支持者人数占比及反对者人数占比
+        example: "支持62.5%且反对12.5%"
         input:
           type: select
-          options: ["≥60%支持且无反对", "40-59%支持", "20-39%支持", "<20%支持"]
+          options: ["支持≥60%且无反对", "支持≥60%但有反对", "40-59%支持", "20-39%支持", "<20%支持"]
         rule:
-          type: mapping
+          type: support_distribution
+          top_score: 10
+          opposition_downgrade_score: 8
+          score_40: 8
+          score_20: 6
+          score_low: 3
+          default_score: 3
           map:
-            "≥60%支持且无反对": 2.4
-            40-59%支持: 1.92
-            20-39%支持: 1.44
-            "<20%支持": 0.72
-          default_score: 0.72
-          detail: "关键人支持度「{value}」：+{score}分"
+            "支持≥60%且无反对": 10
+            "支持≥60%但有反对": 8
+            "40-59%支持": 8
+            "20-39%支持": 6
+            "<20%支持": 3
+          detail: "关键人支持度 {value}：{score}分"
 
       - field: kcr_08
         label: KCR-08 内部Champion存在度
-        weight: 2.4
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：是否有决策层人员主动推动我方方案（含影响 EB 能力）（二级维度：决策支持与影响力）
+        frequency: 月度
+        description: 是否有决策层人员主动推动我方方案（取最高级别）
+        example: CXO级且能影响EB
         input:
           type: select
           options: [CXO级且能影响EB, VP级, 总监级, 无]
         rule:
           type: mapping
-          map:
-            CXO级且能影响EB: 2.4
-            VP级: 1.92
-            总监级: 1.44
-            无: 0.24
-          default_score: 0.24
-          detail: "内部Champion「{value}」：+{score}分"
-
-      - field: kcr_09
-        label: KCR-09 关键会议支持记录
-        weight: 2.4
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：6 个月内关键人为我方公开表态次数（二级维度：决策支持与影响力）
-        input:
-          type: select
-          options: ["≥3次公开表态", 1-2次公开表态, 无表态, 有反对]
-        rule:
-          type: mapping
-          map:
-            "≥3次公开表态": 2.4
-            1-2次公开表态: 1.68
-            无表态: 0.96
-            有反对: 0.24
-          default_score: 0.24
-          detail: "关键会议支持「{value}」：+{score}分"
-
-      - field: kcr_10
-        label: KCR-10 竞品阻击能力
-        weight: 2.4
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：面对竞品时关键人主动帮助程度（二级维度：决策支持与影响力）
-        input:
-          type: select
-          options: [主动阻击, 提供信息, 中立, 偏向竞品]
-        rule:
-          type: mapping
-          map:
-            主动阻击: 2.4
-            提供信息: 1.68
-            中立: 0.96
-            偏向竞品: 0.24
-          default_score: 0.24
-          detail: "竞品阻击能力「{value}」：+{score}分"
+          map: {CXO级且能影响EB: 10, VP级: 8, 总监级: 6, 无: 1}
+          default_score: 1
+          detail: "内部Champion「{value}」：{score}分"
 
       - field: kcr_10b
         label: KCR-10B 决策流程影响力
-        weight: 2.4
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：掌握决策流程 + 关键节点可控数（决策流程方法论影响力）（二级维度：决策支持与影响力）
+        frequency: 月度
+        description: 是否掌握决策流程 + 可控关键节点数
+        example: 全流程且2节点可控
         input:
           type: select
-          options: ["全流程且≥3节点可控", "1-2节点可控", 部分掌握, 不了解]
+          options: [全流程且≥3节点可控, 全流程且2节点可控, 1-2节点可控, 部分掌握, 不了解]
         rule:
           type: mapping
           map:
-            "全流程且≥3节点可控": 2.4
-            1-2节点可控: 1.68
-            部分掌握: 0.96
-            不了解: 0.24
-          default_score: 0.24
-          detail: "决策流程影响力「{value}」：+{score}分"
+            全流程且≥3节点可控: 10
+            全流程且2节点可控: 7
+            1-2节点可控: 7
+            部分掌握: 4
+            不了解: 1
+          default_score: 1
+          detail: "决策流程影响力「{value}」：{score}分"
 
-  # ② ER 普遍客户关系（权重 18%，MCR + 产品使用数据）───────────────────────
   - key: er
     name: ER 普遍客户关系
     max_score: 18
-    enabled: true
-    description: 基层对接覆盖与配合度 · 技术层关系 · 基层赋能与维护（AR+SR+FR 协同，月度填报）
+    aggregation: average
+    description: 与客户基层执行层的关系质量
     factors:
-
-      # 二级维度：基层对接覆盖与配合度（35% → 组内 3 因子均权，每个满分 2.1）
       - field: er_01
         label: ER-01 基层触点覆盖度
-        weight: 2.1
+        weight: 1
         source: custom_fields
-        source_role: AR
-        description: 原子指标：有稳定对接基层岗位数占比（二级维度：基层对接覆盖与配合度）
-        input:
-          type: select
-          options: ["100%", "≥80%", "≥60%", "≥40%", "<40%"]
+        source_role: AR+FR
+        frequency: 月度
+        description: 有稳定对接的基层岗位数 / 应覆盖基层岗位数（%）
+        example: "80%"
+        input: {type: select, unit: "%", options: ["100%", "80-99%", "60-79%", "40-59%", "0-39%"]}
         rule:
-          type: mapping
-          map:
-            "100%": 2.1
-            "≥80%": 1.68
-            "≥60%": 1.26
-            "≥40%": 0.84
-            "<40%": 0.21
-          detail: "基层触点覆盖 {value}%（100%）：+{score}分"
-          default_score: 0.21
-
-      - field: er_02
-        label: ER-02 日常配合响应度
-        weight: 2.1
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：需求调研/资料提供/方案评审是否 1 周内响应（二级维度：基层对接覆盖与配合度）
-        input:
-          type: select
-          options: [3项均1周内响应, 2项响应, 1项响应, 0项响应]
-        rule:
-          type: mapping
-          map:
-            3项均1周内响应: 2.1
-            2项响应: 1.47
-            1项响应: 0.84
-            0项响应: 0.21
-          default_score: 0.21
-          detail: "日常配合响应「{value}」：+{score}分"
-
-      - field: er_03
-        label: ER-03 基层执行口碑
-        weight: 2.1
-        source: custom_fields
-        source_role: FR
-        description: 原子指标：投诉数量 + 基层是否主动提供现场信息（二级维度：基层对接覆盖与配合度）
-        input:
-          type: select
-          options: [无投诉且主动提供信息, 无投诉, 1-2次投诉, "≥3次投诉"]
-        rule:
-          type: mapping
-          map:
-            无投诉且主动提供信息: 2.1
-            无投诉: 1.47
-            1-2次投诉: 0.84
-            "≥3次投诉": 0.21
-          default_score: 0.21
-          detail: "基层执行口碑「{value}」：+{score}分"
-
-      # 二级维度：技术层关系（35% → 组内 3 因子均权，每个满分 2.1）
-      - field: er_04
-        label: ER-04 技术交流频度
-        weight: 2.1
-        source: custom_fields
-        source_role: SR
-        description: 原子指标：3 个月内与客户技术团队有效交流次数（二级维度：技术层关系）
-        input:
-          type: select
-          options: ["≥6次", "4-5次", "2-3次", "1次", "0次"]
-        rule:
-          type: mapping
-          map:
-            "≥6次": 2.1
-            "4-5次": 1.68
-            "2-3次": 1.26
-            "1次": 0.84
-            "0次": 0.21
-          detail: "3个月技术交流 {value} 次（≥6次）：+{score}分"
-          default_score: 0.21
+          type: threshold
+          parser: percent
+          brackets:
+            - {eq: 100, score: 10, detail: "基层触点覆盖 {value}：{score}分"}
+            - {gte: 80, score: 8, detail: "基层触点覆盖 {value}：{score}分"}
+            - {gte: 60, score: 6, detail: "基层触点覆盖 {value}：{score}分"}
+            - {gte: 40, score: 4, detail: "基层触点覆盖 {value}：{score}分"}
+          default: {score: 1, detail: "基层触点覆盖 {value}：{score}分"}
 
       - field: er_05
         label: ER-05 技术认可度
-        weight: 2.1
+        weight: 1
         source: custom_fields
         source_role: SR
-        description: 原子指标：方案在客户内部评价 + 是否参与标书参数制定（二级维度：技术层关系）
-        input:
-          type: select
-          options: [标杆且参与定标, 标杆, 相当, 落后]
+        frequency: 月度
+        description: 我方方案在客户内部评价等级 + 是否参与标书参数制定
+        example: 标杆且参与定标
+        input: {type: select, options: [标杆且参与定标, 标杆, 相当, 落后]}
         rule:
           type: mapping
-          map:
-            标杆且参与定标: 2.1
-            标杆: 1.68
-            相当: 1.05
-            落后: 0.42
-          default_score: 0.42
-          detail: "技术认可度「{value}」：+{score}分"
+          map: {标杆且参与定标: 10, 标杆: 8, 相当: 5, 落后: 2}
+          default_score: 2
+          detail: "技术认可度「{value}」：{score}分"
 
-      - field: er_06
-        label: ER-06 技术层信息获取
-        weight: 2.1
-        source: custom_fields
-        source_role: SR
-        description: 原子指标：技术负责人是否主动同步内部技术路线信息（二级维度：技术层关系）
-        input:
-          type: select
-          options: [主动同步, 问才告知, 不透露]
-        rule:
-          type: mapping
-          map:
-            主动同步: 2.1
-            问才告知: 1.26
-            不透露: 0.42
-          default_score: 0.42
-          detail: "技术层信息获取「{value}」：+{score}分"
-
-      # 二级维度：基层赋能与维护（30% → 组内 4 因子均权，每个满分 1.35）
       - field: er_07
         label: ER-07 培训赋能频次
-        weight: 1.35
+        weight: 1
         source: custom_fields
-        source_role: SR
-        description: 原子指标：半年内对客户基层团队的培训/赋能次数（二级维度：基层赋能与维护）
-        input:
-          type: select
-          options: ["≥4次", "2-3次", "1次", "0次"]
+        source_role: AR+FR
+        frequency: 月度
+        description: 半年内对客户基层团队培训/赋能次数
+        example: "3次"
+        input: {type: select, options: ["≥4次", "2-3次", "1次", "0次"]}
         rule:
-          type: mapping
-          map:
-            "≥4次": 1.35
-            "2-3次": 0.945
-            "1次": 0.54
-            "0次": 0.135
-          detail: "半年培训赋能 {value} 次（≥4次）：+{score}分"
-          default_score: 0.135
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 4, score: 10, detail: "半年培训赋能 {value}：{score}分"}
+            - {gte: 2, score: 7, detail: "半年培训赋能 {value}：{score}分"}
+            - {gte: 1, score: 4, detail: "半年培训赋能 {value}：{score}分"}
+            - {gte: 0, score: 1, detail: "半年培训赋能 {value}：{score}分"}
+          default: {score: 1, detail: "半年培训赋能 {value}：{score}分"}
 
       - field: er_08
         label: ER-08 问题响应满意度
-        weight: 1.35
+        weight: 1
         source: custom_fields
-        source_role: FR
-        description: 原子指标：基层提出问题/需求的响应及时性与解决质量（%）（二级维度：基层赋能与维护）
-        input:
-          type: select
-          options: ["100%", "≥80%", "≥60%", "<60%"]
+        source_role: FR+AR
+        frequency: 月度
+        description: 基层问题/需求响应及时率（%）
+        example: "83%"
+        input: {type: select, unit: "%", options: ["100%", "80-99%", "60-79%", "0-59%"]}
         rule:
-          type: mapping
-          map:
-            "100%": 1.35
-            "≥80%": 0.945
-            "≥60%": 0.54
-            "<60%": 0.135
-          detail: "问题响应满意 {value}%（100%）：+{score}分"
-          default_score: 0.135
+          type: threshold
+          parser: percent
+          brackets:
+            - {eq: 100, score: 10, detail: "问题响应及时率 {value}：{score}分"}
+            - {gte: 80, score: 7, detail: "问题响应及时率 {value}：{score}分"}
+            - {gte: 60, score: 4, detail: "问题响应及时率 {value}：{score}分"}
+          default: {score: 1, detail: "问题响应及时率 {value}：{score}分"}
 
-      - field: er_09
-        label: ER-09 基层关系备份
-        weight: 1.35
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：是否有 2 人以上可独立对接该客户基层（人）（二级维度：基层赋能与维护）
-        input:
-          type: select
-          options: ["≥2人", "1人", "0人"]
-        rule:
-          type: mapping
-          map:
-            "≥2人": 1.35
-            "1人": 0.675
-            "0人": 0.135
-          detail: "可独立对接基层 {value} 人（≥2人）：+{score}分"
-          default_score: 0.135
-
-      - field: er_09b
-        label: ER-09B 用户产品使用反馈
-        weight: 1.35
-        source: custom_fields
-        source_role: FR
-        description: 原子指标：终端用户反馈收集机制 + 反馈采纳闭环率（Customer Health Score 产品使用数据，二级维度：基层赋能与维护）
-        input:
-          type: select
-          options: ["标准化机制且≥90%", "60-89%", "<60%", 无]
-        rule:
-          type: mapping
-          map:
-            "标准化机制且≥90%": 1.35
-            60-89%: 0.945
-            "<60%": 0.54
-            无: 0.135
-          default_score: 0.135
-          detail: "用户产品使用反馈「{value}」：+{score}分"
-
-  # ③ OR 组织客户关系（权重 14%，MCR + 战略客户管理 SAM）────────────────────
   - key: or
     name: OR 组织客户关系
     max_score: 14
-    enabled: true
-    description: 战略合作深度 · 组织协同与绑定（AR+管理层，季度填报）
+    aggregation: average
+    description: 甲乙双方公司级、部门级战略合作关系
     factors:
-
-      # 二级维度：战略合作深度 / 组织协同与绑定（各 50% → 组内 3 因子均权，每个满分 2.333333）
       - field: or_01
         label: OR-01 战略协议层级
-        weight: 2.333333
+        weight: 1
         source: custom_fields
-        source_role: 管理层
-        description: 原子指标：是否有战略协议 + 协议层级（集团/区域/项目级）（二级维度：战略合作深度）
-        input:
-          type: select
-          options: [集团级, 区域级, 项目级框架, 无]
+        source_role: AR+管理层
+        frequency: 季度
+        description: 是否签署战略协议 + 协议层级
+        example: 区域级
+        input: {type: select, options: [集团级, 区域级, 项目级框架, 无]}
         rule:
           type: mapping
-          map:
-            集团级: 2.333333
-            区域级: 1.633333
-            项目级框架: 0.933333
-            无: 0
+          map: {集团级: 10, 区域级: 7, 项目级框架: 4, 无: 0}
           default_score: 0
-          detail: "战略协议层级「{value}」：+{score}分"
+          detail: "战略协议层级「{value}」：{score}分"
 
       - field: or_02
         label: OR-02 高层互访频次
-        weight: 2.333333
+        weight: 1
         source: custom_fields
-        source_role: 管理层
-        description: 原子指标：12 个月内 VP 及以上正式互访/会晤次数（二级维度：战略合作深度）
-        input:
-          type: select
-          options: ["≥4次", "2-3次", "1次", "0次"]
+        source_role: AR
+        frequency: 季度
+        description: 12个月内VP及以上正式互访/会晤次数
+        example: "3次"
+        input: {type: select, options: ["≥4次", "2-3次", "1次", "0次"]}
         rule:
-          type: mapping
-          map:
-            "≥4次": 2.333333
-            "2-3次": 1.633333
-            "1次": 0.933333
-            "0次": 0.233333
-          detail: "12个月高层互访 {value} 次（≥4次）：+{score}分"
-          default_score: 0.233333
-
-      - field: or_03
-        label: OR-03 联合创新深度
-        weight: 2.333333
-        source: custom_fields
-        source_role: 生态/行业
-        description: 原子指标：联合实验室/创新中心 + 政府课题/行业标准（二级维度：战略合作深度）
-        input:
-          type: select
-          options: [2项, 1项, 0项]
-        rule:
-          type: mapping
-          map:
-            2项: 2.333333
-            1项: 1.4
-            0项: 0
-          default_score: 0
-          detail: "联合创新深度「{value}」：+{score}分"
-
-      - field: or_04
-        label: OR-04 联合业务规划
-        weight: 2.333333
-        source: custom_fields
-        source_role: 管理层
-        description: 原子指标：年度业务规划 + 联合战略研讨会（二级维度：组织协同与绑定）
-        input:
-          type: select
-          options: [2项, 1项, 0项]
-        rule:
-          type: mapping
-          map:
-            2项: 2.333333
-            1项: 1.4
-            0项: 0
-          default_score: 0
-          detail: "联合业务规划「{value}」：+{score}分"
-
-      - field: or_05
-        label: OR-05 危机兜底能力
-        weight: 2.333333
-        source: custom_fields
-        source_role: 管理层
-        description: 原子指标：重大问题时客户组织层面理解与支持（二级维度：组织协同与绑定）
-        input:
-          type: select
-          options: [有案例且正面, 有沟通无实质, 无经历, 被追责]
-        rule:
-          type: mapping
-          map:
-            有案例且正面: 2.333333
-            有沟通无实质: 1.166667
-            无经历: 0.7
-            被追责: 0
-          default_score: 0
-          detail: "危机兜底能力「{value}」：+{score}分"
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 4, score: 10, detail: "高层互访 {value}：{score}分"}
+            - {gte: 2, score: 7, detail: "高层互访 {value}：{score}分"}
+            - {gte: 1, score: 4, detail: "高层互访 {value}：{score}分"}
+            - {gte: 0, score: 1, detail: "高层互访 {value}：{score}分"}
+          default: {score: 1, detail: "高层互访 {value}：{score}分"}
 
       - field: or_06
         label: OR-06 生态合作嵌入度
-        weight: 2.333333
+        weight: 1
         source: custom_fields
         source_role: 生态/行业
-        description: 原子指标：生态伙伴计划 + 人才交流 + 联合营销（SAM 增强，二级维度：组织协同与绑定）
-        input:
-          type: select
-          options: [3项, 2项, 1项, 0项]
+        frequency: 季度
+        description: 生态伙伴计划 + 人才交流 + 联合营销开展项数
+        example: "2项"
+        input: {type: select, options: ["≥3项", "2项", "1项", "0项"]}
         rule:
-          type: mapping
-          map:
-            3项: 2.333333
-            2项: 1.866667
-            1项: 1.166667
-            0项: 0
-          default_score: 0
-          detail: "生态合作嵌入度「{value}」：+{score}分"
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 3, score: 10, detail: "生态合作开展 {value}：{score}分"}
+            - {gte: 2, score: 8, detail: "生态合作开展 {value}：{score}分"}
+            - {gte: 1, score: 5, detail: "生态合作开展 {value}：{score}分"}
+            - {gte: 0, score: 0, detail: "生态合作开展 {value}：{score}分"}
+          default: {score: 0, detail: "生态合作开展 {value}：{score}分"}
 
-  # ④ CI 客户洞察与业务理解（权重 9%）【新增维度】───────────────────────────
-  # MEDDIC + 决策流程方法论 + BANT
   - key: ci
     name: CI 客户洞察与业务理解
     max_score: 9
-    enabled: true
-    description: 客户战略理解 · 采购决策认知 · 价值量化能力（AR+SR，月度/季度填报）
+    aggregation: average
+    description: 先理解客户业务，再建立关系
     factors:
-
-      # 二级维度：客户战略理解（40% → 组内 2 因子均权，每个满分 1.8）
       - field: ci_01
-        label: CI-01 客户业务战略理解度
-        weight: 1.8
+        label: CI-01 客户业务战略理解度（含痛点映射）
+        weight: 1
         source: custom_fields
-        source_role: AR
-        description: 原子指标：客户 1-3 年业务战略+IT 规划、行业竞争地位与挑战（决策流程方法论，二级维度：客户战略理解）
-        input:
-          type: select
-          options: [2项清晰且有记录, 1项清晰, 模糊, 不了解]
+        source_role: AR+SR
+        frequency: 月度
+        description: 业务战略与IT规划、行业挑战、痛点地图及方案映射三项完成数
+        example: 3项全部完成
+        input: {type: select, options: ["3项全部完成", "2项完成", "1项完成", "0项完成"]}
         rule:
-          type: mapping
-          map:
-            2项清晰且有记录: 1.8
-            1项清晰: 1.08
-            模糊: 0.54
-            不了解: 0
-          default_score: 0
-          detail: "客户业务战略理解「{value}」：+{score}分"
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 3, score: 10, detail: "业务战略理解 {value}：{score}分"}
+            - {gte: 2, score: 6, detail: "业务战略理解 {value}：{score}分"}
+            - {gte: 1, score: 3, detail: "业务战略理解 {value}：{score}分"}
+            - {gte: 0, score: 0, detail: "业务战略理解 {value}：{score}分"}
+          default: {score: 0, detail: "业务战略理解 {value}：{score}分"}
 
-      - field: ci_02
-        label: CI-02 客户痛点与需求映射
-        weight: 1.8
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：痛点地图(≥3核心痛点) + 与我方产品/方案映射（MEDDIC Identify Pain，二级维度：客户战略理解）
-        input:
-          type: select
-          options: [3项均完成, 2项, 1项, 0项]
-        rule:
-          type: mapping
-          map:
-            3项均完成: 1.8
-            2项: 1.26
-            1项: 0.72
-            0项: 0
-          default_score: 0
-          detail: "痛点与需求映射「{value}」：+{score}分"
-
-      # 二级维度：采购决策认知（35% → 组内 2 因子均权，每个满分 1.575）
       - field: ci_03
-        label: CI-03 决策标准掌握度
-        weight: 1.575
+        label: CI-03 决策标准掌握度（含预算与周期）
+        weight: 1
         source: custom_fields
-        source_role: SR
-        description: 原子指标：供应商评估核心标准及权重 + 方案已对齐（MEDDIC Decision Criteria，二级维度：采购决策认知）
-        input:
-          type: select
-          options: [明确且已对齐, 明确未对齐, 部分了解, 不了解]
+        source_role: AR+SR
+        frequency: 月度
+        description: 核心评估标准、方案对齐、预算与决策周期三项掌握数
+        example: 3项全部掌握
+        input: {type: select, options: ["3项全部掌握", "2项掌握", "1项掌握", "0项掌握"]}
         rule:
-          type: mapping
-          map:
-            明确且已对齐: 1.575
-            明确未对齐: 0.945
-            部分了解: 0.4725
-            不了解: 0
-          default_score: 0
-          detail: "决策标准掌握度「{value}」：+{score}分"
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 3, score: 10, detail: "决策标准掌握 {value}：{score}分"}
+            - {gte: 2, score: 7, detail: "决策标准掌握 {value}：{score}分"}
+            - {gte: 1, score: 4, detail: "决策标准掌握 {value}：{score}分"}
+            - {gte: 0, score: 0, detail: "决策标准掌握 {value}：{score}分"}
+          default: {score: 0, detail: "决策标准掌握 {value}：{score}分"}
 
-      - field: ci_04
-        label: CI-04 采购预算与周期认知
-        weight: 1.575
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：年度 IT 预算规模及分配逻辑 + 采购决策周期（BANT Budget+Timeline，二级维度：采购决策认知）
-        input:
-          type: select
-          options: [2项掌握且有时间表, 1项掌握, 部分了解, 不了解]
-        rule:
-          type: mapping
-          map:
-            2项掌握且有时间表: 1.575
-            1项掌握: 0.945
-            部分了解: 0.4725
-            不了解: 0
-          default_score: 0
-          detail: "采购预算与周期认知「{value}」：+{score}分"
-
-      # 二级维度：价值量化能力（25% → 单因子满分 2.25）
       - field: ci_05
         label: CI-05 价值量化与ROI呈现
-        weight: 2.25
+        weight: 1
         source: custom_fields
         source_role: SR
-        description: 原子指标：可量化价值主张/ROI 测算 + 客户认可（MEDDIC Metrics，二级维度：价值量化能力）
-        input:
-          type: select
-          options: [有量化ROI且客户认可, 有量化未被认可, 仅定性, 无]
+        frequency: 月度
+        description: 是否提供量化价值主张/ROI测算及客户是否认可
+        example: 量化且客户认可
+        input: {type: select, options: [量化且客户认可, 量化未认可, 仅定性, 无]}
         rule:
           type: mapping
-          map:
-            有量化ROI且客户认可: 2.25
-            有量化未被认可: 1.35
-            仅定性: 0.675
-            无: 0
+          map: {量化且客户认可: 10, 量化未认可: 6, 仅定性: 3, 无: 0}
           default_score: 0
-          detail: "价值量化与ROI「{value}」：+{score}分"
+          detail: "价值量化与ROI「{value}」：{score}分"
 
-  # ⑤ HIS 历史合作与经营结果（权重 12%，RFM + 客户生命周期模型）─────────────
   - key: his
     name: HIS 历史合作与经营结果
     max_score: 12
-    enabled: true
-    description: 合作规模与深度 · 份额与竞争力 · 经营健康度（系统自动抓取，实时/月度）
+    aggregation: average
+    description: 用已发生的商业结果校验客情质量
     factors:
-
-      # 二级维度：合作规模与深度（35% → 组内 3 因子均权，每个满分 1.4）
-      - field: his_01
-        label: HIS-01 累计合作金额
-        weight: 1.4
-        source: custom_fields
-        source_role: 系统
-        description: 原子指标：历史合同含税总金额（RFM-Monetary，二级维度：合作规模与深度）
-        input:
-          type: select
-          options: [">5亿", "1-5亿", "5千万-1亿", "1-5千万", "<1千万"]
-        rule:
-          type: mapping
-          map:
-            ">5亿": 1.4
-            "1-5亿": 1.12
-            "5千万-1亿": 0.84
-            "1-5千万": 0.56
-            "<1千万": 0.28
-          detail: "累计合作金额 {value}（>5亿）：+{score}分"
-          default_score: 0.28
-
       - field: his_02
         label: HIS-02 年均合作金额趋势
-        weight: 1.4
+        weight: 1
         source: custom_fields
         source_role: 系统
-        description: 原子指标：近 3 年合同额趋势（RFM-Frequency，二级维度：合作规模与深度）
-        input:
-          type: select
-          options: [连续上升, 上升后持平, 持平, 下降, 连续下降]
+        frequency: 实时
+        description: 近3年合同额趋势
+        example: 上升后持平
+        input: {type: select, options: [连续上升, 上升后持平, 持平, 下降, 连续下降]}
         rule:
           type: mapping
-          map:
-            连续上升: 1.4
-            上升后持平: 0.98
-            持平: 0.7
-            下降: 0.42
-            连续下降: 0.14
-          default_score: 0.14
-          detail: "年均合作金额趋势「{value}」：+{score}分"
+          map: {连续上升: 10, 上升后持平: 7, 持平: 5, 下降: 3, 连续下降: 1}
+          default_score: 1
+          detail: "合作金额趋势「{value}」：{score}分"
 
-      - field: his_03
-        label: HIS-03 产品线覆盖数
-        weight: 1.4
-        source: custom_fields
-        source_role: 系统
-        description: 原子指标：历史合同中涉及不同产品线数量（二级维度：合作规模与深度）
-        input:
-          type: select
-          options: ["≥6条", "4-5条", "2-3条", "1条", "0条"]
-        rule:
-          type: mapping
-          map:
-            "≥6条": 1.4
-            "4-5条": 1.12
-            "2-3条": 0.84
-            "1条": 0.42
-            "0条": 0.0
-          detail: "产品线覆盖 {value} 条（≥6条）：+{score}分"
-          default_score: 0.0
-
-      # 二级维度：份额与竞争力（35% → 组内 3 因子均权，每个满分 1.4）
       - field: his_04
-        label: HIS-04 钱包份额
-        weight: 1.4
+        label: HIS-04 钱包份额(Wallet Share)
+        weight: 1
         source: custom_fields
         source_role: 系统
-        description: 原子指标：本企业订单/客户年度 IT 总采购额占比（Wallet Share，二级维度：份额与竞争力）
-        input:
-          type: select
-          options: ["≥50%", "30-49%", "15-29%", "5-14%", "<5%"]
+        frequency: 实时
+        description: 我司订单 / 客户年度IT总采购额（%）
+        example: "33%"
+        input: {type: select, unit: "%", options: ["≥50%", "30-49%", "15-29%", "5-14%", "0-4%"]}
         rule:
-          type: mapping
-          map:
-            "≥50%": 1.4
-            "30-49%": 1.12
-            "15-29%": 0.84
-            "5-14%": 0.56
-            "<5%": 0.14
-          detail: "钱包份额 {value}%（≥50%）：+{score}分"
-          default_score: 0.14
-
-      - field: his_05
-        label: HIS-05 中标率
-        weight: 1.4
-        source: custom_fields
-        source_role: 系统
-        description: 原子指标：12 个月内中标/投标比例（二级维度：份额与竞争力）
-        input:
-          type: select
-          options: ["≥80%", "60-79%", "40-59%", "20-39%", "<20%"]
-        rule:
-          type: mapping
-          map:
-            "≥80%": 1.4
-            "60-79%": 1.12
-            "40-59%": 0.84
-            "20-39%": 0.56
-            "<20%": 0.14
-          detail: "中标率 {value}%（≥80%）：+{score}分"
-          default_score: 0.14
+          type: threshold
+          parser: percent
+          brackets:
+            - {gte: 50, score: 10, detail: "钱包份额 {value}：{score}分"}
+            - {gte: 30, score: 8, detail: "钱包份额 {value}：{score}分"}
+            - {gte: 15, score: 6, detail: "钱包份额 {value}：{score}分"}
+            - {gte: 5, score: 4, detail: "钱包份额 {value}：{score}分"}
+          default: {score: 1, detail: "钱包份额 {value}：{score}分"}
 
       - field: his_06
         label: HIS-06 续约与增购
-        weight: 1.4
+        weight: 1
         source: custom_fields
         source_role: 系统
-        description: 原子指标：到期项目续约率 + 是否有增购/扩容（二级维度：份额与竞争力）
-        input:
-          type: select
-          options: ["≥80%且有增购", "≥80%", "50-79%", "<50%"]
+        frequency: 实时
+        description: 到期项目续约率 + 是否有增购/扩容
+        example: 续约≥80%且增购
+        input: {type: select, options: [续约≥80%且增购, 续约≥80%, 续约50-79%, 续约<50%]}
         rule:
           type: mapping
-          map:
-            "≥80%且有增购": 1.4
-            "≥80%": 0.98
-            50-79%: 0.56
-            "<50%": 0.14
-          default_score: 0.14
-          detail: "续约与增购「{value}」：+{score}分"
+          map: {续约≥80%且增购: 10, 续约≥80%: 7, 续约50-79%: 4, 续约<50%: 1}
+          default_score: 1
+          detail: "续约与增购「{value}」：{score}分"
 
-      # 二级维度：经营健康度（30% → 组内 4 因子均权，每个满分 0.9）
-      - field: his_07
-        label: HIS-07 回款效率
-        weight: 0.9
+      - field: his_09
+        label: HIS-09 NPS/客户满意度
+        weight: 1
         source: custom_fields
-        source_role: 财务
-        description: 原子指标：12 个月平均回款周期（天）（二级维度：经营健康度）
-        input:
-          type: select
-          options: ["<30天", "30-60天", "60-90天", ">90天"]
-        rule:
-          type: mapping
-          map:
-            "<30天": 0.9
-            "30-60天": 0.63
-            "60-90天": 0.36
-            ">90天": 0.09
-          detail: "平均回款周期 {value} 天（<30天）：+{score}分"
-          default_score: 0.09
-
-      - field: his_08
-        label: HIS-08 项目毛利率
-        weight: 0.9
-        source: custom_fields
-        source_role: 财务
-        description: 原子指标：该客户项目平均毛利率相对行业水平（二级维度：经营健康度）
-        input:
-          type: select
-          options: [高于行业平均20%以上, 与行业持平, 低于平均10%以上]
-        rule:
-          type: mapping
-          map:
-            高于行业平均20%以上: 0.9
-            与行业持平: 0.54
-            低于平均10%以上: 0.18
-          default_score: 0.18
-          detail: "项目毛利率「{value}」：+{score}分"
-
-      - field: customer_satisfaction
-        label: HIS-09 客户满意度调研
-        weight: 0.9
-        source: model
         source_role: 系统
-        description: 原子指标：三方 NPS 或满意度调研得分（本系统以满意度评分 1-10 填报，二级维度：经营健康度）
-        input:
-          type: slider
-          min: 1
-          max: 10
-          step: 1
+        frequency: 实时
+        description: 三方NPS或满意度调研得分
+        example: "75"
+        input: {type: select, options: ["≥80", "70-79", "60-69", "0-59"]}
         rule:
           type: threshold
+          parser: number
           brackets:
-            - gte: 9
-              score: 0.9
-              detail: "客户满意度 {value}/10（优秀）：+{score}分"
-            - gte: 7
-              score: 0.63
-              detail: "客户满意度 {value}/10（良好）：+{score}分"
-            - gte: 6
-              score: 0.36
-              detail: "客户满意度 {value}/10（一般）：+{score}分"
-          default:
-            score: 0.09
-            detail: "客户满意度 {value}/10（较低）：+{score}分"
+            - {gte: 80, score: 10, detail: "NPS/满意度 {value}：{score}分"}
+            - {gte: 70, score: 7, detail: "NPS/满意度 {value}：{score}分"}
+            - {gte: 60, score: 4, detail: "NPS/满意度 {value}：{score}分"}
+          default: {score: 1, detail: "NPS/满意度 {value}：{score}分"}
 
-      - field: his_09b
-        label: HIS-09B 客户生命周期阶段
-        weight: 0.9
-        source: custom_fields
-        source_role: 系统
-        description: 原子指标：导入/成长/成熟/衰退期 + 阶段转换趋势（Customer Lifecycle，二级维度：经营健康度）
-        input:
-          type: select
-          options: [成长期, 成熟期, 导入期, 衰退期, 衰退加速]
-        rule:
-          type: mapping
-          map:
-            成长期: 0.9
-            成熟期: 0.72
-            导入期: 0.54
-            衰退期: 0.18
-            衰退加速: 0
-          default_score: 0.18
-          detail: "客户生命周期「{value}」：+{score}分"
-
-  # ⑥ RISK 竞争态势与风险信号（权重 12%，Customer Health Score + CES）──────
   - key: risk
     name: RISK 竞争态势与风险信号
     max_score: 12
-    enabled: true
-    description: 竞争态势 · 风险信号与预警 · CES 客户费力度（AR+FR+系统，月度填报）
+    aggregation: average
+    description: 前瞻性竞争与风险信号
     factors:
-
-      # 二级维度：竞争态势（40% → 组内 4 因子均权，每个满分 1.2）
-      - field: risk_01
-        label: RISK-01 竞争对手数量
-        weight: 1.2
-        source: custom_fields
-        source_role: 市场
-        description: 原子指标：在跟项目中涉及竞品厂商平均数量（二级维度：竞争态势）
-        input:
-          type: select
-          options: ["0-1家", "2家", "3家", "≥4家"]
-        rule:
-          type: mapping
-          map:
-            "0-1家": 1.2
-            "2家": 0.84
-            "3家": 0.48
-            "≥4家": 0.12
-          detail: "竞品厂商 {value} 家（0-1家）：+{score}分"
-          default_score: 0.12
-
-      - field: risk_02
-        label: RISK-02 综合竞争排名
-        weight: 1.2
-        source: custom_fields
-        source_role: 市场
-        description: 原子指标：客户内部供应商评估排名（二级维度：竞争态势）
-        input:
-          type: select
-          options: ["第1名", "第2名", "第3名", "≥第4名"]
-        rule:
-          type: mapping
-          map:
-            "第1名": 1.2
-            "第2名": 0.84
-            "第3名": 0.48
-            "≥第4名": 0.12
-          detail: "供应商排名第 {value}（第1名）：+{score}分"
-          default_score: 0.12
-
-      - field: risk_03
-        label: RISK-03 竞品活跃度对比
-        weight: 1.2
-        source: custom_fields
-        source_role: 市场
-        description: 原子指标：近 3 月我方 vs 竞品活跃度对比（二级维度：竞争态势）
-        input:
-          type: select
-          options: [明显领先, 持平, 低于竞品, 大幅落后]
-        rule:
-          type: mapping
-          map:
-            明显领先: 1.2
-            持平: 0.72
-            低于竞品: 0.36
-            大幅落后: 0
-          default_score: 0.36
-          detail: "竞品活跃度对比「{value}」：+{score}分"
-
-      - field: risk_04
-        label: RISK-04 客户切换成本
-        weight: 1.2
-        source: custom_fields
-        source_role: AR
-        description: 原子指标：深度绑定产品 + 替换周期（月）（二级维度：竞争态势）
-        input:
-          type: select
-          options: ["深度绑定>18月", "部分绑定>12月", "标准品>6月", 易替换]
-        rule:
-          type: mapping
-          map:
-            "深度绑定>18月": 1.2
-            部分绑定>12月: 0.84
-            标准品>6月: 0.48
-            易替换: 0.12
-          default_score: 0.12
-          detail: "客户切换成本「{value}」：+{score}分"
-
-      # 二级维度：风险信号（60% → 组内 6 因子均权，每个满分 1.2）
       - field: risk_05
         label: RISK-05 关键人变动预警
-        weight: 1.2
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：3 个月内客户方关键岗位离职/调岗（二级维度：风险信号）
-        input:
-          type: select
-          options: [无变动, 1人变动, "≥2人变动"]
+        frequency: 月度
+        description: 3个月内客户方关键岗位离职/调岗人数
+        example: 1人变动
+        input: {type: select, options: [无变动, 1人变动, "≥2人变动"]}
         rule:
           type: mapping
-          map:
-            无变动: 1.2
-            1人变动: 0.6
-            "≥2人变动": 0
-          default_score: 0.6
-          detail: "关键人变动「{value}」：+{score}分"
+          map: {无变动: 10, 1人变动: 5, "≥2人变动": 0}
+          default_score: 0
+          detail: "关键人变动「{value}」：{score}分"
 
       - field: risk_06
         label: RISK-06 互动频次下降
-        weight: 1.2
+        weight: 1
         source: custom_fields
         source_role: AR
-        description: 原子指标：近 3 月各层级互动频次环比变化（二级维度：风险信号）
-        input:
-          type: select
-          options: [上升, 持平, "下降<20%", "下降≥20%"]
+        frequency: 月度
+        description: 近3月各层级互动频次环比变化
+        example: 下降<20%
+        input: {type: select, options: [上升, 持平, "下降<20%", "下降≥20%"]}
         rule:
           type: mapping
-          map:
-            上升: 1.2
-            持平: 0.84
-            下降<20%: 0.48
-            下降≥20%: 0.12
-          default_score: 0.84
-          detail: "互动频次变化「{value}」：+{score}分"
+          map: {上升: 10, 持平: 7, "下降<20%": 4, "下降≥20%": 1}
+          default_score: 1
+          detail: "互动频次变化「{value}」：{score}分"
 
       - field: risk_07
         label: RISK-07 竞品POC/试点
-        weight: 1.2
+        weight: 1
         source: custom_fields
-        source_role: 市场
-        description: 原子指标：客户是否已启动竞品 POC 或试点（二级维度：风险信号）
-        input:
-          type: select
-          options: [否, 是但可控, 是且进展顺利]
+        source_role: AR
+        frequency: 月度
+        description: 客户是否已启动竞品POC或试点
+        example: 是但可控
+        input: {type: select, options: [否, 是但可控, 是且进展顺利]}
         rule:
           type: mapping
-          map:
-            否: 1.2
-            是但可控: 0.6
-            是且进展顺利: 0
-          default_score: 0.6
-          detail: "竞品POC/试点「{value}」：+{score}分"
-
-      - field: risk_08
-        label: RISK-08 客情恶化信号
-        weight: 1.2
-        source: custom_fields
-        source_role: 服务
-        description: 原子指标：正式投诉/抱怨升级/关系转冷（二级维度：风险信号）
-        input:
-          type: select
-          options: [无, 1次正式投诉, "≥2次或重大投诉"]
-        rule:
-          type: mapping
-          map:
-            无: 1.2
-            1次正式投诉: 0.48
-            "≥2次或重大投诉": 0
-          default_score: 0.48
-          detail: "客情恶化信号「{value}」：+{score}分"
+          map: {否: 10, 是但可控: 5, 是且进展顺利: 0}
+          default_score: 0
+          detail: "竞品POC/试点「{value}」：{score}分"
 
       - field: risk_08b
         label: RISK-08B 客户费力度CES
-        weight: 1.2
+        weight: 1
         source: custom_fields
-        source_role: 服务
-        description: 原子指标：问题一次解决率/交互次数/信息重复提供（CES，二级维度：风险信号）
-        input:
-          type: select
-          options: ["低(>90%一次解决)", "中(80-90%)", "较高(60-79%)", "高(<60%)"]
+        source_role: FR+系统
+        frequency: 月度
+        description: 问题一次解决率 / 平均交互次数 / 信息重复提供情况
+        example: 中(80-90%)
+        input: {type: select, options: ["低费力(一次解决率>90%)", "中(80-90%)", "较高(60-79%)", "高(<60%)"]}
         rule:
           type: mapping
-          map:
-            低(>90%一次解决): 1.2
-            中(80-90%): 0.84
-            较高(60-79%): 0.48
-            高(<60%): 0.12
-          default_score: 0.84
-          detail: "客户费力度CES「{value}」：+{score}分"
+          map: {"低费力(一次解决率>90%)": 10, "中(80-90%)": 7, "较高(60-79%)": 4, "高(<60%)": 1}
+          default_score: 1
+          detail: "客户费力度CES「{value}」：{score}分"
 
       - field: risk_08c
         label: RISK-08C 客户自身经营风险
-        weight: 1.2
+        weight: 1
         source: custom_fields
-        source_role: 市场
-        description: 原子指标：行业景气度 + 客户财务健康（财报/信用评级）（二级维度：风险信号）
-        input:
-          type: select
-          options: [行业上行且财务健康, 平稳, 下行或承压, 危机]
+        source_role: 行业部门
+        frequency: 季度
+        description: 行业景气度 + 客户财务健康（财报/信用评级）
+        example: 平稳
+        input: {type: select, options: [行业上行且财务健康, 平稳, 下行或承压, 危机]}
         rule:
           type: mapping
-          map:
-            行业上行且财务健康: 1.2
-            平稳: 0.84
-            下行或承压: 0.48
-            危机: 0.12
-          default_score: 0.84
-          detail: "客户自身经营风险「{value}」：+{score}分"
+          map: {行业上行且财务健康: 10, 平稳: 7, 下行或承压: 4, 危机: 1}
+          default_score: 1
+          detail: "客户自身经营风险「{value}」：{score}分"
 
-  # ⑦ SVC 服务与支持健康度（权重 5%，CSM 客户成功管理）─────────────────────
   - key: svc
     name: SVC 服务与支持健康度
     max_score: 5
-    enabled: true
-    description: 交付质量 · 运维与故障处理 · 主动服务（FR+系统，月度填报）
+    aggregation: average
+    description: 服务与支持是客情的最后一道防线
     factors:
-
-      # 二级维度：交付质量（35% → 组内 2 因子均权，每个满分 0.875）
-      - field: svc_01
-        label: SVC-01 项目交付达标率
-        weight: 0.875
-        source: custom_fields
-        source_role: FR
-        description: 原子指标：方案匹配度 + 工期偏差率 + 文档完整性（二级维度：交付质量）
-        input:
-          type: select
-          options: [3项达标, 2项达标, 1项达标, 0项达标]
-        rule:
-          type: mapping
-          map:
-            3项达标: 0.875
-            2项达标: 0.6125
-            1项达标: 0.35
-            0项达标: 0.0875
-          default_score: 0.0875
-          detail: "项目交付达标率「{value}」：+{score}分"
-
-      - field: svc_02
-        label: SVC-02 验收按时率
-        weight: 0.875
-        source: custom_fields
-        source_role: FR
-        description: 原子指标：12 个月内交付项目按时验收比例（二级维度：交付质量）
-        input:
-          type: select
-          options: ["100%", "≥90%", "≥80%", "<80%"]
-        rule:
-          type: mapping
-          map:
-            "100%": 0.875
-            "≥90%": 0.6125
-            "≥80%": 0.35
-            "<80%": 0.0875
-          detail: "验收按时率 {value}%（100%）：+{score}分"
-          default_score: 0.0875
-
-      # 二级维度：运维与故障处理（30% → 组内 2 因子均权，每个满分 0.75）
       - field: svc_03
         label: SVC-03 故障响应时效
-        weight: 0.75
+        weight: 1
         source: custom_fields
-        source_role: FR
-        description: 原子指标：平均首次响应时长 + SLA 达标率（二级维度：运维与故障处理）
+        source_role: 系统
+        frequency: 月度
+        description: 平均首次响应时长 + SLA达标率
+        example: "<15min且达标率>95%"
         input:
           type: select
-          options: ["<15分钟且SLA>95%", "<30分钟且SLA>90%", "<1小时且SLA>80%", 未达标]
+          options: ["<15min且达标率>95%", "<30min且>90%", "<1h且>80%", "≥1h或达标率≤80%"]
         rule:
           type: mapping
           map:
-            "<15分钟且SLA>95%": 0.75
-            "<30分钟且SLA>90%": 0.525
-            "<1小时且SLA>80%": 0.3
-            未达标: 0.075
-          default_score: 0.075
-          detail: "故障响应时效「{value}」：+{score}分"
+            "<15min且达标率>95%": 10
+            "<15分钟且SLA>95%": 10
+            "<30min且>90%": 7
+            "<30分钟且SLA>90%": 7
+            "<1h且>80%": 4
+            "<1小时且SLA>80%": 4
+          default_score: 0
+          detail: "故障响应时效「{value}」：{score}分"
 
       - field: svc_04
         label: SVC-04 故障解决效率
-        weight: 0.75
+        weight: 1
         source: custom_fields
-        source_role: FR
-        description: 原子指标：平均解决时长 + 一次性解决率（二级维度：运维与故障处理）
+        source_role: 系统
+        frequency: 月度
+        description: 平均解决时长 + 一次性解决率
+        example: "<4h且一次解决率>90%"
         input:
           type: select
-          options: ["<4小时且一次解决率>90%", "<8小时且>80%", "<24小时且>70%", 未达标]
+          options: ["<4h且一次解决率>90%", "<8h且>80%", "<24h且>70%", "≥24h或一次解决率≤70%"]
         rule:
           type: mapping
           map:
-            "<4小时且一次解决率>90%": 0.75
-            "<8小时且>80%": 0.525
-            "<24小时且>70%": 0.3
-            未达标: 0.075
-          default_score: 0.075
-          detail: "故障解决效率「{value}」：+{score}分"
+            "<4h且一次解决率>90%": 10
+            "<4小时且一次解决率>90%": 10
+            "<8h且>80%": 7
+            "<8小时且一次解决率>80%": 7
+            "<24h且>70%": 4
+            "<24小时且一次解决率>70%": 4
+          default_score: 0
+          detail: "故障解决效率「{value}」：{score}分"
 
-      # 二级维度：主动服务（35% → 组内 3 因子均权，每个满分 0.583333）
       - field: svc_05
         label: SVC-05 主动服务频次
-        weight: 0.583333
+        weight: 1
         source: custom_fields
         source_role: FR
-        description: 原子指标：半年内主动巡检/预警/优化建议次数（二级维度：主动服务）
-        input:
-          type: select
-          options: ["≥6次", "4-5次", "2-3次", "<2次"]
+        frequency: 月度
+        description: 半年内主动巡检/预警/优化建议次数
+        example: 4-5次
+        input: {type: select, options: ["≥6次", "4-5次", "2-3次", "0-1次"]}
         rule:
-          type: mapping
-          map:
-            "≥6次": 0.583333
-            "4-5次": 0.408333
-            "2-3次": 0.233333
-            "<2次": 0.058333
-          detail: "半年主动服务 {value} 次（≥6次）：+{score}分"
-          default_score: 0.058333
+          type: threshold
+          parser: number
+          brackets:
+            - {gte: 6, score: 10, detail: "主动服务频次 {value}：{score}分"}
+            - {gte: 4, score: 7, detail: "主动服务频次 {value}：{score}分"}
+            - {gte: 2, score: 4, detail: "主动服务频次 {value}：{score}分"}
+          default: {score: 1, detail: "主动服务频次 {value}：{score}分"}
 
-      - field: svc_06
-        label: SVC-06 客户回访与跟进
-        weight: 0.583333
-        source: custom_fields
-        source_role: FR
-        description: 原子指标：项目交付后定期回访 + 跟进（二级维度：主动服务）
-        input:
-          type: select
-          options: [标准化且执行, 不定期, 无回访]
-        rule:
-          type: mapping
-          map:
-            标准化且执行: 0.583333
-            不定期: 0.291667
-            无回访: 0.058333
-          default_score: 0.058333
-          detail: "客户回访与跟进「{value}」：+{score}分"
-
-      - field: svc_06b
-        label: SVC-06B 知识转移与赋能效果
-        weight: 0.583333
-        source: custom_fields
-        source_role: FR
-        description: 原子指标：知识转移培训 + 客户自主运维提升 + 定期白皮书分享（CSM，二级维度：主动服务）
-        input:
-          type: select
-          options: [3项, 2项, 1项, 0项]
-        rule:
-          type: mapping
-          map:
-            3项: 0.583333
-            2项: 0.408333
-            1项: 0.233333
-            0项: 0.058333
-          default_score: 0.058333
-          detail: "知识转移与赋能「{value}」：+{score}分"
-
-# ── 风险预警规则（顺序即展示顺序）────────────────────────────────────────────
-# level：high=红 / medium=黄 / low=蓝（前端 AlertBadge 色彩编码）
-# 来源：仅使用当前已启用的客情因子配置生成预警
-# when.op 支持：truthy / falsy / is_true / is_false / empty / eq / ne /
-#               lt / lte / gt / gte / in / not_in / contains /
-#               days_since_gt / days_since_gt_or_empty
 alerts:
-
-  - id: ces_deterioration
+  - id: key_person_opposition
     level: high
-    when:
-      field: risk_08b
-      source: custom_fields
-      op: in
-      value: [较高(60-79%), 高(<60%)]
-    message: "客户费力度CES恶化（{value}），客户体验存在严重问题"
-    suggestion: "建议启动 CES 专项改进：降低交互成本、提升一次解决率"
+    when: {field: kcr_02, source: custom_fields, op: contains, value: "-1"}
+    message: "关键人客情等级中出现 -1（反对者），需立即介入"
+    suggestion: "立即核实反对原因，由销售主管牵头制定关键人修复计划。"
 
-  - id: customer_business_crisis
+score_alerts:
+  - id: kcr_dimension_low
     level: high
-    when:
-      field: risk_08c
-      source: custom_fields
-      op: in
-      value: [下行或承压, 危机]
-    message: "客户自身经营风险上升（{value}），可能影响合作与回款"
-    suggestion: "建议评估客户财务健康度，调整合作节奏与风险敞口"
-
-  - id: competitor_poc
+    target: dimension
+    key: kcr
+    op: lt
+    value: 50
+    message: "KCR维度得分 {value}，低于50，关键关系恶化"
+    suggestion: "优先补齐决策链覆盖、Champion与关键人支持。"
+  - id: risk_dimension_low
     level: high
-    when:
-      field: risk_07
-      source: custom_fields
-      op: in
-      value: [是但可控, 是且进展顺利]
-    message: "客户已启动竞品POC/试点（{value}），存在被替换风险"
-    suggestion: "建议立即介入竞品POC环节，突出差异化优势并争取联合测试"
-
-  - id: relationship_deterioration
+    target: dimension
+    key: risk
+    op: lt
+    value: 40
+    message: "RISK维度得分 {value}，低于40，风险信号密集"
+    suggestion: "立即复盘关键人变动、互动下降、竞品POC及客户经营风险。"
+  - id: ci_dimension_low
     level: high
-    when:
-      field: risk_08
-      source: custom_fields
-      op: in
-      value: [1次正式投诉, ≥2次或重大投诉]
-    message: "客情恶化信号：{value}"
-    suggestion: "建议深入调查投诉成因，制定关系修复与整改计划"
-
-  - id: key_person_churn
-    level: medium
-    when:
-      field: risk_05
-      source: custom_fields
-      op: in
-      value: [1人变动, ≥2人变动]
-    message: "关键人变动预警：{value}"
-    suggestion: "建议尽快完成新关键人关系建立与决策链重绘"
-
-  - id: interaction_decline
-    level: medium
-    when:
-      field: risk_06
-      source: custom_fields
-      op: in
-      value: [下降<20%, 下降≥20%]
-    message: "各层级互动频次下降：{value}"
-    suggestion: "建议增加拜访与沟通频次，防止关系转冷"
-
-  - id: champion_missing
-    level: medium
-    when:
-      field: kcr_08
-      source: custom_fields
-      op: eq
-      value: 无
-    message: "客户内部缺少 Champion，方案推进缺乏内部推手"
-    suggestion: "建议识别并培养决策层 Champion"
-
-  - id: low_satisfaction
+    target: dimension
+    key: ci
+    op: lt
+    value: 30
+    message: "CI维度得分 {value}，低于30，客户洞察严重不足"
+    suggestion: "补齐业务战略、决策标准、预算周期与ROI材料。"
+  - id: ces_critical
     level: high
-    when:
-      all:
-        - field: customer_satisfaction
-          source: model
-          op: gt
-          value: 0
-        - field: customer_satisfaction
-          source: model
-          op: lte
-          value: 4
-    message: "客户满意度较低({value}/10)，存在流失风险"
-    suggestion: "建议深入了解客户不满原因并制定改善计划"
-
-  - id: key_person_support_critical
+    target: factor
+    key: risk_08b
+    op: lt
+    value: 4
+    message: "RISK-08B客户费力度CES得分 {value}，低于4"
+    suggestion: "降低客户交互与重复提供信息成本，提升一次解决率。"
+  - id: customer_business_risk_critical
     level: high
-    when:
-      field: kcr_07
-      source: custom_fields
-      op: eq
-      value: "<20%支持"
-    message: "关键人支持度低于20%，决策链缺少有效支持"
-    suggestion: "建议重新识别关键人立场，制定反对者转化与支持者培育计划"
+    target: factor
+    key: risk_08c
+    op: lt
+    value: 4
+    message: "RISK-08C客户自身经营风险得分 {value}，低于4"
+    suggestion: "复核行业与财务风险，调整授信、项目节奏和资源投入。"
 
-  - id: executive_coverage_gap
-    level: medium
-    when:
-      field: kcr_03
-      source: custom_fields
-      op: eq
-      value: "<40%"
-    message: "高层CXO/VP覆盖率低于40%，高层关系存在明显断层"
-    suggestion: "建议制定高层关系拓展计划，优先覆盖经济决策者与业务负责人"
-
-  - id: frontline_backup_missing
-    level: medium
-    when:
-      field: er_09
-      source: custom_fields
-      op: eq
-      value: "0人"
-    message: "基层关系无备份，当前对接关系存在单点风险"
-    suggestion: "建议至少建立2名可独立对接的基层联系人"
-
-  - id: executive_visit_missing
-    level: medium
-    when:
-      field: or_02
-      source: custom_fields
-      op: eq
-      value: "0次"
-    message: "近12个月无高层互访，组织级关系维护不足"
-    suggestion: "建议安排双方VP及以上管理层正式会晤，明确战略合作议题"
-
-  - id: decision_criteria_unknown
-    level: medium
-    when:
-      field: ci_03
-      source: custom_fields
-      op: eq
-      value: 不了解
-    message: "不了解客户采购决策标准，方案存在失焦风险"
-    suggestion: "建议补齐决策标准、权重与评审流程，并完成方案对齐"
-
-  - id: payment_cycle_over_90
+trend_alerts:
+  - id: consecutive_two_quarter_decline
     level: high
-    when:
-      field: his_07
-      source: custom_fields
-      op: eq
-      value: ">90天"
-    message: "平均回款周期超过90天，现金流与信用风险较高"
-    suggestion: "建议由销售与财务联合制定回款计划，核查逾期原因与风险敞口"
+    type: consecutive_quarter_decline
+    consecutive_quarters: 2
+    drop_gt: 10
+    message: "总分连续两个季度下降，累计下降 {drop} 分（{scores}）"
+    suggestion: "立即开展跨季度客情复盘，定位持续下滑因子并制定止跌行动计划。"
 
-  - id: lifecycle_decline_accelerating
-    level: high
-    when:
-      field: his_09b
-      source: custom_fields
-      op: eq
-      value: 衰退加速
-    message: "客户生命周期进入加速衰退阶段，合作规模存在持续收缩风险"
-    suggestion: "建议启动客户挽回计划，重新评估需求、价值空间与资源投入"
-
-  - id: competitive_position_critical
-    level: high
-    when:
-      any:
-        - field: risk_02
-          source: custom_fields
-          op: eq
-          value: "≥第4名"
-        - field: risk_03
-          source: custom_fields
-          op: eq
-          value: 大幅落后
-        - field: risk_04
-          source: custom_fields
-          op: eq
-          value: 易替换
-    message: "竞争地位已进入危险区，存在较高替换或出局风险"
-    suggestion: "建议启动竞争专项，明确差距、关键决策人和差异化反制动作"
-
-  - id: delivery_quality_failure
-    level: high
-    when:
-      any:
-        - field: svc_01
-          source: custom_fields
-          op: eq
-          value: 0项达标
-        - field: svc_02
-          source: custom_fields
-          op: eq
-          value: "<80%"
-    message: "项目交付或验收质量未达底线，客户满意度存在恶化风险"
-    suggestion: "建议立即建立交付整改清单，明确责任人、完成时间与客户验收标准"
-
-  - id: service_sla_failure
-    level: high
-    when:
-      any:
-        - field: svc_03
-          source: custom_fields
-          op: eq
-          value: 未达标
-        - field: svc_04
-          source: custom_fields
-          op: eq
-          value: 未达标
-    message: "故障响应或解决效率未达标，服务连续性风险较高"
-    suggestion: "建议启动SLA专项整改，复盘响应链路并提升一次解决率"
-
-  - id: customer_followup_missing
-    level: medium
-    when:
-      field: svc_06
-      source: custom_fields
-      op: eq
-      value: 无回访
-    message: "项目交付后无客户回访，服务闭环缺失"
-    suggestion: "建议建立标准化回访机制并跟踪问题闭环与客户反馈"
-
-# ── 机会点建议（不产生预警，仅追加建议）──────────────────────────────────────
-opportunities:
-
-  - id: high_wallet_and_satisfaction
-    when:
-      all:
-        - field: his_04
-          source: custom_fields
-          op: eq
-          value: "≥50%"
-        - field: customer_satisfaction
-          op: gte
-          value: 7
-    suggestion: "该客户钱包份额高且满意度良好，建议加大资源投入推动战略升级"
-
-  - id: growth_stage_with_champion
-    when:
-      all:
-        - field: his_09b
-          source: custom_fields
-          op: eq
-          value: 成长期
-        - field: kcr_07
-          source: custom_fields
-          op: eq
-          value: "≥60%支持且无反对"
-    suggestion: "客户处于成长期且关键人支持度高，建议深化 Champion 维护与方案绑定"
-
-  - id: ecosystem_deep
-    when:
-      field: or_06
-      source: custom_fields
-      op: eq
-      value: 3项
-    suggestion: "生态合作嵌入度高，建议通过联合营销与战略绑定进一步形成护城河"
+opportunities: []

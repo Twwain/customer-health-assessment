@@ -71,7 +71,7 @@ const config: FactorConfigResponse = {
           rule_text: "",
           rule_type: "mapping",
           editable: true,
-          input: { ...textInput, type: "select", options: ["高", "中", "低"] },
+          input: { ...textInput, type: "key_person_levels", options: ["3", "2", "1", "0", "-1"] },
         },
       ],
     },
@@ -122,5 +122,27 @@ describe("CustomerForm 二级维度分组", () => {
     await user.click(screen.getByRole("button", { name: /信息互通/ }));
     expect(screen.queryByText("关键人客情等级")).not.toBeInTheDocument();
     expect(screen.getByText("已识别决策链人数占比")).toBeInTheDocument();
+  });
+
+  it("KCR-02 展示五位关键人等级下拉并提交五个原始等级", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <CustomerForm customer={customer} config={config} value={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("button", { name: /客户关系网络/ }));
+    expect(screen.getAllByRole("combobox")).toHaveLength(5);
+    expect(screen.getAllByRole("option", { name: "3 - 教练级" })).toHaveLength(5);
+
+    rerender(
+      <CustomerForm
+        customer={customer}
+        config={config}
+        value={{ kcr_02: ["3", "2", "1", "0", ""] }}
+        onChange={onChange}
+      />,
+    );
+    await user.selectOptions(screen.getByLabelText("关键人 5 等级"), "-1");
+    expect(onChange).toHaveBeenLastCalledWith({ kcr_02: ["3", "2", "1", "0", "-1"] });
   });
 });
