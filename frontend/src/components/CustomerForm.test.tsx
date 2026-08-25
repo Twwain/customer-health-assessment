@@ -153,6 +153,26 @@ describe("CustomerForm 二级维度分组", () => {
     expect(onChange).toHaveBeenLastCalledWith({ kcr_02: ["", "2", "1", "0", "-1"] });
   });
 
+  it("因子均未标注二级维度时不显示多余的「其他」分组头", async () => {
+    const user = userEvent.setup();
+    const noSubConfig: FactorConfigResponse = {
+      ...config,
+      dimensions: [
+        {
+          ...config.dimensions[0],
+          factors: config.dimensions[0].factors.map((f) => ({ ...f, sub_dimension: "" })),
+        },
+      ],
+    };
+    render(<CustomerForm customer={customer} config={noSubConfig} value={{}} onChange={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /客户关系网络/ }));
+
+    // 因子直接平铺，不出现「其他」分组头
+    expect(screen.queryByRole("button", { name: /其他/ })).not.toBeInTheDocument();
+    expect(screen.getByText("已识别决策链人数占比")).toBeInTheDocument();
+    expect(screen.getByText("关键人客情等级")).toBeInTheDocument();
+  });
+
   it("select 因子以分段按钮点选档位，再点已选档位取消", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

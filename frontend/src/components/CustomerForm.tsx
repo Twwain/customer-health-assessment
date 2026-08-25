@@ -163,6 +163,7 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
           {enabledDims.map((dim, di) => {
             const isOpen = !collapsed[dim.key];
             const filled = filledCount(dim);
+            const dimGroups = groupFactors(dim.factors);
             return (
               <div key={dim.key} className={di === 0 ? "pb-3" : "py-3"}>
                 <button
@@ -185,7 +186,20 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
                 </button>
                 {isOpen && (
                   <div className="space-y-2.5">
-                    {groupFactors(dim.factors).map((g) => {
+                    {/* 维度内只有一个分组（含全部未标注二级维度的「其他」）时，
+                        分组头没有分组价值，因子直接平铺 */}
+                    {dimGroups.length === 1 &&
+                      dimGroups[0].factors.map((f) => (
+                        <FactorField
+                          key={f.field}
+                          factor={f}
+                          value={merged[f.field]}
+                          readOnly={readOnly}
+                          onChange={(v) => set(f.field, v)}
+                        />
+                      ))}
+                    {dimGroups.length > 1 &&
+                      dimGroups.map((g) => {
                       const subKey = `${dim.key}::${g.name}`;
                       const subOpen = !subCollapsed[subKey];
                       return (
