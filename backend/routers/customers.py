@@ -102,6 +102,24 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.datavalidation import DataValidation
 
+    def _display_len(text: str) -> int:
+        """显示宽度：全角字符按 2 计。"""
+        return sum(2 if ord(ch) > 127 else 1 for ch in text)
+
+    def _fit_height(ws, row_idx: int, widths: list[float], *, min_h: float = 20.0, max_lines: int = 6) -> None:
+        """按内容（含显式换行）估算行高，避免 wrap 文本在默认行高下显示不全。"""
+        lines = 1
+        for col_idx, width in enumerate(widths, start=1):
+            v = ws.cell(row=row_idx, column=col_idx).value
+            if v in (None, ""):
+                continue
+            usable = max(int(width) - 2, 6)
+            need = 0
+            for seg in str(v).split("\n"):
+                need += max(1, -(-_display_len(seg) // usable))
+            lines = max(lines, min(need, max_lines))
+        ws.row_dimensions[row_idx].height = max(min_h, lines * 14.5 + 5)
+
     factors = []
     for dim in config.dimensions:
         for f in dim.factors:
@@ -118,23 +136,29 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
     wb = Workbook()
     guide = wb.active
     guide.title = "使用说明"
+    guide.append(["《客情因子填报模板 V3.0》使用说明"])
     guide_rows = [
-        ["《客情因子填报模板 V3.0》使用说明", ""],
         ["目的", "按精简后的28个因子填写原子指标原始值，由系统自动映射评分"],
         ["操作步骤", "1. 阅读【因子定义表】；2. 在【客户数据表】每个客户填写一行；3. 保持数据自洽并完成脱敏"],
         ["核心原则", "只填原始值，不填0-10分；客户名称、人名一律脱敏"],
+        ["填写提示", "客户数据表第1行为填报提示、第2行为表头、第3行为示例（导入时自动跳过）；请从第4行起每行填写一个客户，因子列已配置下拉选项"],
     ]
     for row in guide_rows:
         guide.append(row)
-    guide.column_dimensions["A"].width = 18
-    guide.column_dimensions["B"].width = 90
+    # 标题跨两列合并；B1 若留空串会阻挡 A1 文本溢出，导致标题一行放不下
+    guide.merge_cells("A1:B1")
+    guide.column_dimensions["A"].width = 14
+    guide.column_dimensions["B"].width = 100
+    guide.row_dimensions[1].height = 30
     guide["A1"].font = Font(bold=True, size=15, color="17365D")
-    guide["B1"].font = Font(bold=True, size=15, color="17365D")
     for row in guide.iter_rows():
         for cell in row:
             cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for r in range(2, len(guide_rows) + 2):
+        _fit_height(guide, r, [14, 100])
 
     definitions = wb.create_sheet("因子定义表")
+    def_widths = [18, 12, 12, 25, 42, 42, 42, 16, 10, 12]
     definition_headers = [
         "维度", "维度权重", "编号", "因子名称", "原子指标（填什么）",
         "打分映射规则（0-10）", "填报示例", "数据来源", "频率", "填报人",
@@ -148,8 +172,11 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
             f"{factor.source_role}填报" if factor.source_role != "系统" else "系统自动抓取",
             factor.frequency, "",
         ])
+    for r in range(1, len(factors) + 2):
+        _fit_height(definitions, r, def_widths)
 
     data_ws = wb.create_sheet("客户数据表")
+    data_widths = [16] * len(base) + [22] * len(factors)
     hints = ["虚构", "政府/金融/教育/大企业等", "大/中/小", "导入/成长/成熟/衰退"]
     for _, factor in factors:
         source = f"{factor.source_role}填报" if factor.source_role != "系统" else "系统自动抓取"
@@ -160,6 +187,8 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
         "示例-某省政务云客户", "政府", "大", "成长",
         *[_standardize_import_factor_value(factor, factor.example) for _, factor in factors],
     ])
+    _fit_height(data_ws, 1, data_widths, max_lines=5)
+    _fit_height(data_ws, 2, data_widths)
 
     # 以 = 开头的文本（如规则文案「=100% → 10分」）会被 openpyxl 误判为公式写入 <f>，
     # Excel 打开时报「部分内容有问题」并在修复时删除公式记录；强制按文本存储
@@ -208,10 +237,9 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
         cell.font = Font(size=9, color="666666")
     definitions.freeze_panes = "A2"
     data_ws.freeze_panes = "E3"
-    for column in range(1, len(headers) + 1):
-        letter = get_column_letter(column)
-        data_ws.column_dimensions[letter].width = 16 if column <= len(base) else 22
-    for column, width in enumerate([18, 12, 12, 25, 42, 42, 42, 16, 10, 12], start=1):
+    for column, width in enumerate(data_widths, start=1):
+        data_ws.column_dimensions[get_column_letter(column)].width = width
+    for column, width in enumerate(def_widths, start=1):
         definitions.column_dimensions[get_column_letter(column)].width = width
     for row in definitions.iter_rows(min_row=2):
         for cell in row:
@@ -804,6 +832,11 @@ def _process_rows(records: list[dict], db: Session, *, start_row: int = 2):
 
             if "customer_name" not in data:
                 errors.append(f"第{start_row + i}行缺少客户名称")
+                continue
+
+            # 模板示例行忘删是填报高频失误：跳过并明确提示，不污染客户库
+            if str(data["customer_name"]).startswith("示例"):
+                errors.append(f"第{start_row + i}行为模板示例行，已自动跳过")
                 continue
 
             customer = Customer(**data)

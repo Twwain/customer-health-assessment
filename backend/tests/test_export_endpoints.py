@@ -283,6 +283,8 @@ def test_import_template_matches_factor_config(client):
 
 def test_v3_xlsx_template_roundtrips_through_import(client):
     template = client.get("/api/customers/import-template")
+
+    # 原样导入：示例行自动跳过并提示，不污染客户库
     resp = client.post(
         "/api/customers/import",
         files={
@@ -294,9 +296,28 @@ def test_v3_xlsx_template_roundtrips_through_import(client):
         },
     )
     assert resp.status_code == 200
-    assert resp.json() == {"created": 1, "errors": []}
+    assert resp.json() == {"created": 0, "errors": ["第3行为模板示例行，已自动跳过"]}
 
-    customers = client.get("/api/customers", params={"search": "示例-某省政务云客户"}).json()
+    # 示例行改名为正式客户后再导入：示例值可被导入链路完整解析
+    wb = load_workbook(io.BytesIO(template.content))
+    ws = wb["客户数据表"]
+    ws.cell(row=3, column=1, value="某省政务云客户")
+    changed = io.BytesIO()
+    wb.save(changed)
+    resp2 = client.post(
+        "/api/customers/import",
+        files={
+            "file": (
+                "客情因子填报模板_v3.0.xlsx",
+                changed.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert resp2.status_code == 200
+    assert resp2.json() == {"created": 1, "errors": []}
+
+    customers = client.get("/api/customers", params={"search": "某省政务云客户"}).json()
     imported = customers["items"][0]
     assert imported["custom_fields"]["kcr_01"] == "80-99%"
     assert imported["custom_fields"]["kcr_02"] == "[3,2,2,1,1]"
