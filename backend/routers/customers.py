@@ -161,6 +161,14 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
         *[_standardize_import_factor_value(factor, factor.example) for _, factor in factors],
     ])
 
+    # 以 = 开头的文本（如规则文案「=100% → 10分」）会被 openpyxl 误判为公式写入 <f>，
+    # Excel 打开时报「部分内容有问题」并在修复时删除公式记录；强制按文本存储
+    for sheet in (definitions, data_ws):
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.data_type == "f":
+                    cell.data_type = "s"
+
     opt_ws = wb.create_sheet("选项源")
     opt_ws.sheet_state = "hidden"
     option_index = 0
