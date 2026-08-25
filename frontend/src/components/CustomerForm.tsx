@@ -406,23 +406,33 @@ function FactorField({
       </div>
     );
   } else if (t === "select") {
-    // 非新版合法选项统一显示为“未选择”，保存时只能提交标准下拉值。
+    // 分段按钮组：档位直接平铺点选（28 因子月度填报，比下拉少一步操作）。
+    // 非新版合法选项统一视为未选择，再点已选档位可取消。
     const raw = String(value ?? "");
     const val = factor.input.options.includes(raw) ? raw : "";
     control = (
-      <select
-        className={inputCls}
-        value={val}
-        disabled={readOnly}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        <option value="">未选择</option>
-        {factor.input.options.map((o) => (
-          <option key={o} value={o}>
-            {o}
-          </option>
-        ))}
-      </select>
+      <div role="radiogroup" aria-label={factor.label} className="flex flex-wrap gap-1.5">
+        {factor.input.options.map((o) => {
+          const active = val === o;
+          return (
+            <button
+              key={o}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              disabled={readOnly}
+              onClick={() => onChange(active ? "" : o)}
+              className={`rounded-lg border px-2.5 py-1.5 text-[13.5px] transition disabled:opacity-50 ${
+                active
+                  ? "border-accent bg-accent-soft font-medium text-accent"
+                  : "border-border-strong bg-surface text-ink-2 hover:border-accent hover:text-accent"
+              }`}
+            >
+              {o}
+            </button>
+          );
+        })}
+      </div>
     );
   } else if (t === "date") {
     control = (

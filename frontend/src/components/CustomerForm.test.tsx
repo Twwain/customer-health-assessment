@@ -58,7 +58,7 @@ const config: FactorConfigResponse = {
           rule_text: "",
           rule_type: "threshold",
           editable: true,
-          input: { ...textInput },
+          input: { ...textInput, type: "select", options: ["100%", "80-99%", "60-79%"] },
         },
         {
           field: "kcr_02",
@@ -151,5 +151,28 @@ describe("CustomerForm 二级维度分组", () => {
     // 再点已选中的档位 = 取消选择
     await user.click(screen.getByRole("button", { name: "关键人 1 3 - 教练级" }));
     expect(onChange).toHaveBeenLastCalledWith({ kcr_02: ["", "2", "1", "0", "-1"] });
+  });
+
+  it("select 因子以分段按钮点选档位，再点已选档位取消", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <CustomerForm customer={customer} config={config} value={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("button", { name: /客户关系网络/ }));
+
+    // 档位平铺为 radio 按钮，点选一次完成
+    await user.click(screen.getByRole("radio", { name: "80-99%" }));
+    expect(onChange).toHaveBeenLastCalledWith({ kcr_01: "80-99%" });
+
+    // 已填值渲染为选中态；非法旧值视为未选择
+    rerender(
+      <CustomerForm customer={customer} config={config} value={{ kcr_01: "80-99%" }} onChange={onChange} />,
+    );
+    expect(screen.getByRole("radio", { name: "80-99%" })).toHaveAttribute("aria-checked", "true");
+
+    // 再点已选档位 = 取消
+    await user.click(screen.getByRole("radio", { name: "80-99%" }));
+    expect(onChange).toHaveBeenLastCalledWith({ kcr_01: "" });
   });
 });
