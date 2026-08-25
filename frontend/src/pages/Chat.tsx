@@ -41,7 +41,9 @@ const SCENE_LABEL: Record<Scenario, string> = {
 
 export default function Chat() {
   const { sessionId } = useParams();
-  const sessionIdNum = sessionId ? Number(sessionId) : null;
+  // "new" 为草稿态：不建库，首发消息时才真正创建会话
+  const isDraft = sessionId === "new";
+  const sessionIdNum = sessionId && !isDraft ? Number(sessionId) : null;
   const location = useLocation();
   const navigate = useNavigate();
   const { status } = useLLMStatus();
@@ -52,7 +54,7 @@ export default function Chat() {
   const [busy, setBusy] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sessionTitle, setSessionTitle] = useState("AI 对话");
+  const [sessionTitle, setSessionTitle] = useState(sessionId === "new" ? "新对话" : "AI 对话");
   const [sessionCustomerId, setSessionCustomerId] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportJob, setExportJob] = useState<{ id: string; status: string } | null>(null);
@@ -71,6 +73,8 @@ export default function Chat() {
   const pollRef = useRef<number | null>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const followLatestRef = useRef(true);
+  const createdIdRef = useRef<number | null>(null); // 草稿已建库的真实会话 id（待流式结束后跳转）
+  const creatingRef = useRef(false); // 草稿建库中，防重复点击
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
@@ -93,6 +97,15 @@ export default function Chat() {
     }, 3000);
   };
 
+  // 草稿会话流式结束后才跳转到真实地址，避免中途 key 重挂载打断打字机效果
+  const leaveDraft = () => {
+    if (createdIdRef.current) {
+      const id = createdIdRef.current;
+      createdIdRef.current = null;
+      navigate(`/chat/${id}`, { replace: true });
+    }
+  };
+
   // ── SSE 流式发送 ──────────────────────────────────────────
   const handleEvent = (ev: ChatEvent) => {
     if (ev.type === "done") {
@@ -102,6 +115,7 @@ export default function Chat() {
       setMessages((prev) => [...prev, msg]);
       stopPolling();
       setResuming(false);
+      leaveDraft();
       return;
     }
     if (ev.type === "error") {
@@ -110,6 +124,7 @@ export default function Chat() {
       stopPolling();
       setResuming(false);
       setError((ev.data.message as string | undefined) || "生成出错");
+      leaveDraft();
       return;
     }
     const cur = streamRef.current || {
@@ -256,7 +271,12 @@ export default function Chat() {
   }, [messages, stream, resuming, busy, error]);
 
   const runQuick = (scenario: Scenario) => {
-    if (!sessionIdNum) return;
+    if (!sessionIdNum) {
+      // 草稿态点快捷场景：先选客户，按场景建会话并自动执行
+      pendingScenario.current = scenario;
+      setPickerOpen(true);
+      return;
+    }
     if (customerIdRef.current) runScenarioEndpoint(scenario, customerIdRef.current);
     else setPickerOpen(true);
   };
@@ -270,11 +290,36 @@ export default function Chat() {
 
   const sendMessage = () => {
     const text = inputRef.current?.value.trim();
-    if (!text || !sessionIdNum) return;
-    sendTurn(sessionIdNum, `/chat/sessions/${sessionIdNum}/messages`, {
-      content: text,
-      customer_id: customerIdRef.current ?? undefined,
-    });
+    if (!text) return;
+    if (sessionIdNum) {
+      sendTurn(sessionIdNum, `/chat/sessions/${sessionIdNum}/messages`, {
+        content: text,
+        customer_id: customerIdRef.current ?? undefined,
+      });
+    } else if (isDraft) {
+      const created = createdIdRef.current;
+      if (created) {
+        // 已建库待跳转；流式中时 sendTurn 内部的 busyRef 会拦截重复发送
+        sendTurn(created, `/chat/sessions/${created}/messages`, { content: text });
+      } else {
+        // 草稿首发：此刻才真正建库，标题取首条消息前 20 字
+        if (creatingRef.current) return;
+        creatingRef.current = true;
+        chat
+          .createSession({ title: text.slice(0, 20), scenario: "free_qa" })
+          .then((s) => {
+            createdIdRef.current = s.id;
+            setSessionTitle(s.title);
+            sendTurn(s.id, `/chat/sessions/${s.id}/messages`, { content: text });
+          })
+          .catch(() => notify("创建会话失败", "error"))
+          .finally(() => {
+            creatingRef.current = false;
+          });
+      }
+    } else {
+      return;
+    }
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -375,7 +420,11 @@ export default function Chat() {
   };
 
   const deleteSession = async () => {
-    if (!sessionIdNum) return;
+    if (!sessionIdNum) {
+      // 草稿未落库，无物可删，直接退出
+      navigate("/chat");
+      return;
+    }
     if (!(await confirmAction("确定删除该会话？", { title: "删除会话", confirmText: "确认删除", danger: true }))) return;
     try {
       await chat.deleteSession(sessionIdNum);
@@ -406,7 +455,7 @@ export default function Chat() {
   );
 
   // ── 渲染 ──────────────────────────────────────────────────
-  if (!sessionIdNum) {
+  if (!sessionIdNum && !isDraft) {
     return (
       <>
         <WelcomeScreen

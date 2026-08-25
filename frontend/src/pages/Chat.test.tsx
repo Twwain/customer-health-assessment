@@ -6,7 +6,8 @@ import { UiFeedbackProvider } from "../components/UiFeedback";
 import type { ChatEvent } from "../types";
 import Chat from "./Chat";
 
-const { deleteSession, streamChat } = vi.hoisted(() => ({
+const { createSession, deleteSession, streamChat } = vi.hoisted(() => ({
+  createSession: vi.fn(),
   deleteSession: vi.fn(),
   streamChat: vi.fn(),
 }));
@@ -18,6 +19,7 @@ vi.mock("../api", () => ({
     trend: vi.fn().mockResolvedValue(null),
   },
   chat: {
+    createSession,
     getSession: vi.fn().mockResolvedValue({
       id: 7,
       title: "测试会话",
@@ -113,5 +115,61 @@ describe("Chat 核心操作", () => {
 
     await screen.findByText("继续生成");
     expect(messageList.scrollTop).toBe(100);
+  });
+});
+
+describe("Chat 草稿态（/chat/new）", () => {
+  beforeEach(() => {
+    createSession.mockReset().mockResolvedValue({
+      id: 42,
+      title: "帮我看看客情",
+      customer_id: null,
+      scenario: "free_qa",
+      streaming: false,
+      message_count: 0,
+      last_message: "",
+      created_at: "",
+      updated_at: "",
+    });
+    streamChat.mockReset().mockResolvedValue(undefined);
+  });
+
+  function renderDraft() {
+    return render(
+      <UiFeedbackProvider>
+        <MemoryRouter initialEntries={["/chat/new"]}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<Chat />} />
+            <Route path="/chat" element={<div>会话首页</div>} />
+          </Routes>
+        </MemoryRouter>
+      </UiFeedbackProvider>,
+    );
+  }
+
+  it("进入草稿页直接展示输入框，不创建会话", () => {
+    renderDraft();
+    expect(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…")).toBeInTheDocument();
+    expect(screen.getByText("新对话")).toBeInTheDocument();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("首发消息时才创建会话，并以首条消息命名", async () => {
+    renderDraft();
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), {
+      target: { value: "帮我看看客情" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+
+    await waitFor(() =>
+      expect(createSession).toHaveBeenCalledWith({ title: "帮我看看客情", scenario: "free_qa" }),
+    );
+    await waitFor(() =>
+      expect(streamChat).toHaveBeenCalledWith(
+        "/api/chat/sessions/42/messages",
+        expect.objectContaining({ content: "帮我看看客情", stream: true }),
+        expect.any(Function),
+      ),
+    );
   });
 });
