@@ -301,7 +301,8 @@ def test_v3_xlsx_template_roundtrips_through_import(client):
     # 示例行改名为正式客户后再导入：示例值可被导入链路完整解析
     wb = load_workbook(io.BytesIO(template.content))
     ws = wb["客户数据表"]
-    ws.cell(row=3, column=1, value="某省政务云客户")
+    # 命名以「示例」开头（非「示例-」）的合法客户不受影响
+    ws.cell(row=3, column=1, value="示例银行某省分行")
     changed = io.BytesIO()
     wb.save(changed)
     resp2 = client.post(
@@ -317,7 +318,7 @@ def test_v3_xlsx_template_roundtrips_through_import(client):
     assert resp2.status_code == 200
     assert resp2.json() == {"created": 1, "errors": []}
 
-    customers = client.get("/api/customers", params={"search": "某省政务云客户"}).json()
+    customers = client.get("/api/customers", params={"search": "示例银行某省分行"}).json()
     imported = customers["items"][0]
     assert imported["custom_fields"]["kcr_01"] == "80-99%"
     assert imported["custom_fields"]["kcr_02"] == "[3,2,2,1,1]"

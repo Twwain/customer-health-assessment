@@ -191,8 +191,8 @@ def _build_import_workbook(config) -> tuple[io.BytesIO, list[str]]:
     _fit_height(data_ws, 2, data_widths)
 
     # 以 = 开头的文本（如规则文案「=100% → 10分」）会被 openpyxl 误判为公式写入 <f>，
-    # Excel 打开时报「部分内容有问题」并在修复时删除公式记录；强制按文本存储
-    for sheet in (definitions, data_ws):
+    # Excel 打开时报「部分内容有问题」并在修复时删除公式记录；三张可见表统一强制按文本存储
+    for sheet in (guide, definitions, data_ws):
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.data_type == "f":
@@ -834,8 +834,9 @@ def _process_rows(records: list[dict], db: Session, *, start_row: int = 2):
                 errors.append(f"第{start_row + i}行缺少客户名称")
                 continue
 
-            # 模板示例行忘删是填报高频失误：跳过并明确提示，不污染客户库
-            if str(data["customer_name"]).startswith("示例"):
+            # 模板示例行忘删是填报高频失误：跳过并明确提示，不污染客户库。
+            # 只匹配「示例-」前缀（模板示例行命名），避免误伤「示例银行」这类合法客户名
+            if str(data["customer_name"]).startswith("示例-"):
                 errors.append(f"第{start_row + i}行为模板示例行，已自动跳过")
                 continue
 
