@@ -154,6 +154,15 @@ describe("Chat 草稿态（/chat/new）", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
+  it("草稿页隐藏依赖已建库会话的操作按钮", () => {
+    renderDraft();
+    expect(screen.queryByRole("button", { name: "🗑" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "🔄 重新生成" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /生成报告/ })).not.toBeInTheDocument();
+    // 快捷场景芯片保留（走选客户建会话流程）
+    expect(screen.getByRole("button", { name: "📊 综合评估" })).toBeInTheDocument();
+  });
+
   it("首发消息时才创建会话，并以首条消息命名", async () => {
     renderDraft();
     fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), {

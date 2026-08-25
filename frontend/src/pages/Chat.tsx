@@ -420,11 +420,8 @@ export default function Chat() {
   };
 
   const deleteSession = async () => {
-    if (!sessionIdNum) {
-      // 草稿未落库，无物可删，直接退出
-      navigate("/chat");
-      return;
-    }
+    // 草稿态删除按钮已隐藏，此分支仅作防御
+    if (!sessionIdNum) return;
     if (!(await confirmAction("确定删除该会话？", { title: "删除会话", confirmText: "确认删除", danger: true }))) return;
     try {
       await chat.deleteSession(sessionIdNum);
@@ -485,45 +482,50 @@ export default function Chat() {
             </div>
           )}
         </div>
-        <button
-          className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
-          onClick={regenerate}
-          disabled={busy || display.filter((m) => m.role === "assistant").length === 0}
-        >
-          🔄 重新生成
-        </button>
-        {exportJob?.status === "ready" ? (
-          <button
-            className="rounded-lg bg-accent px-2.5 py-1.5 text-[13.5px] font-medium text-white transition hover:bg-accent-hover"
-            onClick={downloadPdf}
-          >
-            ⬇️ 下载报告
-          </button>
-        ) : (
+        {/* 草稿态隐藏会话操作：重新生成/报告/删除均以已建库会话为前提 */}
+        {!isDraft && (
           <>
             <button
               className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
-              onClick={exportPdf}
-              disabled={exporting || !sessionCustomerId}
+              onClick={regenerate}
+              disabled={busy || display.filter((m) => m.role === "assistant").length === 0}
             >
-              {exporting ? "⏳ 生成中…" : "📄 生成报告"}
+              🔄 重新生成
             </button>
-            {exporting && exportJob?.status === "running" && (
+            {exportJob?.status === "ready" ? (
               <button
-                className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-danger hover:text-danger"
-                onClick={cancelExport}
+                className="rounded-lg bg-accent px-2.5 py-1.5 text-[13.5px] font-medium text-white transition hover:bg-accent-hover"
+                onClick={downloadPdf}
               >
-                取消
+                ⬇️ 下载报告
               </button>
+            ) : (
+              <>
+                <button
+                  className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
+                  onClick={exportPdf}
+                  disabled={exporting || !sessionCustomerId}
+                >
+                  {exporting ? "⏳ 生成中…" : "📄 生成报告"}
+                </button>
+                {exporting && exportJob?.status === "running" && (
+                  <button
+                    className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-danger hover:text-danger"
+                    onClick={cancelExport}
+                  >
+                    取消
+                  </button>
+                )}
+              </>
             )}
+            <button
+              className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-danger transition hover:border-danger"
+              onClick={deleteSession}
+            >
+              🗑
+            </button>
           </>
         )}
-        <button
-          className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-danger transition hover:border-danger"
-          onClick={deleteSession}
-        >
-          🗑
-        </button>
       </div>
 
       {/* 消息区 */}
@@ -585,7 +587,7 @@ export default function Chat() {
             <QuickChip label="📊 综合评估" onClick={() => runQuick("assessment")} disabled={busy} />
             <QuickChip label="🎯 生成策略" onClick={() => runQuick("strategy")} disabled={busy} />
             <QuickChip label="🚨 风险排查" onClick={() => runQuick("alert_analysis")} disabled={busy} />
-            <QuickChip label="📄 生成报告" onClick={exportPdf} disabled={busy} />
+            {!isDraft && <QuickChip label="📄 生成报告" onClick={exportPdf} disabled={busy} />}
           </div>
           <div className="flex items-end gap-2 rounded-xl border border-border-strong bg-surface px-3 py-2 focus-within:border-accent">
             <textarea
