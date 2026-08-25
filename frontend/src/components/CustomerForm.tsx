@@ -30,11 +30,11 @@ function getBase(customer: CustomerResponse, config: FactorConfigResponse): Reco
 }
 
 const KEY_PERSON_OPTIONS = [
-  { value: "3", label: "3 - 教练级" },
-  { value: "2", label: "2 - 强支持" },
-  { value: "1", label: "1 - 支持" },
-  { value: "0", label: "0 - 中立" },
-  { value: "-1", label: "-1 - 反对" },
+  { value: "3", label: "3 - 教练级", color: "#1AAE39" },
+  { value: "2", label: "2 - 强支持", color: "#5CB85C" },
+  { value: "1", label: "1 - 支持", color: "#A6CE39" },
+  { value: "0", label: "0 - 中立", color: "#9E9E9E" },
+  { value: "-1", label: "-1 - 反对", color: "#E03131" },
 ];
 
 function parseKeyPersonLevels(value: unknown): string[] {
@@ -360,30 +360,46 @@ function FactorField({
     const levels = parseKeyPersonLevels(value);
     control = (
       <div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
+        {/* 等级量表：每位关键人一列，高等级在上；点选置色，再点取消 */}
+        <div className="grid grid-cols-5 gap-2">
           {levels.map((level, index) => (
-            <div key={index}>
-              <label className="mb-1 block text-[12px] text-muted" htmlFor={`${factor.field}-${index}`}>
-                关键人 {index + 1}
-              </label>
-              <select
-                id={`${factor.field}-${index}`}
-                aria-label={`关键人 ${index + 1} 等级`}
-                className={inputCls}
-                value={level}
-                disabled={readOnly}
-                onChange={(e) => {
-                  const next = [...levels];
-                  next[index] = e.target.value;
-                  onChange(next);
-                }}
-              >
-                <option value="">未选择</option>
-                {KEY_PERSON_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
+            <div key={index} className="flex flex-col items-center gap-1">
+              <span className="mb-0.5 text-[12px] text-muted">关键人 {index + 1}</span>
+              {KEY_PERSON_OPTIONS.map((option) => {
+                const active = level === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    disabled={readOnly}
+                    aria-label={`关键人 ${index + 1} ${option.label}`}
+                    aria-pressed={active}
+                    title={option.label}
+                    onClick={() => {
+                      const next = [...levels];
+                      next[index] = active ? "" : option.value;
+                      onChange(next);
+                    }}
+                    className={`flex h-7 w-7 items-center justify-center rounded-full border text-[12.5px] font-semibold transition disabled:opacity-50 ${
+                      active
+                        ? "border-transparent text-white"
+                        : "border-border-strong bg-surface text-muted hover:border-accent hover:text-accent"
+                    }`}
+                    style={active ? { background: option.color } : undefined}
+                  >
+                    {option.value}
+                  </button>
+                );
+              })}
             </div>
+          ))}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
+          {KEY_PERSON_OPTIONS.map((option) => (
+            <span key={option.value} className="flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full" style={{ background: option.color }} />
+              {option.label}
+            </span>
           ))}
         </div>
         <div className="mt-1 text-[12px] text-muted">平均等级及最终映射分数由后端自动计算</div>

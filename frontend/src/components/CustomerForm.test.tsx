@@ -124,25 +124,32 @@ describe("CustomerForm 二级维度分组", () => {
     expect(screen.getByText("已识别决策链人数占比")).toBeInTheDocument();
   });
 
-  it("KCR-02 展示五位关键人等级下拉并提交五个原始等级", async () => {
+  it("KCR-02 以等级量表点选五位关键人，再点已选档位取消", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const { rerender } = render(
       <CustomerForm customer={customer} config={config} value={{}} onChange={onChange} />,
     );
     await user.click(screen.getByRole("button", { name: /客户关系网络/ }));
-    expect(screen.getAllByRole("combobox")).toHaveLength(5);
-    expect(screen.getAllByRole("option", { name: "3 - 教练级" })).toHaveLength(5);
 
+    // 点选关键人 5 的反对档
+    await user.click(screen.getByRole("button", { name: "关键人 5 -1 - 反对" }));
+    expect(onChange).toHaveBeenLastCalledWith({ kcr_02: ["", "", "", "", "-1"] });
+
+    // 已填值渲染：关键人 5 的 -1 档位为选中态
     rerender(
       <CustomerForm
         customer={customer}
         config={config}
-        value={{ kcr_02: ["3", "2", "1", "0", ""] }}
+        value={{ kcr_02: ["3", "2", "1", "0", "-1"] }}
         onChange={onChange}
       />,
     );
-    await user.selectOptions(screen.getByLabelText("关键人 5 等级"), "-1");
-    expect(onChange).toHaveBeenLastCalledWith({ kcr_02: ["3", "2", "1", "0", "-1"] });
+    expect(screen.getByRole("button", { name: "关键人 5 -1 - 反对" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "关键人 1 3 - 教练级" })).toHaveAttribute("aria-pressed", "true");
+
+    // 再点已选中的档位 = 取消选择
+    await user.click(screen.getByRole("button", { name: "关键人 1 3 - 教练级" }));
+    expect(onChange).toHaveBeenLastCalledWith({ kcr_02: ["", "2", "1", "0", "-1"] });
   });
 });
