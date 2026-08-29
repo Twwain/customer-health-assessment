@@ -4,10 +4,39 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from starlette.types import Scope
+
 from database import engine, Base, SessionLocal, migrate_drop_legacy_customer_columns
 from routers import assessment, chat, customers, knowledge
+
+
+class SPAStaticFiles(StaticFiles):
+    """安全地托管前端构建产物，并为客户端路由回退到固定入口文件。"""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        # API 路由必须保持 JSON 404，不能让浏览器入口 HTML 掩盖接口拼写错误。
+        # StaticFiles 在 Windows 上会先把 URL 路径规范化为反斜杠，因此统一后再判断。
+        url_path = path.replace("\\", "/")
+        if url_path == "api" or url_path.startswith("api/"):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            # 构建产物引用的缺失资源必须保持 404，避免把 HTML 当作 JS/CSS 返回。
+            if url_path == "assets" or url_path.startswith("assets/"):
+                raise
+
+        # StaticFiles 已完成静态根目录边界校验；未命中的路径一律使用固定文件名，
+        # 不再把用户输入拼接后交给 FileResponse。
+        return await super().get_response("index.html", scope)
+
 
 def _migrate_legacy_data() -> None:
     """启动时执行幂等数据迁移（历史知识分类名校正等）。失败不阻断启动。
@@ -93,14 +122,5 @@ def root():
 # 生产模式：serve 前端静态文件
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(STATIC_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
-
-    @app.get("/{full_path:path}")
-    async def serve_frontend(full_path: str):
-        # 未匹配的 /api/* 路径返回 404 JSON，而不是 index.html（避免前端把 HTML 当成功响应）
-        if full_path == "api" or full_path.startswith("api/"):
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        file_path = os.path.join(STATIC_DIR, full_path)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    # API 路由均在此 mount 之前注册；StaticFiles 只可能接到静态资源或前端路由。
+    app.mount("/", SPAStaticFiles(directory=STATIC_DIR), name="frontend")
