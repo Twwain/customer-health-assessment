@@ -637,6 +637,46 @@ def test_index_limits_estimated_tokens_before_embedding(db, memory_store, monkey
     assert called is False
 
 
+def test_estimated_tokens_conservatively_counts_non_ascii():
+    from services.rag.knowledge_base import _estimate_tokens
+
+    # 旧算法把所有非中文字符都按英文的 4 字符/token 计算，emoji 可绕过上限。
+    assert _estimate_tokens("abcd") == 1
+    assert _estimate_tokens("中文") == 2
+    assert _estimate_tokens("😀😀") == 8
+
+
+def test_reindex_failure_reports_zero_and_clears_stale_chunk_count(
+    db, memory_store, fake_embed, monkeypatch
+):
+    from models import KnowledgeChunk
+    from services.rag.knowledge_base import KnowledgeBaseService
+
+    svc = KnowledgeBaseService(db, store=memory_store, embed_func=fake_embed)
+    doc = svc.create_from_upload(
+        title="重索引超限文档",
+        category="内部规范",
+        filename="reindex-limit.txt",
+        raw=("测试文本。" * 100).encode("utf-8"),
+    )
+    assert doc.index_status == "indexed"
+    assert doc.chunk_count > 0
+
+    monkeypatch.setattr(config, "UPLOAD_MAX_EXTRACTED_CHARS", 5)
+    reindexed = svc.reindex()
+    db.refresh(doc)
+
+    assert reindexed == 0
+    assert doc.index_status == "failed"
+    assert doc.chunk_count == 0
+    assert (
+        db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.document_id == doc.id)
+        .count()
+        == 0
+    )
+
+
 def test_office_zip_entry_limit(monkeypatch):
     import zipfile
 

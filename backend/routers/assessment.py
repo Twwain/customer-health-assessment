@@ -192,17 +192,27 @@ def download_pdf(
 ):
     """兼容旧接口：同步生成 PDF（LLM 慢时会阻塞请求）。新前端请用异步任务接口。"""
     customer = _get_customer(customer_id, db)
-    from services.report_builder import build_report_data
+    if not _PDF_JOB_SEM.acquire(blocking=False):
+        # 同步与异步导出共用同一个进程级额度，避免旧接口绕过 PDF 并发上限。
+        raise HTTPException(
+            status_code=429,
+            detail="导出任务繁忙，请稍后重试",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        from services.report_builder import build_report_data
 
-    report = build_report_data(db, customer, include_ai=include_ai)
-    db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
-    pdf_bytes = pdf_gen.generate(
-        report.assessment,
-        strategy_items=report.strategy_items,
-        references=report.references,
-        trend=report.trend,
-        industry=customer.industry or "",
-    )
+        report = build_report_data(db, customer, include_ai=include_ai)
+        db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
+        pdf_bytes = pdf_gen.generate(
+            report.assessment,
+            strategy_items=report.strategy_items,
+            references=report.references,
+            trend=report.trend,
+            industry=customer.industry or "",
+        )
+    finally:
+        _PDF_JOB_SEM.release()
 
     # RFC 5987 filename* for modern browsers + plain filename fallback for mobile
     encoded = quote(f"{customer.customer_name}_客情评估报告.pdf", safe="")
@@ -225,7 +235,11 @@ def create_pdf_job(
     customer = _get_customer(customer_id, db)
     if not _PDF_JOB_SEM.acquire(blocking=False):
         # 并发上限：直接 429，避免线程/内存被打满
-        raise HTTPException(status_code=429, detail="导出任务繁忙，请稍后重试")
+        raise HTTPException(
+            status_code=429,
+            detail="导出任务繁忙，请稍后重试",
+            headers={"Retry-After": "5"},
+        )
     job_id = uuid.uuid4().hex
     bind = db.get_bind()
     try:

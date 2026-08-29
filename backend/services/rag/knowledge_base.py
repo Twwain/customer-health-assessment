@@ -166,11 +166,22 @@ def _safe_filename(name: str, ext: str) -> str:
 
 
 def _estimate_tokens(text: str) -> int:
-    """保守估算 Embedding token：中文按 1 token/字，其余按 4 字符/token。"""
+    """保守估算 Embedding token：中文 1/字、ASCII 4 字符/token、其余按 UTF-8 字节。"""
     if not text:
         return 0
-    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-    return max(1, int(cjk + (len(text) - cjk) / 4))
+    cjk = 0
+    ascii_chars = 0
+    other_unicode_bytes = 0
+    for ch in text:
+        if "\u4e00" <= ch <= "\u9fff":
+            cjk += 1
+        elif ord(ch) < 128:
+            ascii_chars += 1
+        else:
+            # 日文假名、韩文、emoji 等不能套用英文 4 字符/token；按 UTF-8
+            # 字节数计数会适度高估，但能避免匿名上传绕过费用护栏。
+            other_unicode_bytes += len(ch.encode("utf-8"))
+    return max(1, cjk + (ascii_chars + 3) // 4 + other_unicode_bytes)
 
 
 class KnowledgeBaseService:
@@ -650,10 +661,14 @@ class KnowledgeBaseService:
             self._db.query(KnowledgeChunk).filter(
                 KnowledgeChunk.document_id == doc.id
             ).delete()
+            # 旧切片已经删除；即使后续解析、Embedding 或向量写入失败，展示值
+            # 也必须与数据库真实切片数一致，不能沿用上一次索引的计数。
+            doc.chunk_count = 0
             self._db.commit()
-            self.index_document(doc)
+            result = self.index_document(doc)
             self._db.commit()
-            count += 1
+            if result.index_status == "indexed":
+                count += 1
         return count
 
     # ── 预置知识──────────────────────────────────

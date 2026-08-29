@@ -196,6 +196,43 @@ def test_pdf_job_concurrency_limit_returns_429(client, customer, monkeypatch):
 
     second = client.post(f"/api/assessment/{customer.id}/pdf/jobs")
     assert second.status_code == 429
+    assert second.headers["Retry-After"] == "5"
+
+
+def test_sync_pdf_shares_concurrency_limit(client, customer, monkeypatch):
+    """旧同步接口也必须与异步任务共用额度，不能绕过 PDF 全局并发上限。"""
+    import routers.assessment as mod
+
+    semaphore = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(mod, "_PDF_JOB_SEM", semaphore)
+    assert semaphore.acquire(blocking=False)
+    try:
+        response = client.get(f"/api/assessment/{customer.id}/pdf")
+    finally:
+        semaphore.release()
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "导出任务繁忙，请稍后重试"
+    assert response.headers["Retry-After"] == "5"
+
+
+def test_sync_pdf_releases_concurrency_slot_after_failure(client, customer, monkeypatch):
+    """同步生成异常后必须归还额度，否则后续所有 PDF 导出都会永久返回 429。"""
+    import routers.assessment as mod
+    from services import report_builder
+
+    semaphore = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(mod, "_PDF_JOB_SEM", semaphore)
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("模拟报告生成失败")
+
+    monkeypatch.setattr(report_builder, "build_report_data", _fail)
+    with pytest.raises(RuntimeError, match="模拟报告生成失败"):
+        client.get(f"/api/assessment/{customer.id}/pdf")
+
+    assert semaphore.acquire(blocking=False)
+    semaphore.release()
 
 
 def test_pdf_job_sweep_marks_expired_running_as_error(client, customer, monkeypatch):
