@@ -67,3 +67,38 @@ def test_spa_paths_cannot_escape_static_root(spa_client: TestClient, path: str) 
     assert "OUTSIDE-STATIC-SECRET" not in response.text
     if response.status_code == 200:
         assert response.text == "<html>SPA INDEX</html>"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/D:%5Csecret.txt",
+        "/D:secret.txt",
+        "/%5Csecret.txt",
+        "/%5C%5Cattacker.invalid%5Cshare%5Csecret.txt",
+        "/%5C%5C%3F%5CC:%5Csecret.txt",
+    ],
+)
+def test_windows_absolute_paths_are_rejected(spa_client: TestClient, path: str) -> None:
+    response = spa_client.get(path)
+
+    assert response.status_code == 404
+    assert "OUTSIDE-STATIC-SECRET" not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/%00",
+        "/%2500",
+        "/%3A",
+        "/foo%7Cbar",
+        "/foo%3Fbar",
+        "/foo%2Abar",
+    ],
+)
+def test_invalid_filesystem_characters_are_rejected(spa_client: TestClient, path: str) -> None:
+    response = spa_client.get(path)
+
+    assert response.status_code == 404
+    assert "OUTSIDE-STATIC-SECRET" not in response.text

@@ -1,3 +1,4 @@
+import ntpath
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,6 +19,13 @@ class SPAStaticFiles(StaticFiles):
     """安全地托管前端构建产物，并为客户端路由回退到固定入口文件。"""
 
     async def get_response(self, path: str, scope: Scope) -> Response:
+        # 使用 Windows 路径语义做跨平台预检，避免盘符、UNC、设备路径进入
+        # ntpath.realpath 后触发跨盘异常或访问攻击者控制的 SMB 地址；控制字符与
+        # Windows 非法文件名字符也必须提前拦截，避免 realpath/stat 抛出 500。
+        has_invalid_char = any(ord(char) < 32 or char in '<>:"|?*' for char in path)
+        if ntpath.splitdrive(path)[0] or ntpath.isabs(path) or has_invalid_char:
+            raise StarletteHTTPException(status_code=404)
+
         # API 路由必须保持 JSON 404，不能让浏览器入口 HTML 掩盖接口拼写错误。
         # StaticFiles 在 Windows 上会先把 URL 路径规范化为反斜杠，因此统一后再判断。
         url_path = path.replace("\\", "/")
