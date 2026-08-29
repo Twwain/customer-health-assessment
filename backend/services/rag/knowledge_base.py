@@ -17,7 +17,13 @@ import os
 import re
 from typing import Any, Sequence
 
-from config import CHUNK_OVERLAP, CHUNK_SIZE, KNOWLEDGE_DATA_DIR
+from config import (
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    KNOWLEDGE_DATA_DIR,
+    UPLOAD_MAX_CHUNKS,
+    UPLOAD_MAX_EMBEDDING_TOKENS,
+)
 from sqlalchemy.orm import joinedload
 from models import (
     KNOWLEDGE_CATEGORIES,
@@ -160,8 +166,11 @@ def _safe_filename(name: str, ext: str) -> str:
 
 
 def _estimate_tokens(text: str) -> int:
-    # 中文约 2 字符/token 的粗略估算
-    return max(1, len(text) // 2)
+    """保守估算 Embedding token：中文按 1 token/字，其余按 4 字符/token。"""
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return max(1, int(cjk + (len(text) - cjk) / 4))
 
 
 class KnowledgeBaseService:
@@ -206,6 +215,21 @@ class KnowledgeBaseService:
             return doc
 
         chunks = chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
+        if len(chunks) > UPLOAD_MAX_CHUNKS:
+            doc.index_status = "failed"
+            doc.index_error = f"文档切片超过 {UPLOAD_MAX_CHUNKS} 个上限"
+            doc.chunk_count = 0
+            self._db.commit()
+            return doc
+        estimated_tokens = sum(_estimate_tokens(chunk) for chunk in chunks)
+        if estimated_tokens > UPLOAD_MAX_EMBEDDING_TOKENS:
+            doc.index_status = "failed"
+            doc.index_error = (
+                f"文档预计 Embedding token 超过 {UPLOAD_MAX_EMBEDDING_TOKENS} 上限"
+            )
+            doc.chunk_count = 0
+            self._db.commit()
+            return doc
         try:
             vectors = self._embed(chunks)
         except EmbeddingUnavailableError as exc:

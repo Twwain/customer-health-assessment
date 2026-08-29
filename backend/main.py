@@ -12,6 +12,8 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from database import engine, Base, SessionLocal, migrate_drop_legacy_customer_columns
+import config
+from request_limits import AIRateLimitMiddleware, UploadBodyLimitMiddleware
 from routers import assessment, chat, customers, knowledge
 
 
@@ -102,6 +104,17 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="客情评估智能体", lifespan=lifespan)
+
+# 必须在 FastAPI 解析 multipart 之前执行，防止超大上传先写满内存/临时磁盘。
+app.add_middleware(
+    UploadBodyLimitMiddleware,
+    max_body_bytes=config.UPLOAD_MAX_REQUEST_BYTES,
+)
+# 公网匿名演示的轻量突发保护；当前单 Uvicorn 进程下为整套应用共享。
+app.add_middleware(
+    AIRateLimitMiddleware,
+    requests_per_minute=config.AI_RATE_LIMIT_PER_MINUTE,
+)
 
 # CORS：生产为同源部署，跨域主要面向本地开发（Vite 代理外的直连场景）。
 # allow_origins="*" 与 allow_credentials=True 是浏览器规范禁止的组合，

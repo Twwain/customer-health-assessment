@@ -12,6 +12,7 @@ BASE_URL / MODEL / API_KEY，不改业务代码。
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Sequence
@@ -22,6 +23,11 @@ try:  # httpx 是可选依赖：没装时适配层直接判定为不可用，系
     import httpx
 except ImportError:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
+
+
+# 进程级共享信号量：所有适配器实例共用，避免通过重复构造客户端绕过上限。
+_CHAT_LLM_SEM = threading.BoundedSemaphore(config.CHAT_LLM_GLOBAL_CONCURRENCY)
+_EMBEDDING_SEM = threading.BoundedSemaphore(config.EMBEDDING_GLOBAL_CONCURRENCY)
 
 
 # ── 异常 ────────────────────────────────────────────────────────────────────
@@ -224,7 +230,8 @@ class CompatAdapter:
             tools=tools,
         )
         started = time.monotonic()
-        data = self._post_with_retry("/chat/completions", payload)
+        with _CHAT_LLM_SEM:
+            data = self._post_with_retry("/chat/completions", payload)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         content = message.get("content") or ""
@@ -306,39 +313,40 @@ class CompatAdapter:
         """
         self._ensure_available()
 
-        attempt = 0
-        while True:
-            payload = self._payload(
-                messages,
-                stream=True,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                extra=extra,
-                tools=tools,
-            )
-            try:
-                yield from self._iter_stream(payload, on_usage, on_tool_calls)
-                return
-            except _StreamStarted as exc:  # 已经吐过字，不重试，交给上层收尾
-                raise LLMError(str(exc.__cause__ or exc)) from exc
-            except _StreamRetry as exc:
-                if exc.disable_tools and tools:
-                    # 供应商不支持 function calling：去掉 tools 重试一次，
-                    # 避免整条对话被降级为规则引擎。
-                    tools = None
-                    continue
-                # 网关不认 stream_options：关掉后立刻重来一次，不计入重试次数
-                if exc.disable_stream_usage and self._stream_usage:
-                    self._stream_usage = False
-                    continue
-                if exc.disable_thinking and extra and "thinking" in extra:
-                    extra = {k: v for k, v in extra.items() if k != "thinking"}
-                    continue
-                if exc.retryable and attempt < self.max_retries:
-                    attempt += 1
-                    time.sleep(self.retry_backoff * (2**attempt))
-                    continue
-                raise LLMUnavailableError(f"LLM 流式请求失败：{exc.reason}") from exc
+        with _CHAT_LLM_SEM:
+            attempt = 0
+            while True:
+                payload = self._payload(
+                    messages,
+                    stream=True,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra=extra,
+                    tools=tools,
+                )
+                try:
+                    yield from self._iter_stream(payload, on_usage, on_tool_calls)
+                    return
+                except _StreamStarted as exc:  # 已经吐过字，不重试，交给上层收尾
+                    raise LLMError(str(exc.__cause__ or exc)) from exc
+                except _StreamRetry as exc:
+                    if exc.disable_tools and tools:
+                        # 供应商不支持 function calling：去掉 tools 重试一次，
+                        # 避免整条对话被降级为规则引擎。
+                        tools = None
+                        continue
+                    # 网关不认 stream_options：关掉后立刻重来一次，不计入重试次数
+                    if exc.disable_stream_usage and self._stream_usage:
+                        self._stream_usage = False
+                        continue
+                    if exc.disable_thinking and extra and "thinking" in extra:
+                        extra = {k: v for k, v in extra.items() if k != "thinking"}
+                        continue
+                    if exc.retryable and attempt < self.max_retries:
+                        attempt += 1
+                        time.sleep(self.retry_backoff * (2**attempt))
+                        continue
+                    raise LLMUnavailableError(f"LLM 流式请求失败：{exc.reason}") from exc
 
     def _iter_stream(self, payload: dict, on_usage, on_tool_calls=None) -> Iterator[str]:
         emitted = False
@@ -418,7 +426,8 @@ class CompatAdapter:
         payload: dict[str, Any] = {"model": self.model, "input": inputs}
         if dimensions:
             payload["dimensions"] = dimensions
-        data = self._post_with_retry("/embeddings", payload)
+        with _EMBEDDING_SEM:
+            data = self._post_with_retry("/embeddings", payload)
         rows = sorted(data.get("data") or [], key=lambda r: r.get("index", 0))
         return [list(r.get("embedding") or []) for r in rows]
 

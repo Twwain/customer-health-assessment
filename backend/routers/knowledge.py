@@ -26,6 +26,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, sessionmaker
 
+import config
 from config import KNOWLEDGE_DATA_DIR, RERANKER
 from database import get_db
 from models import Customer, KnowledgeItem
@@ -49,6 +50,7 @@ from services.ai.llm_adapter import get_embedding_adapter
 from services.rag import metrics as metrics_svc
 from services.rag.knowledge_base import KnowledgeBaseService
 from services.rag.retriever import RetrievedChunk
+from services.rag.parser import ParseError, validate_upload
 from services.rag.vector_store import get_vector_store
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -184,8 +186,24 @@ def search(
 
 # 与 services.rag.parser 支持的解析器保持一致
 _UPLOAD_ALLOWED_EXT = {".md", ".markdown", ".txt", ".csv", ".pdf", ".xlsx", ".xlsm", ".docx"}
-# 单文件大小上限（与前端提示的 50MB 一致）
-_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_UPLOAD_READ_CHUNK_BYTES = 64 * 1024
+_UPLOAD_PIPELINE_SEM = threading.BoundedSemaphore(config.UPLOAD_GLOBAL_CONCURRENCY)
+
+
+def _read_upload_limited(file: UploadFile) -> bytes:
+    """流式读取上传内容，一旦越过上限立即停止，不把超大文件整体读入内存。"""
+    parts: list[bytes] = []
+    total = 0
+    while True:
+        chunk = file.file.read(_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > config.UPLOAD_MAX_BYTES:
+            limit_mb = config.UPLOAD_MAX_BYTES // (1024 * 1024)
+            raise HTTPException(status_code=413, detail=f"文件超过 {limit_mb}MB 上限")
+        parts.append(chunk)
+    return b"".join(parts)
 
 
 @router.post("/upload", response_model=KnowledgeUploadResponse)
@@ -199,7 +217,9 @@ def upload(
     from services.rag.knowledge_base import normalize_category
 
     ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext and ext not in _UPLOAD_ALLOWED_EXT:
+    if not ext:
+        raise HTTPException(status_code=400, detail="文件必须包含扩展名")
+    if ext not in _UPLOAD_ALLOWED_EXT:
         raise HTTPException(
             status_code=400,
             detail=f"不支持的文件类型 {ext}，支持：{' / '.join(sorted(_UPLOAD_ALLOWED_EXT))}",
@@ -208,29 +228,40 @@ def upload(
         category = normalize_category(category)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    raw = file.file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="空文件")
-    if len(raw) > _UPLOAD_MAX_BYTES:
-        raise HTTPException(status_code=400, detail="文件超过 50MB 上限")
-    doc = _svc(db).create_from_upload(
-        title=title or (file.filename or "未命名文档"),
-        category=category,
-        filename=file.filename or "upload.bin",
-        raw=raw,
-        industry=industry,
-        created_by="user",
-    )
-    item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).first()
-    return KnowledgeUploadResponse(
-        document_id=doc.id,
-        item_id=item.id if item else 0,
-        title=doc.title,
-        category=doc.category,
-        index_status=doc.index_status,
-        chunk_count=doc.chunk_count,
-        index_error=doc.index_error,
-    )
+    if not _UPLOAD_PIPELINE_SEM.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="已有知识文档正在上传并索引，请稍后重试",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        raw = _read_upload_limited(file)
+        if not raw:
+            raise HTTPException(status_code=400, detail="空文件")
+        try:
+            validate_upload(file.filename or "", raw, file.content_type)
+        except ParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        doc = _svc(db).create_from_upload(
+            title=title or (file.filename or "未命名文档"),
+            category=category,
+            filename=file.filename or "upload.bin",
+            raw=raw,
+            industry=industry,
+            created_by="user",
+        )
+        item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).first()
+        return KnowledgeUploadResponse(
+            document_id=doc.id,
+            item_id=item.id if item else 0,
+            title=doc.title,
+            category=doc.category,
+            index_status=doc.index_status,
+            chunk_count=doc.chunk_count,
+            index_error=doc.index_error,
+        )
+    finally:
+        _UPLOAD_PIPELINE_SEM.release()
 
 
 @router.put("/items/{item_id}", response_model=KnowledgeItemResponse)

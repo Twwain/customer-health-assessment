@@ -1182,6 +1182,77 @@ def test_embedding_returns_vectors_in_index_order(monkeypatch):
     assert fake.requests[0]["json"]["dimensions"] == 2
 
 
+def test_chat_global_concurrency_semaphore(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(llm_adapter, "_CHAT_LLM_SEM", threading.BoundedSemaphore(2))
+    adapter = llm_adapter.CompatAdapter(
+        name="test-provider",
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="test-model",
+    )
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def fake_post(path, payload):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(adapter, "_post_with_retry", fake_post)
+    threads = [
+        threading.Thread(target=adapter.chat_completion, args=([{"role": "user", "content": "hi"}],))
+        for _ in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert peak == 2
+
+
+def test_embedding_global_concurrency_semaphore(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(llm_adapter, "_EMBEDDING_SEM", threading.BoundedSemaphore(1))
+    adapter = llm_adapter.CompatAdapter(
+        name="test-provider",
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="test-model",
+    )
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def fake_post(path, payload):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return {"data": [{"index": 0, "embedding": [1.0]}]}
+
+    monkeypatch.setattr(adapter, "_post_with_retry", fake_post)
+    threads = [threading.Thread(target=adapter.embed, args=(["text"],)) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert peak == 1
+
+
 # ══════════════════════════ M4 Agent Loop═══════════════════
 
 

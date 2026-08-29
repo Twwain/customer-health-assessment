@@ -180,7 +180,8 @@ cd backend && python -m pytest tests/ -v
 - **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；未装自动回退 `memory`（基础功能可用）。
 - **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 雅黑 / macOS PingFang / Linux 文泉驿）。
 - **数据持久化**：挂载 `./data:/app/data`，数据库与向量库落盘。
-- **访问控制**：系统为单租户内部工具，**无内置登录鉴权**；公网 / 云服务器部署时请在前置网关或反向代理层配置访问控制（IP 白名单 / Basic Auth / VPN 等），并将 `.env`、`AGENTS.md`、`dev_process/` 等敏感文件排除出发布内容。
+- **访问边界（风险接受）**：系统不提供登录、RBAC 或租户隔离，客户、会话和知识数据在所有访问者之间共享；全部知识管理接口（下载、编辑、删除、审核、批量状态、重索引和指标管理）保持开放，仅通过项目管理约定供项目组成员使用。该约定不是技术访问控制，因此部署内容只能使用虚构或预先脱敏、可公开、可修改、可删除、可重置的数据；不得录入真实或敏感数据，并应将 `.env`、`AGENTS.md`、`dev_process/` 等敏感文件排除出发布内容。若未来需要对外开放、录入真实数据或区分访问者，必须重新实施认证、授权及租户/工作区隔离。
+- **资源护栏**：Chat LLM 默认最多同时执行 8 个模型 HTTP 调用，Embedding 默认 1，AI PDF 任务默认 1；每客户端 IP 每分钟最多 60 次 AI 重型请求。知识上传/解析全局并发默认 1，ASGI 入口在 multipart 解析前限制请求体约 21MB，文件本身限制 20MB，并限制 50 万抽取字符、500 个切片、20 万预计 Embedding token、PDF 200 页、Office 解压后 100MB/2000 个 ZIP 条目。具体值可用 `.env.example` 中的配置覆盖；多 Uvicorn worker/多副本部署时并发和限流额度会按进程倍增，模型供应商侧仍需设置费用告警和余额/费用上限。
 
 ## 降级与可用性
 

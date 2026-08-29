@@ -125,12 +125,13 @@ def test_pdf_job_create_status_download_flow(client, customer):
 
 def test_pdf_job_download_before_ready_conflicts(client, customer, monkeypatch):
     import routers.assessment as mod
+    job_sem = mod._PDF_JOB_SEM
 
     def _slow_job(*args, **kwargs):
         try:
             time.sleep(3)
         finally:
-            mod._PDF_JOB_SEM.release()
+            job_sem.release()
 
     monkeypatch.setattr(mod, "_run_pdf_job", _slow_job)
 
@@ -140,6 +141,9 @@ def test_pdf_job_download_before_ready_conflicts(client, customer, monkeypatch):
     # 任务仍在 running：下载应返回 409
     download = client.get(f"/api/assessment/{customer.id}/pdf/jobs/{job_id}/download")
     assert download.status_code == 409
+    # 等待该测试创建的后台线程归还并发额度，避免污染后续用例。
+    assert job_sem.acquire(timeout=5)
+    job_sem.release()
 
 
 def test_pdf_job_unknown_job_returns_404(client, customer):
@@ -157,6 +161,7 @@ def test_pdf_job_customer_mismatch_returns_404(client, customer, db):
     # 用另一个客户 ID 查询同一个 job：应视为不存在
     resp = client.get(f"/api/assessment/{other.id}/pdf/jobs/{job_id}")
     assert resp.status_code == 404
+    _wait_ready(client, customer.id, job_id)
 
 
 def test_pdf_job_error_state_reported(client, customer, monkeypatch):

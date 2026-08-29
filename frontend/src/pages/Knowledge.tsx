@@ -496,8 +496,8 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
           <div className="rounded-xl border-2 border-dashed border-border bg-surface-2 p-6 text-center">
             <div className="text-[29px]">📄</div>
             <div className="mt-2 text-[14px] text-ink-2">点击选择，或拖拽文件到此处</div>
-            <div className="mt-1 text-[12.5px] text-muted">支持 PDF / Markdown / Word / Excel / TXT，单文件 ≤ 50MB</div>
-            <input type="file" className="mt-3 block w-full text-[13.5px]" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <div className="mt-1 text-[12.5px] text-muted">支持 PDF / Markdown / Word / Excel / TXT，默认单文件 ≤ 20MB</div>
+            <input type="file" accept=".pdf,.md,.markdown,.txt,.csv,.xlsx,.xlsm,.docx" className="mt-3 block w-full text-[13.5px]" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
             {file && <div className="mt-2 text-[13.5px] text-accent">已选择：{file.name}</div>}
           </div>
           <div className="mt-3">

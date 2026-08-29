@@ -143,6 +143,10 @@ LLM_TOOLS_ENABLED = _env_bool("LLM_TOOLS_ENABLED", True)
 # DeepSeek V4 默认开启 thinking。交互对话优先首字速度，PDF 报告优先分析质量。
 LLM_CHAT_THINKING_ENABLED = _env_bool("LLM_CHAT_THINKING_ENABLED", False)
 LLM_REPORT_THINKING_ENABLED = _env_bool("LLM_REPORT_THINKING_ENABLED", True)
+# 进程内 Chat LLM 全局并发上限。所有同步/流式调用（含报告 AI）共用该额度。
+CHAT_LLM_GLOBAL_CONCURRENCY = max(1, _env_int("CHAT_LLM_GLOBAL_CONCURRENCY", 8))
+# 公网匿名部署的轻量突发保护：按客户端 IP 汇总 AI 重型接口请求。
+AI_RATE_LIMIT_PER_MINUTE = max(1, _env_int("AI_RATE_LIMIT_PER_MINUTE", 60))
 
 
 # ══════════════════════════ Embedding═══════════════════════════
@@ -166,6 +170,7 @@ EMBEDDING_MODEL = (
 )
 EMBEDDING_DIM = _env_int("EMBEDDING_DIM", 1024)
 EMBEDDING_BATCH_SIZE = _env_int("EMBEDDING_BATCH_SIZE", 16)
+EMBEDDING_GLOBAL_CONCURRENCY = max(1, _env_int("EMBEDDING_GLOBAL_CONCURRENCY", 1))
 # 嵌入可用性独立于 LLM 总开关：只要配置了 EMBEDDING_API_KEY 即可用
 # （即使 LLM_ENABLED=False，RAG 检索仍应可用，不应被 LLM 开关绑死）
 EMBEDDING_ENABLED = _env_bool("EMBEDDING_ENABLED", bool(EMBEDDING_API_KEY))
@@ -193,7 +198,7 @@ CHAT_DEGRADED_CHUNK_SIZE = _env_int("CHAT_DEGRADED_CHUNK_SIZE", 24)
 # ready/error 任务（不误删 running）；并发上限用于防止线程/内存被任务打满；
 # TTL 兜底清理疑似挂死的任务（running 超时同样回收）。均可经环境变量覆盖。
 PDF_JOB_MAX = _env_int("PDF_JOB_MAX", 50)
-PDF_JOB_MAX_CONCURRENT = max(1, _env_int("PDF_JOB_MAX_CONCURRENT", 4))
+PDF_JOB_MAX_CONCURRENT = max(1, _env_int("PDF_JOB_MAX_CONCURRENT", 1))
 PDF_JOB_TTL = max(60, _env_int("PDF_JOB_TTL", 3600))
 
 
@@ -204,6 +209,26 @@ KNOWLEDGE_VECTOR_STORE = os.getenv("KNOWLEDGE_VECTOR_STORE", "chroma")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", os.path.join(BASE_DIR, "data", "chroma"))
 KNOWLEDGE_DATA_DIR = os.getenv("KNOWLEDGE_DATA_DIR", os.path.join(BASE_DIR, "data", "knowledge"))
 KNOWLEDGE_COLLECTION = os.getenv("KNOWLEDGE_COLLECTION", "customer_health_kb")
+
+# 知识文档上传/解析资源护栏。限制在调用解析器和 Embedding 之前生效；
+# Office 文件还会检查 ZIP 条目数与声明的解压后总大小。
+UPLOAD_MAX_BYTES = max(1, _env_int("UPLOAD_MAX_BYTES", 20 * 1024 * 1024))
+# multipart 请求包含边界与表单字段，入口请求体额度默认比文件额度多 1MiB。
+UPLOAD_MAX_REQUEST_BYTES = max(
+    UPLOAD_MAX_BYTES,
+    _env_int("UPLOAD_MAX_REQUEST_BYTES", UPLOAD_MAX_BYTES + 1024 * 1024),
+)
+UPLOAD_GLOBAL_CONCURRENCY = max(1, _env_int("UPLOAD_GLOBAL_CONCURRENCY", 1))
+UPLOAD_MAX_EXTRACTED_CHARS = max(1, _env_int("UPLOAD_MAX_EXTRACTED_CHARS", 500_000))
+UPLOAD_MAX_CHUNKS = max(1, _env_int("UPLOAD_MAX_CHUNKS", 500))
+UPLOAD_MAX_EMBEDDING_TOKENS = max(
+    1, _env_int("UPLOAD_MAX_EMBEDDING_TOKENS", 200_000)
+)
+UPLOAD_MAX_PDF_PAGES = max(1, _env_int("UPLOAD_MAX_PDF_PAGES", 200))
+UPLOAD_MAX_DECOMPRESSED_BYTES = max(
+    1, _env_int("UPLOAD_MAX_DECOMPRESSED_BYTES", 100 * 1024 * 1024)
+)
+UPLOAD_MAX_ZIP_ENTRIES = max(1, _env_int("UPLOAD_MAX_ZIP_ENTRIES", 2_000))
 
 # 中文按标点分句切片（SentenceWindow 思路）：chunk 大小按中文字符评估
 CHUNK_SIZE = _env_int("CHUNK_SIZE", 480)

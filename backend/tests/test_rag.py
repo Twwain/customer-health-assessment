@@ -516,6 +516,145 @@ def test_upload_unsupported_extension_400(app_client):
     assert resp.status_code == 400
 
 
+def test_upload_requires_extension(app_client):
+    files = {"file": ("README", io.BytesIO(b"plain text"), "text/plain")}
+    resp = app_client.post("/api/knowledge/upload", files=files, data={"category": "内部规范"})
+    assert resp.status_code == 400
+    assert "扩展名" in resp.json()["detail"]
+
+
+def test_upload_rejects_mime_and_magic_mismatch(app_client):
+    wrong_mime = {
+        "file": ("note.txt", io.BytesIO(b"plain text"), "application/pdf")
+    }
+    resp = app_client.post(
+        "/api/knowledge/upload", files=wrong_mime, data={"category": "内部规范"}
+    )
+    assert resp.status_code == 400
+    assert "MIME" in resp.json()["detail"]
+
+    wrong_magic = {"file": ("fake.pdf", io.BytesIO(b"not a pdf"), "application/pdf")}
+    resp = app_client.post(
+        "/api/knowledge/upload", files=wrong_magic, data={"category": "内部规范"}
+    )
+    assert resp.status_code == 400
+    assert "有效的 PDF" in resp.json()["detail"]
+
+
+def test_upload_stops_after_byte_limit(app_client, monkeypatch):
+    monkeypatch.setattr(config, "UPLOAD_MAX_BYTES", 8)
+    files = {"file": ("large.txt", io.BytesIO(b"123456789"), "text/plain")}
+    resp = app_client.post("/api/knowledge/upload", files=files, data={"category": "内部规范"})
+    assert resp.status_code == 413
+
+
+def test_upload_pipeline_concurrency_limit_returns_429(app_client, monkeypatch):
+    import threading
+    from routers import knowledge as knowledge_router
+
+    semaphore = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(knowledge_router, "_UPLOAD_PIPELINE_SEM", semaphore)
+    assert semaphore.acquire(blocking=False)
+    try:
+        files = {"file": ("queued.txt", io.BytesIO(b"text"), "text/plain")}
+        response = app_client.post(
+            "/api/knowledge/upload", files=files, data={"category": "内部规范"}
+        )
+    finally:
+        semaphore.release()
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "5"
+
+
+def test_index_limits_chunks_before_embedding(db, memory_store, monkeypatch):
+    import services.rag.knowledge_base as kb
+
+    called = False
+
+    def tracking_embed(texts):
+        nonlocal called
+        called = True
+        return _bag_of_chars_embed(texts)
+
+    monkeypatch.setattr(kb, "UPLOAD_MAX_CHUNKS", 1)
+    svc = kb.KnowledgeBaseService(db, store=memory_store, embed_func=tracking_embed)
+    doc = svc.create_from_upload(
+        title="超切片文档",
+        category="内部规范",
+        filename="large.md",
+        raw=(("甲" * 600) + "。" + ("乙" * 600)).encode("utf-8"),
+    )
+    assert doc.index_status == "failed"
+    assert "切片超过" in doc.index_error
+    assert doc.chunk_count == 0
+    assert called is False
+
+
+def test_index_limits_extracted_chars_before_embedding(db, memory_store, monkeypatch):
+    from services.rag.knowledge_base import KnowledgeBaseService
+
+    called = False
+
+    def tracking_embed(texts):
+        nonlocal called
+        called = True
+        return _bag_of_chars_embed(texts)
+
+    monkeypatch.setattr(config, "UPLOAD_MAX_EXTRACTED_CHARS", 5)
+    svc = KnowledgeBaseService(db, store=memory_store, embed_func=tracking_embed)
+    doc = svc.create_from_upload(
+        title="超文本上限",
+        category="内部规范",
+        filename="large.txt",
+        raw="超过五个字符的文本".encode("utf-8"),
+    )
+    assert doc.index_status == "failed"
+    assert "抽取文本超过" in doc.index_error
+    assert doc.chunk_count == 0
+    assert called is False
+
+
+def test_index_limits_estimated_tokens_before_embedding(db, memory_store, monkeypatch):
+    import services.rag.knowledge_base as kb
+
+    called = False
+
+    def tracking_embed(texts):
+        nonlocal called
+        called = True
+        return _bag_of_chars_embed(texts)
+
+    monkeypatch.setattr(kb, "UPLOAD_MAX_EMBEDDING_TOKENS", 2)
+    svc = kb.KnowledgeBaseService(db, store=memory_store, embed_func=tracking_embed)
+    doc = svc.create_from_upload(
+        title="超 Token 上限",
+        category="内部规范",
+        filename="tokens.txt",
+        raw="多个中文字符".encode("utf-8"),
+    )
+    assert doc.index_status == "failed"
+    assert "Embedding token" in doc.index_error
+    assert called is False
+
+
+def test_office_zip_entry_limit(monkeypatch):
+    import zipfile
+
+    from services.rag.parser import validate_upload
+
+    raw = io.BytesIO()
+    with zipfile.ZipFile(raw, "w") as archive:
+        archive.writestr("[Content_Types].xml", "types")
+        archive.writestr("word/document.xml", "document")
+    monkeypatch.setattr(config, "UPLOAD_MAX_ZIP_ENTRIES", 1)
+    with pytest.raises(ParseError, match="ZIP 条目"):
+        validate_upload(
+            "sample.docx",
+            raw.getvalue(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+
 def test_update_metadata_invalid_category_400(app_client):
     files = {"file": ("m.md", io.BytesIO(METHODOLOGY_MD.encode("utf-8")), "text/markdown")}
     up = app_client.post("/api/knowledge/upload", files=files, data={"category": "内部规范"})
