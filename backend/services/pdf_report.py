@@ -272,7 +272,7 @@ class PdfReportGenerator(
     @staticmethod
     def _section_header(number: str, title: str):
         """红条 + 标题的分节标题（与前端「红色细杠」一致）。"""
-        return Table(
+        header = Table(
             [[
                 Table([[""]], colWidths=[0.14 * cm], rowHeights=[0.62 * cm],
                       style=[("BACKGROUND", (0, 0), (0, 0), PdfReportGenerator.BRAND)]),
@@ -287,6 +287,12 @@ class PdfReportGenerator(
             colWidths=[0.3 * cm, 16.4 * cm],
             hAlign="LEFT",
         )
+        # 首列比 ReportLab 默认的左右 padding 总和更窄；显式清零可用宽度才不会为负。
+        header.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (0, 0), 0),
+            ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ]))
+        return header
 
     def generate(
         self,
