@@ -48,7 +48,7 @@ from schemas import (
 )
 from services.ai.llm_adapter import get_embedding_adapter
 from services.rag import metrics as metrics_svc
-from services.rag.knowledge_base import KnowledgeBaseService
+from services.rag.knowledge_base import KnowledgeBaseService, KnowledgeIndexError
 from services.rag.retriever import RetrievedChunk
 from services.rag.parser import ParseError, validate_upload
 from services.rag.vector_store import get_vector_store
@@ -85,6 +85,17 @@ def _run_reindex_job(job_id: str, category: str | None, bind) -> None:
             job = _reindex_jobs.get(job_id)
             if job is not None and job["status"] == "running":
                 job.update(status="ready", reindexed=count, finished=time.time())
+    except KnowledgeIndexError as exc:
+        with _reindex_jobs_lock:
+            job = _reindex_jobs.get(job_id)
+            if job is not None and job["status"] == "running":
+                job.update(
+                    status="partial" if exc.succeeded else "error",
+                    reindexed=exc.succeeded,
+                    failed_documents=exc.failed,
+                    error=str(exc),
+                    finished=time.time(),
+                )
     except Exception as exc:  # noqa: BLE001 - 后台任务通过状态接口报告错误
         with _reindex_jobs_lock:
             job = _reindex_jobs.get(job_id)
@@ -287,7 +298,10 @@ def update_metadata(
 
 @router.delete("/items/{item_id}")
 def delete_item(item_id: int, db: Session = Depends(get_db)) -> dict:
-    ok = _svc(db).delete_item(item_id)
+    try:
+        ok = _svc(db).delete_item(item_id)
+    except KnowledgeIndexError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     return {"deleted": True}
@@ -334,6 +348,10 @@ def reindex(
     try:
         count = _svc(db).reindex(category=category)
         return KnowledgeReindexResponse(reindexed=count)
+    except KnowledgeIndexError as exc:
+        return KnowledgeReindexResponse(
+            reindexed=exc.succeeded, failed_documents=exc.failed
+        )
     finally:
         _reindex_operation_lock.release()
 
@@ -356,6 +374,7 @@ def create_reindex_job(
             "category": category,
             "reindexed": 0,
             "error": None,
+            "failed_documents": [],
             "created": time.time(),
         }
     try:
@@ -366,6 +385,14 @@ def create_reindex_job(
             _reindex_jobs.pop(job_id, None)
         raise
     return {"job_id": job_id, "status": "running"}
+
+
+@router.post("/reconcile")
+def reconcile_vectors(
+    cleanup_orphans: bool = Query(False), db: Session = Depends(get_db)
+) -> dict:
+    """对账 SQLite 与向量库；显式请求时清理孤儿向量。"""
+    return _svc(db).reconcile_vectors(cleanup_orphans=cleanup_orphans)
 
 
 @router.get("/reindex/jobs/{job_id}")
@@ -380,6 +407,7 @@ def get_reindex_job(job_id: str) -> dict:
             "status": job["status"],
             "reindexed": job["reindexed"],
             "error": job["error"],
+            "failed_documents": job.get("failed_documents", []),
         }
 
 
@@ -423,16 +451,22 @@ def delete_metric(metric_id: int, db: Session = Depends(get_db)) -> dict:
 
 @router.get("/status", response_model=KnowledgeStatusResponse)
 def status(db: Session = Depends(get_db)) -> KnowledgeStatusResponse:
-    store = get_vector_store()
     emb = get_embedding_adapter()
     categories = [
         c for (c,) in db.query(KnowledgeItem.category)
         .distinct()
         .all()
     ]
+    try:
+        store = get_vector_store()
+        store_name, count, available, error = type(store).__name__, store.count(), True, ""
+    except Exception as exc:
+        store_name, count, available, error = config.KNOWLEDGE_VECTOR_STORE, 0, False, str(exc)
     return KnowledgeStatusResponse(
-        vector_store=type(store).__name__,
-        count=store.count(),
+        vector_store=store_name,
+        vector_available=available,
+        error=error,
+        count=count,
         embedding_available=emb.available,
         reranker=RERANKER,
         categories=categories,

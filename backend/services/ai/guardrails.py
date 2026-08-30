@@ -29,14 +29,18 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         ),
     ),
     # 主流大模型风格密钥
-    ("api_key", re.compile(r"\b(sk-[A-Za-z0-9_\-]{12,})\b")),
+    ("api_key", re.compile(r"(?<![A-Za-z0-9_-])(sk-[A-Za-z0-9_-]{12,})(?![A-Za-z0-9_-])")),
     # 身份证（18 位）
-    ("id_card", re.compile(r"\b(\d{17}[\dXx])\b")),
+    ("id_card", re.compile(r"(?<!\d)(\d{17}[\dXx])(?![A-Za-z0-9])")),
     # 银行卡（16–19 位连续数字）
-    ("bank_card", re.compile(r"\b(\d{16,19})\b")),
+    ("bank_card", re.compile(r"(?<!\d)(\d{16,19})(?!\d)")),
 ]
 
-_PHONE_RE = re.compile(r"\b(1[3-9]\d)(\d{4})(\d{4})\b")
+_PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)(\d{4})(\d{4})(?!\d)")
+
+# 这些标签只用于把数据库字段 / RAG 原文明确降权为“不可信数据”。标签名固定，
+# 调用方不能让文档内容自行闭合标签；尖括号会在包装前转义。
+_UNTRUSTED_LABELS = {"customer", "rag", "tool"}
 
 
 def sanitize_text(text: str) -> tuple[str, list[str]]:
@@ -75,6 +79,23 @@ def sanitize_output(text: str) -> str:
     """出向：只脱敏不截断。"""
     cleaned, _ = sanitize_text(text or "")
     return cleaned
+
+
+def sanitize_for_outbound(text: str, *, max_chars: int | None = None) -> tuple[str, list[str]]:
+    """统一出站 DLP：在 Prompt 或 Embedding 离开进程前脱敏并可选截断。"""
+    cleaned, hits = sanitize_text(text or "")
+    if max_chars is not None and len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars] + "\n（出站内容过长已截断）"
+        hits.append("truncated")
+    return cleaned, hits
+
+
+def wrap_untrusted(text: str, source: str) -> str:
+    """把客户/RAG/工具正文标为不可信数据，防止其伪装成 Prompt 指令。"""
+    label = source if source in _UNTRUSTED_LABELS else "tool"
+    cleaned, _ = sanitize_for_outbound(text)
+    cleaned = cleaned.replace("<", "＜").replace(">", "＞")
+    return f"<untrusted_{label}_data>\n{cleaned}\n</untrusted_{label}_data>"
 
 
 class StreamingOutputSanitizer:

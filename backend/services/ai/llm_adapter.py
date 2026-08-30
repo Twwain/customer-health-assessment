@@ -208,6 +208,19 @@ class CompatAdapter:
             return f"LLM 请求参数被拒绝（HTTP 400），请检查模型名与请求体：{detail}"
         return f"LLM 返回 HTTP {status_code}：{detail}"
 
+    @staticmethod
+    def _rejects_parameter(detail: str, parameter: str) -> bool:
+        """只在错误正文明确点名不支持的参数时做能力降级。"""
+        lowered = (detail or "").lower()
+        markers = (
+            "unknown", "unsupported", "unrecognized", "not support",
+            "not permitted", "extra field", "unexpected", "invalid parameter",
+        )
+        named = parameter.lower() in lowered
+        if parameter == "tools":
+            named = named or "function calling" in lowered or "tool calling" in lowered
+        return named and any(marker in lowered for marker in markers)
+
     # ── 非流式 ──────────────────────────────────────────────────────────
 
     def chat_completion(
@@ -257,20 +270,20 @@ class CompatAdapter:
                     )
                 if response.status_code >= 400:
                     detail = response.text[:300]
-                    if response.status_code == 400 and "tools" in payload:
-                        # 供应商不支持 function calling：去掉 tools 重试一次，
-                        # 同时去掉可能不兼容的 thinking，避免两个扩展字段连续
-                        # 消耗有限的 HTTP 重试次数。
-                        payload = {
-                            k: v for k, v in payload.items()
-                            if k not in {"tools", "thinking"}
-                        }
+                    if (
+                        response.status_code == 400
+                        and "thinking" in payload
+                        and self._rejects_parameter(detail, "thinking")
+                    ):
+                        payload = {k: v for k, v in payload.items() if k != "thinking"}
                         last_error = LLMError(f"HTTP 400: {detail}")
                         continue
-                    if response.status_code == 400 and "thinking" in payload:
-                        # thinking 是部分模型的扩展字段；通用兼容网关不识别时
-                        # 去掉后重试，避免整轮对话被误判为不可用。
-                        payload = {k: v for k, v in payload.items() if k != "thinking"}
+                    if (
+                        response.status_code == 400
+                        and "tools" in payload
+                        and self._rejects_parameter(detail, "tools")
+                    ):
+                        payload = {k: v for k, v in payload.items() if k != "tools"}
                         last_error = LLMError(f"HTTP 400: {detail}")
                         continue
                     if self._retryable_status(response.status_code) and attempt < self.max_retries:
@@ -366,8 +379,14 @@ class CompatAdapter:
                             disable_stream_usage=(
                                 response.status_code == 400 and "stream_options" in payload
                             ),
-                            disable_tools=(response.status_code == 400 and "tools" in payload),
-                            disable_thinking=(response.status_code == 400 and "thinking" in payload),
+                            disable_tools=(
+                                response.status_code == 400 and "tools" in payload
+                                and self._rejects_parameter(body, "tools")
+                            ),
+                            disable_thinking=(
+                                response.status_code == 400 and "thinking" in payload
+                                and self._rejects_parameter(body, "thinking")
+                            ),
                             retryable=self._retryable_status(response.status_code),
                         )
                     for line in response.iter_lines():

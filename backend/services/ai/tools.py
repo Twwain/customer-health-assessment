@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from models import Customer
+from services.ai import guardrails
 from services.ai.context_builder import ChatContext
 from services.rag.retriever import RetrievedChunk, retrieve_knowledge
 
@@ -22,6 +23,15 @@ from services.rag.retriever import RetrievedChunk, retrieve_knowledge
 MAX_TOOL_ROUNDS = 5
 # 工具返回的单条知识正文最大字符数：防止全文 + 窗口膨胀把上下文撑爆
 TOOL_CONTENT_MAX_CHARS = 800
+
+
+def _bounded_tool_content(content: str) -> str:
+    prefix = "<untrusted_tool_data>\n"
+    suffix = "\n</untrusted_tool_data>"
+    budget = max(0, TOOL_CONTENT_MAX_CHARS - len(prefix) - len(suffix))
+    cleaned, _ = guardrails.sanitize_for_outbound((content or "")[:budget])
+    cleaned = cleaned.replace("<", "＜").replace(">", "＞")
+    return f"{prefix}{cleaned}{suffix}"
 
 
 def rag_retrieve(
@@ -54,6 +64,8 @@ def to_reference(chunk: RetrievedChunk) -> dict:
         "category": chunk.category,
         "score": round(chunk.score, 4),
         "snippet": (chunk.hit_content or chunk.content)[:200],
+        # 仅供 Agent Prompt 使用；返回前由 graph_builder 移除，绝不进入前端 DTO。
+        "_model_content": chunk.content,
         "chunk_id": chunk.chunk_index,
         "document_id": chunk.document_id,
         "item_id": chunk.item_id,
@@ -149,9 +161,15 @@ def customer_compare(
     query = db.query(Customer)
     if industry:
         query = query.filter(Customer.industry == industry)
-    if exclude_customer_id is not None:
-        query = query.filter(Customer.id != exclude_customer_id)
-    rows = query.order_by(Customer.id).limit(max(1, limit)).all()
+    # 模型不能借参数覆盖当前会话范围；有绑定客户时始终排除它自身。
+    effective_exclude_id = customer.id if customer is not None else exclude_customer_id
+    if effective_exclude_id is not None:
+        query = query.filter(Customer.id != effective_exclude_id)
+    try:
+        safe_limit = min(max(int(limit), 1), 100)
+    except (TypeError, ValueError):
+        safe_limit = 30
+    rows = query.order_by(Customer.id).limit(safe_limit).all()
 
     engine = get_scoring_strategy()
     customer_rows: list[dict[str, Any]] = []
@@ -223,6 +241,7 @@ def knowledge_search(
     """检索知识库（含窗口扩展），返回命中条目供模型引用。"""
     if not query or not query.strip():
         return {"error": "query 不能为空"}
+    query = query.strip()[:500]
     from services.rag.retriever import retrieve_knowledge
 
     try:
@@ -244,7 +263,7 @@ def knowledge_search(
                 "category": c.category,
                 "score": round(c.score, 4),
                 "snippet": (c.hit_content or c.content)[:200],
-                "content": c.content[:TOOL_CONTENT_MAX_CHARS],
+                "content": _bounded_tool_content(c.content),
                 "document_id": c.document_id,
                 "chunk_index": c.chunk_index,
                 "item_id": c.item_id,

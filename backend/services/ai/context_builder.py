@@ -21,6 +21,7 @@ from models import Customer
 from schemas import AssessmentResponse, AssessmentTrendResponse
 from services import assessment_history
 from services.scoring import get_scoring_strategy, load_scoring_config
+from services.ai import guardrails
 
 NO_KNOWLEDGE_HINT = (
     "## 知识库参考资料\n"
@@ -242,7 +243,7 @@ def build_knowledge_context(
     references: list[dict] = []
     for i, c in enumerate(chunks, 1):
         lines.append(f"### 参考 {i}（{c.category} · 《{c.item_title}》）")
-        lines.append(c.content)
+        lines.append(guardrails.wrap_untrusted(c.content, "rag"))
         references.append(
             {
                 "id": f"{c.document_id}:{c.chunk_index}",
@@ -328,7 +329,7 @@ def build_context(
     metrics_text = _metrics_section(db, customer)
     if metrics_text:
         sections.append(metrics_text)
-    customer_text = "\n\n".join(sections)
+    customer_text = guardrails.wrap_untrusted("\n\n".join(sections), "customer")
     if retrieve_knowledge:
         knowledge_text, references = build_knowledge_context(
             query, customer=customer, db=db, timings=rag_timings
@@ -339,7 +340,9 @@ def build_context(
         assessment=assessment,
         trend=trend,
         customer_text=customer_text,
-        alert_text=build_alert_context(assessment, trend),
+        alert_text=guardrails.wrap_untrusted(
+            build_alert_context(assessment, trend), "customer"
+        ),
         knowledge_text=knowledge_text,
         references=references,
     )

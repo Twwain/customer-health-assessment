@@ -280,7 +280,7 @@ class ChatSessionCreate(BaseModel):
     title: str = Field(default="", max_length=200)
     customer_id: int | None = None
     scenario: str = Field(default="free_qa", description="free_qa / assessment / strategy / alert_analysis")
-    system_prompt: str = ""
+    system_prompt: str = Field(default="", max_length=2000)
 
 
 class ChatSessionItem(BaseModel):
@@ -445,12 +445,15 @@ class KnowledgeBatchStatusRequest(BaseModel):
 
 class KnowledgeReindexResponse(BaseModel):
     reindexed: int = 0
+    failed_documents: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class KnowledgeStatusResponse(BaseModel):
     """知识库健康状态（前端知识库页 / 降级态参考）。"""
 
     vector_store: str = ""
+    vector_available: bool = True
+    error: str = ""
     count: int = 0
     embedding_available: bool = False
     reranker: str = ""

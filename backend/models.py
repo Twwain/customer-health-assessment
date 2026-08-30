@@ -145,6 +145,38 @@ class ChatMessage(Base):
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 
+class ChatTurnMetric(Base):
+    """一轮 AI 对话的非敏感运行指标，用于上线后观察真实分布。"""
+
+    __tablename__ = "chat_turn_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    scenario: Mapped[str] = mapped_column(String(30), default="free_qa", index=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="success", index=True,
+        comment="success / degraded / error / timeout / cancelled",
+    )
+    model: Mapped[str] = mapped_column(String(100), default="")
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    token_budget: Mapped[int] = mapped_column(Integer, default=0)
+    token_overshoot: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    llm_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_rounds: Mapped[int] = mapped_column(Integer, default=0)
+    refine_rounds: Mapped[int] = mapped_column(Integer, default=0)
+    queue_capacity: Mapped[int] = mapped_column(Integer, default=0)
+    queue_high_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    warning_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str] = mapped_column(String(50), default="")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, default=utcnow, server_default=func.now(), index=True
+    )
+
+
+Index("ix_chat_turn_metrics_scenario_time", ChatTurnMetric.scenario, ChatTurnMetric.created_at)
+
+
 # ══════════════════════════ 知识库══════════════════════════
 
 

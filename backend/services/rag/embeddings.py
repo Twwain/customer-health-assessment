@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Callable, List, Sequence
 
 from services.ai.llm_adapter import LLMUnavailableError, get_embedding_adapter
+from services.ai.guardrails import sanitize_for_outbound
 from config import EMBEDDING_BATCH_SIZE
 
 
@@ -28,7 +29,7 @@ def make_embedding_func(
             return []
         try:
             out: List[List[float]] = []
-            items = list(texts)
+            items = [sanitize_for_outbound(text)[0] for text in texts]
             for i in range(0, len(items), bs):
                 out.extend(adapter.embed(items[i : i + bs]))
             return out

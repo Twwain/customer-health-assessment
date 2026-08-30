@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import uuid
 from typing import Any, Sequence
 
 from config import (
@@ -43,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 class KnowledgeIndexError(Exception):
     """切片 / 向量化失败。"""
+
+    def __init__(self, message: str, *, succeeded: int = 0, failed: list[dict] | None = None):
+        super().__init__(message)
+        self.succeeded = succeeded
+        self.failed = failed or []
 
 
 # 分类白名单以 models.KNOWLEDGE_CATEGORIES 为唯一权威来源
@@ -203,6 +209,47 @@ class KnowledgeBaseService:
             parsed = parse_document(os.path.basename(doc.file_path), raw=raw)
             return parsed.text
         return ""
+
+    def _build_shadow_payload(
+        self, doc: KnowledgeDocument
+    ) -> tuple[list[str], list[list[float]], list[dict]]:
+        """构建影子索引数据；失败时绝不触碰当前可用索引。"""
+        item = (
+            self._db.query(KnowledgeItem)
+            .filter(KnowledgeItem.document_id == doc.id)
+            .first()
+        )
+        try:
+            text = self._document_text(doc)
+        except ParseError as exc:
+            raise KnowledgeIndexError(f"文档解析失败：{exc}") from exc
+        if not text.strip():
+            raise KnowledgeIndexError("文档无可用文本")
+        chunks = chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
+        if len(chunks) > UPLOAD_MAX_CHUNKS:
+            raise KnowledgeIndexError(f"文档切片超过 {UPLOAD_MAX_CHUNKS} 个上限")
+        estimated_tokens = sum(_estimate_tokens(chunk) for chunk in chunks)
+        if estimated_tokens > UPLOAD_MAX_EMBEDDING_TOKENS:
+            raise KnowledgeIndexError(
+                f"文档预计 Embedding token 超过 {UPLOAD_MAX_EMBEDDING_TOKENS} 上限"
+            )
+        try:
+            vectors = self._embed(chunks)
+        except EmbeddingUnavailableError as exc:
+            raise KnowledgeIndexError(f"Embedding 不可用：{exc}") from exc
+        except Exception as exc:
+            raise KnowledgeIndexError(str(exc)) from exc
+        metadatas = [{
+            "document_id": doc.id,
+            "chunk_index": i,
+            "category": doc.category,
+            "industry": item.industry if item else "",
+            "title": item.title if item else doc.title,
+            "status": doc.status,
+            "item_id": item.id if item else 0,
+            "source_type": doc.source_type,
+        } for i in range(len(chunks))]
+        return chunks, vectors, metadatas
 
     # ── 索引（解析→切片→向量化→入库）────────────────────────────────────────
     def index_document(self, doc: KnowledgeDocument) -> KnowledgeDocument:
@@ -623,11 +670,21 @@ class KnowledgeBaseService:
             .first()
         )
         file_path = doc.file_path if doc else None
+        # 先提交 tombstone。向量库异常时 SQL 权威检索会立即阻止该知识再次进入 Prompt，
+        # 同时保留记录，便于用户或后台稍后重试物理清理。
+        item.status = "proposed"
+        if doc is not None:
+            doc.status = "proposed"
+            doc.index_status = "deleting"
+        self._db.commit()
         if vector_ids:
             try:
                 self._store.delete(vector_ids)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("删除向量失败：%s", exc)
+            except Exception as exc:
+                logger.error("删除向量失败，已保留 tombstone：%s", exc)
+                raise KnowledgeIndexError(
+                    f"知识已下线，但向量清理失败，可稍后重试：{exc}"
+                ) from exc
         self._db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).delete()
         self._db.commit()
         if file_path:
@@ -645,6 +702,7 @@ class KnowledgeBaseService:
             query = query.filter(KnowledgeDocument.category == category)
         docs = query.all()
         count = 0
+        failures: list[dict] = []
         for doc in docs:
             old_ids = [
                 c.vector_id
@@ -653,23 +711,85 @@ class KnowledgeBaseService:
                 .all()
                 if c.vector_id
             ]
+            staged_ids: list[str] = []
+            try:
+                chunks, vectors, metadatas = self._build_shadow_payload(doc)
+                version = uuid.uuid4().hex[:12]
+                staged_ids = [f"{doc.id}:v{version}:{i}" for i in range(len(chunks))]
+                self._store.add(staged_ids, chunks, vectors, metadatas)
+
+                # 影子向量完整写入后，单个 SQL 事务切换权威版本。
+                self._db.query(KnowledgeChunk).filter(
+                    KnowledgeChunk.document_id == doc.id
+                ).delete()
+                for i, chunk in enumerate(chunks):
+                    self._db.add(KnowledgeChunk(
+                        document_id=doc.id,
+                        content=chunk,
+                        vector_id=staged_ids[i],
+                        chunk_metadata=metadatas[i],
+                        chunk_index=i,
+                        token_count=_estimate_tokens(chunk),
+                    ))
+                doc.chunk_count = len(chunks)
+                doc.index_status = "indexed"
+                doc.index_error = ""
+                self._db.commit()
+                count += 1
+            except Exception as exc:
+                self._db.rollback()
+                if staged_ids:
+                    try:
+                        self._store.delete(staged_ids)
+                    except Exception:
+                        logger.exception("清理失败的影子索引失败: doc=%s", doc.id)
+                failures.append({"document_id": doc.id, "title": doc.title, "error": str(exc)})
+                continue
+
+            # SQL 已切换后再清旧向量；即使失败，SQL 权威校验也会过滤这些孤儿。
             if old_ids:
                 try:
                     self._store.delete(old_ids)
-                except Exception:  # pragma: no cover
-                    pass
-            self._db.query(KnowledgeChunk).filter(
-                KnowledgeChunk.document_id == doc.id
-            ).delete()
-            # 旧切片已经删除；即使后续解析、Embedding 或向量写入失败，展示值
-            # 也必须与数据库真实切片数一致，不能沿用上一次索引的计数。
-            doc.chunk_count = 0
-            self._db.commit()
-            result = self.index_document(doc)
-            self._db.commit()
-            if result.index_status == "indexed":
-                count += 1
+                except Exception:
+                    logger.exception("清理旧索引失败: doc=%s", doc.id)
+        if failures:
+            raise KnowledgeIndexError(
+                f"重索引部分失败：成功 {count}，失败 {len(failures)}",
+                succeeded=count,
+                failed=failures,
+            )
         return count
+
+    def reconcile_vectors(self, *, cleanup_orphans: bool = False) -> dict[str, Any]:
+        """双向对账 SQL/向量 ID；可安全清理数据库不存在的孤儿向量。"""
+        sql_rows = self._db.query(KnowledgeChunk.vector_id, KnowledgeChunk.document_id).all()
+        sql_ids = {row.vector_id for row in sql_rows if row.vector_id}
+        vector_ids = set(self._store.list_ids())
+        orphan_ids = sorted(vector_ids - sql_ids)
+        missing_ids = sorted(sql_ids - vector_ids)
+        if cleanup_orphans and orphan_ids:
+            self._store.delete(orphan_ids)
+        if missing_ids:
+            missing_set = set(missing_ids)
+            affected_docs = {
+                row.document_id for row in sql_rows if row.vector_id in missing_set
+            }
+            if affected_docs:
+                self._db.query(KnowledgeDocument).filter(
+                    KnowledgeDocument.id.in_(affected_docs)
+                ).update(
+                    {KnowledgeDocument.index_status: "failed",
+                     KnowledgeDocument.index_error: "向量对账发现缺失，请重索引"},
+                    synchronize_session=False,
+                )
+                self._db.commit()
+        return {
+            "sql_vectors": len(sql_ids),
+            "store_vectors": len(vector_ids),
+            "orphan_ids": orphan_ids,
+            "missing_ids": missing_ids,
+            "orphans_cleaned": len(orphan_ids) if cleanup_orphans else 0,
+        }
 
     # ── 预置知识──────────────────────────────────
     def seed_default_knowledge(self, source_path: str | None = None) -> KnowledgeDocument | None:

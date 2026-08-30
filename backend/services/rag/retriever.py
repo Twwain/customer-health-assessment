@@ -17,6 +17,7 @@ from config import RAG_RECALL_K, RAG_TOP_K, RAG_WINDOW
 from services.rag.embeddings import EmbeddingUnavailableError, make_embedding_func
 from services.rag.reranker import MetadataReranker, RerankCandidate, get_reranker
 from services.rag.vector_store import VectorStore, get_vector_store
+from services.ai.guardrails import sanitize_for_outbound
 
 
 @dataclass
@@ -76,6 +77,8 @@ class KnowledgeRetriever:
         raw = self._store.query(qvec, top_k=recall_k, where=where)
         if timings is not None:
             timings["vector_query_ms"] = int((time.monotonic() - vector_started) * 1000)
+        if db is not None and raw:
+            raw = self._authoritative_rows(db, raw, status=status, category=category)
         candidates = [
             RerankCandidate(
                 id=r["id"], content=r["content"], metadata=r["metadata"], base_score=r["score"]
@@ -116,6 +119,55 @@ class KnowledgeRetriever:
         return out
 
     @staticmethod
+    def _authoritative_rows(db: Any, raw: list[dict], *, status: str | None, category: str | None) -> list[dict]:
+        """以 SQLite 当前记录为权威，过滤撤销、删除和孤儿向量。"""
+        from models import KnowledgeChunk, KnowledgeDocument, KnowledgeItem
+
+        vector_ids = [str(row.get("id") or "") for row in raw if row.get("id")]
+        if not vector_ids:
+            return []
+        query = (
+            db.query(KnowledgeChunk, KnowledgeDocument, KnowledgeItem)
+            .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
+            .join(KnowledgeItem, KnowledgeItem.document_id == KnowledgeDocument.id)
+            .filter(
+                KnowledgeChunk.vector_id.in_(vector_ids),
+                KnowledgeDocument.index_status == "indexed",
+            )
+        )
+        if status:
+            query = query.filter(
+                KnowledgeDocument.status == status,
+                KnowledgeItem.status == status,
+            )
+        if category:
+            query = query.filter(KnowledgeItem.category == category)
+        by_id = {chunk.vector_id: (chunk, doc, item) for chunk, doc, item in query.all()}
+        out: list[dict] = []
+        for row in raw:
+            resolved = by_id.get(str(row.get("id") or ""))
+            if resolved is None:
+                continue
+            chunk, doc, item = resolved
+            content, _ = sanitize_for_outbound(chunk.content)
+            out.append({
+                **row,
+                "content": content,
+                "metadata": {
+                    **(chunk.chunk_metadata or {}),
+                    "document_id": doc.id,
+                    "chunk_index": chunk.chunk_index,
+                    "category": item.category,
+                    "industry": item.industry,
+                    "title": item.title,
+                    "status": item.status,
+                    "item_id": item.id,
+                    "source_type": doc.source_type,
+                },
+            })
+        return out
+
+    @staticmethod
     def _expand_window(chunk: RetrievedChunk, window: int, db: Any) -> RetrievedChunk:
         """把命中切片的前后相邻切片一起拼进正文，缓解跨切片信息截断。"""
         if window <= 0 or db is None or chunk.document_id is None:
@@ -135,7 +187,7 @@ class KnowledgeRetriever:
             )
             if len(rows) <= 1:
                 return chunk
-            expanded = "\n\n".join(r.content for r in rows)
+            expanded, _ = sanitize_for_outbound("\n\n".join(r.content for r in rows))
             return RetrievedChunk(
                 document_id=chunk.document_id,
                 chunk_index=chunk.chunk_index,

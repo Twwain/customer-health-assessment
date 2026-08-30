@@ -19,8 +19,8 @@ from config import (
     CHROMA_PERSIST_DIR,
     EMBEDDING_DIM,
     KNOWLEDGE_COLLECTION,
-    KNOWLEDGE_VECTOR_STORE,
 )
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,8 @@ class VectorStore(Protocol):
     def update_metadatas(self, ids: Sequence[str], metadatas: Sequence[dict]) -> None: ...
 
     def count(self) -> int: ...
+
+    def list_ids(self) -> list[str]: ...
 
     def reset(self) -> None: ...
 
@@ -110,6 +112,9 @@ class InMemoryVectorStore:
 
     def count(self) -> int:  # type: ignore[override]
         return len(self._records)
+
+    def list_ids(self) -> list[str]:  # type: ignore[override]
+        return list(self._records)
 
     def reset(self) -> None:  # type: ignore[override]
         self._records.clear()
@@ -192,6 +197,9 @@ class ChromaVectorStore:
     def count(self) -> int:  # type: ignore[override]
         return self._collection.count()
 
+    def list_ids(self) -> list[str]:  # type: ignore[override]
+        return list(self._collection.get(include=[]).get("ids") or [])
+
     def reset(self) -> None:  # type: ignore[override]
         try:
             self._client.delete_collection(self._collection.name)
@@ -208,9 +216,9 @@ _CHROMA_STORE: ChromaVectorStore | None = None
 
 
 def get_vector_store() -> VectorStore:
-    """按配置选择后端；Chroma 不可用时自动回退内存并打日志。"""
+    """按配置选择后端；持久化后端异常时 fail closed，禁止伪成功。"""
     global _MEMORY_STORE, _CHROMA_STORE
-    name = (KNOWLEDGE_VECTOR_STORE or "chroma").lower()
+    name = (config.KNOWLEDGE_VECTOR_STORE or "chroma").lower()
     if name == "memory":
         if _MEMORY_STORE is None:
             _MEMORY_STORE = InMemoryVectorStore()
@@ -221,7 +229,5 @@ def get_vector_store() -> VectorStore:
             _CHROMA_STORE = ChromaVectorStore()
         return _CHROMA_STORE
     except Exception as exc:  # pragma: no cover - 环境无 chromadb
-        logger.warning("Chroma 不可用，回退内存向量库：%s", exc)
-        if _MEMORY_STORE is None:
-            _MEMORY_STORE = InMemoryVectorStore()
-        return _MEMORY_STORE
+        logger.error("Chroma 不可用，已拒绝切换临时内存库：%s", exc)
+        raise RuntimeError(f"持久化向量库不可用：{exc}") from exc

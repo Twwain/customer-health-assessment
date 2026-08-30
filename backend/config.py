@@ -192,6 +192,10 @@ CHAT_MAX_INPUT_CHARS = _env_int("CHAT_MAX_INPUT_CHARS", 4000)
 CHAT_TREND_POINTS = _env_int("CHAT_TREND_POINTS", 6)
 # 降级模式下模拟流式的分片大小（字符）
 CHAT_DEGRADED_CHUNK_SIZE = _env_int("CHAT_DEGRADED_CHUNK_SIZE", 24)
+# Agent 线程/事件队列硬边界，防止断线或慢客户端造成无界内存与后台调用堆积。
+CHAT_AGENT_EVENT_QUEUE_MAX = max(8, _env_int("CHAT_AGENT_EVENT_QUEUE_MAX", 128))
+CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 120.0))
+CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 32_000))
 
 
 # 异步 PDF 导出任务（内存态）：进程内最多保留的任务数，超出后清理最早完成的
@@ -204,7 +208,7 @@ PDF_JOB_TTL = max(60, _env_int("PDF_JOB_TTL", 3600))
 
 # ══════════════════════════ 知识库 RAG═══════════════════════
 # 向量库：chroma（生产，需 chromadb）/ memory（开发自测，纯内存无需依赖）。
-# 生产环境 chromadb 未安装时自动回退 memory 并打日志，保证基础功能可用。
+# memory 仅用于显式开发/测试；chroma 异常时禁止静默回退，避免索引伪成功。
 KNOWLEDGE_VECTOR_STORE = os.getenv("KNOWLEDGE_VECTOR_STORE", "chroma")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", os.path.join(BASE_DIR, "data", "chroma"))
 KNOWLEDGE_DATA_DIR = os.getenv("KNOWLEDGE_DATA_DIR", os.path.join(BASE_DIR, "data", "knowledge"))
@@ -229,6 +233,9 @@ UPLOAD_MAX_DECOMPRESSED_BYTES = max(
     1, _env_int("UPLOAD_MAX_DECOMPRESSED_BYTES", 100 * 1024 * 1024)
 )
 UPLOAD_MAX_ZIP_ENTRIES = max(1, _env_int("UPLOAD_MAX_ZIP_ENTRIES", 2_000))
+UPLOAD_MAX_COMPRESSION_RATIO = max(
+    1.0, _env_float("UPLOAD_MAX_COMPRESSION_RATIO", 200.0)
+)
 
 # 中文按标点分句切片（SentenceWindow 思路）：chunk 大小按中文字符评估
 CHUNK_SIZE = _env_int("CHUNK_SIZE", 480)
@@ -238,6 +245,10 @@ RAG_TOP_K = _env_int("RAG_TOP_K", 5)
 RAG_RECALL_K = _env_int("RAG_RECALL_K", 20)
 # 命中切片窗口扩展：把相邻切片一起拼进上下文，缓解跨切片信息截断（0=关闭）
 RAG_WINDOW = _env_int("RAG_WINDOW", 1)
+# Agent/PDF 模型上下文预算；展示引用仍只保留短 snippet。
+RAG_MODEL_CONTEXT_CHAR_BUDGET = max(
+    1000, _env_int("RAG_MODEL_CONTEXT_CHAR_BUDGET", 12_000)
+)
 RERANKER = os.getenv("RERANKER", "metadata")  # metadata（默认，无依赖）/ bge（本地 CrossEncoder）
 BGE_MODEL = os.getenv("BGE_MODEL", "BAAI/bge-reranker-v2-m3")
 # 检索时优先提升的分类权重（内部规范 / 指标 > 外部趋势， 分类权重）

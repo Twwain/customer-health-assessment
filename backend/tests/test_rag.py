@@ -168,6 +168,19 @@ def test_get_vector_store_memory(monkeypatch):
     assert isinstance(store, InMemoryVectorStore)
 
 
+def test_chroma_failure_does_not_fallback_to_memory(monkeypatch):
+    import services.rag.vector_store as vs
+
+    monkeypatch.setattr(config, "KNOWLEDGE_VECTOR_STORE", "chroma")
+    monkeypatch.setattr(vs, "_CHROMA_STORE", None)
+    monkeypatch.setattr(
+        vs, "ChromaVectorStore",
+        lambda: (_ for _ in ()).throw(RuntimeError("chroma down")),
+    )
+    with pytest.raises(RuntimeError, match="持久化向量库不可用"):
+        vs.get_vector_store()
+
+
 # ══════════════════════════ 重排 ════════════════════════════════════════════
 
 
@@ -283,6 +296,54 @@ def test_delete_cleans_vectors(memory_store, db, fake_embed):
     assert before > 0
     assert svc.delete_item(item.id) is True
     assert memory_store.count() == 0
+
+
+def test_delete_vector_failure_keeps_durable_tombstone(memory_store, db, fake_embed, monkeypatch):
+    from models import KnowledgeDocument
+    from services.rag.knowledge_base import KnowledgeIndexError
+
+    svc = _kb(db, memory_store, fake_embed)
+    doc = svc.create_from_upload(
+        title="敏感资料", category="内部规范", filename="m.md", raw=METHODOLOGY_MD.encode("utf-8")
+    )
+    item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).one()
+    svc.approve_item(item.id)
+    monkeypatch.setattr(memory_store, "delete", lambda ids: (_ for _ in ()).throw(RuntimeError("down")))
+
+    with pytest.raises(KnowledgeIndexError, match="知识已下线"):
+        svc.delete_item(item.id)
+    db.refresh(item)
+    db.refresh(doc)
+    assert item.status == "proposed"
+    assert doc.status == "proposed"
+    assert doc.index_status == "deleting"
+    assert svc.search("回款逾期") == []
+
+
+def test_revoke_uses_sql_status_when_vector_metadata_update_fails(
+    memory_store, db, fake_embed, monkeypatch
+):
+    svc = _kb(db, memory_store, fake_embed)
+    doc = svc.create_from_upload(
+        title="待撤销资料", category="内部规范", filename="m.md", raw=METHODOLOGY_MD.encode("utf-8")
+    )
+    item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).one()
+    svc.approve_item(item.id)
+    monkeypatch.setattr(
+        memory_store, "update_metadatas",
+        lambda ids, metas: (_ for _ in ()).throw(RuntimeError("down")),
+    )
+    svc.revoke_item(item.id)
+    assert svc.search("回款逾期") == []
+
+
+def test_vector_reconcile_cleans_orphans(memory_store, db, fake_embed):
+    svc = _kb(db, memory_store, fake_embed)
+    memory_store.add(["orphan"], ["孤儿"], [[1.0] * 64], [{"status": "canonical"}])
+    result = svc.reconcile_vectors(cleanup_orphans=True)
+    assert result["orphan_ids"] == ["orphan"]
+    assert result["orphans_cleaned"] == 1
+    assert "orphan" not in memory_store.list_ids()
 
 
 def test_reindex(db, memory_store, fake_embed):
@@ -646,11 +707,11 @@ def test_estimated_tokens_conservatively_counts_non_ascii():
     assert _estimate_tokens("😀😀") == 8
 
 
-def test_reindex_failure_reports_zero_and_clears_stale_chunk_count(
+def test_reindex_failure_preserves_last_good_index(
     db, memory_store, fake_embed, monkeypatch
 ):
     from models import KnowledgeChunk
-    from services.rag.knowledge_base import KnowledgeBaseService
+    from services.rag.knowledge_base import KnowledgeBaseService, KnowledgeIndexError
 
     svc = KnowledgeBaseService(db, store=memory_store, embed_func=fake_embed)
     doc = svc.create_from_upload(
@@ -663,18 +724,23 @@ def test_reindex_failure_reports_zero_and_clears_stale_chunk_count(
     assert doc.chunk_count > 0
 
     monkeypatch.setattr(config, "UPLOAD_MAX_EXTRACTED_CHARS", 5)
-    reindexed = svc.reindex()
+    old_count = doc.chunk_count
+    old_vector_ids = {
+        row.vector_id for row in db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.document_id == doc.id).all()
+    }
+    with pytest.raises(KnowledgeIndexError) as raised:
+        svc.reindex()
     db.refresh(doc)
 
-    assert reindexed == 0
-    assert doc.index_status == "failed"
-    assert doc.chunk_count == 0
-    assert (
-        db.query(KnowledgeChunk)
-        .filter(KnowledgeChunk.document_id == doc.id)
-        .count()
-        == 0
-    )
+    assert raised.value.succeeded == 0
+    assert raised.value.failed[0]["document_id"] == doc.id
+    assert doc.index_status == "indexed"
+    assert doc.chunk_count == old_count
+    assert {
+        row.vector_id for row in db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.document_id == doc.id).all()
+    } == old_vector_ids
 
 
 def test_office_zip_entry_limit(monkeypatch):
@@ -688,6 +754,24 @@ def test_office_zip_entry_limit(monkeypatch):
         archive.writestr("word/document.xml", "document")
     monkeypatch.setattr(config, "UPLOAD_MAX_ZIP_ENTRIES", 1)
     with pytest.raises(ParseError, match="ZIP 条目"):
+        validate_upload(
+            "sample.docx",
+            raw.getvalue(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+
+def test_office_zip_compression_ratio_limit(monkeypatch):
+    import zipfile
+
+    from services.rag.parser import validate_upload
+
+    raw = io.BytesIO()
+    with zipfile.ZipFile(raw, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "x" * 20_000)
+        archive.writestr("word/document.xml", "x" * 20_000)
+    monkeypatch.setattr(config, "UPLOAD_MAX_COMPRESSION_RATIO", 2.0)
+    with pytest.raises(ParseError, match="压缩比异常"):
         validate_upload(
             "sample.docx",
             raw.getvalue(),

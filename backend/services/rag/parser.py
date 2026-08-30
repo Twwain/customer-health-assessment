@@ -56,6 +56,12 @@ def _validate_office_zip(raw: bytes, ext: str) -> None:
             if total_size > config.UPLOAD_MAX_DECOMPRESSED_BYTES:
                 limit_mb = config.UPLOAD_MAX_DECOMPRESSED_BYTES // (1024 * 1024)
                 raise ParseError(f"Office 文件解压后超过 {limit_mb}MB 上限")
+            compressed_size = sum(info.compress_size for info in infos)
+            ratio = total_size / max(compressed_size, 1)
+            if ratio > config.UPLOAD_MAX_COMPRESSION_RATIO:
+                raise ParseError(
+                    "Office 文件压缩比异常，疑似压缩炸弹"
+                )
             names = {info.filename.replace("\\", "/") for info in infos}
             if any(
                 name.startswith("/") or ".." in name.split("/")

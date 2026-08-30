@@ -38,6 +38,10 @@ from services.ai.prompt_templates import get_template
 from . import tools
 
 
+def _thinking_extra(enabled: bool) -> dict[str, Any] | None:
+    return {"thinking": {"type": "enabled"}} if enabled else None
+
+
 @dataclass
 class AgentResult:
     text: str
@@ -54,10 +58,21 @@ def _format_retrievals(references: list[dict]) -> str:
     if not references:
         return ""
     lines = ["## 知识库参考资料（RAG 检索命中，作答时请标注来源）"]
+    remaining = config.RAG_MODEL_CONTEXT_CHAR_BUDGET
     for i, ref in enumerate(references, 1):
+        if remaining <= 0:
+            break
         lines.append(f"### 参考 {i}（{ref.get('category', '')} · 《{ref.get('title', '')}》）")
-        lines.append(ref.get("snippet", "") or "")
+        content = ref.get("_model_content") or ref.get("snippet", "") or ""
+        content = content[:remaining]
+        remaining -= len(content)
+        lines.append(tools.guardrails.wrap_untrusted(content, "rag"))
     return "\n\n".join(lines)
+
+
+def _display_references(references: list[dict]) -> list[dict]:
+    """移除只供模型使用的正文，前端和消息记录只接收 Reference DTO。"""
+    return [{k: v for k, v in ref.items() if not k.startswith("_")} for ref in references]
 
 
 class AssessmentStrategyAgent:
@@ -80,6 +95,7 @@ class AssessmentStrategyAgent:
         self._tool_ms = 0
         self._retrieve_ms = 0
         self._rag_timings: dict[str, int] = {}
+        self._total_tokens = 0
 
     def _check_cancelled(self) -> None:
         if self._cancel_event is not None and self._cancel_event.is_set():
@@ -105,6 +121,7 @@ class AssessmentStrategyAgent:
         finally:
             duration_ms = int((time.monotonic() - started) * 1000)
             completion_tokens = int(usage.get("completion_tokens") or 0)
+            self._total_tokens += int(usage.get("total_tokens") or 0)
             self._llm_calls.append(
                 {
                     "phase": phase,
@@ -127,6 +144,8 @@ class AssessmentStrategyAgent:
                     ),
                 }
             )
+            if self._total_tokens > config.CHAT_TURN_TOKEN_BUDGET:
+                raise LLMError("本轮 Agent 已达到总 token 预算")
 
     # ── 节点 ────────────────────────────────────────────────────────────────
     def _call_llm(self, messages: list[LLMMessage], template) -> str:
@@ -137,7 +156,7 @@ class AssessmentStrategyAgent:
             temperature=template.temperature,
             max_tokens=max_tokens,
             on_usage=lambda value: usage.update(value),
-            extra={"thinking": {"type": "enabled" if self._thinking_enabled else "disabled"}},
+            extra=_thinking_extra(self._thinking_enabled),
         )
         return self._consume_stream(
             stream, phase="refine", messages=messages, max_tokens=max_tokens, usage=usage
@@ -184,7 +203,7 @@ class AssessmentStrategyAgent:
                 tools=tools.TOOL_SCHEMAS if tools_enabled else None,
                 on_tool_calls=lambda tcs: tool_calls.extend(tcs),
                 on_usage=lambda value: usage.update(value),
-                extra={"thinking": {"type": "enabled" if self._thinking_enabled else "disabled"}},
+                extra=_thinking_extra(self._thinking_enabled),
             )
             phase = "reason" if tool_rounds == 0 else "tool_followup"
             text = self._consume_stream(
@@ -214,7 +233,7 @@ class AssessmentStrategyAgent:
                     max_tokens=max_tokens,
                     tools=None,
                     on_usage=lambda value: usage.update(value),
-                    extra={"thinking": {"type": "enabled" if self._thinking_enabled else "disabled"}},
+                    extra=_thinking_extra(self._thinking_enabled),
                 )
                 final_text = self._consume_stream(
                     stream, phase="tool_final", messages=messages,
@@ -274,6 +293,7 @@ class AssessmentStrategyAgent:
         self._tool_ms = 0
         self._retrieve_ms = 0
         self._rag_timings = {}
+        self._total_tokens = 0
         max_iter = max_iterations or self._max
         today = datetime.date.today().isoformat()
         template = get_template(scenario)
@@ -376,7 +396,7 @@ class AssessmentStrategyAgent:
 
         return AgentResult(
             text=text,
-            references=references,
+            references=_display_references(references),
             degraded=False,
             degraded_items=[],
             warnings=warnings,
@@ -400,7 +420,7 @@ class AssessmentStrategyAgent:
         text, items = build_degraded_reply(scenario, ctx, question)
         return AgentResult(
             text=text,
-            references=references,
+            references=_display_references(references),
             degraded=True,
             degraded_items=items,
             warnings=[f"LLM 不可用，已降级为规则引擎：{exc}"],

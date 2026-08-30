@@ -13,6 +13,7 @@
 | POST   | /api/chat/sessions/{id}/regenerate       | 重新生成上一条回复（原型「🔄 重新生成」） |
 | POST   | /api/chat/messages/{id}/feedback         | 消息点赞/点踩 |
 | GET    | /api/chat/status                         | LLM 可用性（降级提示条数据源） |
+| GET    | /api/chat/metrics                        | 对话运行指标分布（不含业务正文） |
 
 流式响应统一 ``text/event-stream``，事件协议见 ``services.ai.chat_engine`` 文档。
 """
@@ -38,7 +39,7 @@ from schemas import (
     MessageFeedbackRequest,
     MessageFeedbackResponse,
 )
-from services.ai import chat_engine, llm_adapter
+from services.ai import chat_engine, llm_adapter, metrics as chat_metrics
 from services.ai.prompt_templates import PromptTemplateError, load_prompt_templates
 
 router = APIRouter(prefix="/chat", tags=["AI 对话"])
@@ -264,11 +265,21 @@ def regenerate(session_id: int, payload: ChatRequest | None = None, db: Session 
         customer_id=payload.customer_id,
         persist_user=False,          # 提问已在库里，重跑不再重复落库
         exclude_message_id=exclude_id,
+        supersede_message_id=exclude_id,
     )
     return ChatTurnResponse(**result)
 
 
 # ── 反馈与状态 ──────────────────────────────────────────────────────────────
+
+
+@router.get("/metrics")
+def chat_metrics_distribution(
+    hours: int = Query(default=168, ge=1, le=2160),
+    db: Session = Depends(get_db),
+):
+    """查看最近 1 小时至 90 天的 token、耗时、降级和资源边界分布。"""
+    return chat_metrics.summarize(db, hours=hours)
 
 
 @router.post("/messages/{message_id}/feedback", response_model=MessageFeedbackResponse)
