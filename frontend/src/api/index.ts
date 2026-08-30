@@ -14,6 +14,7 @@ import type {
   FactorUpdateResponse,
   KnowledgeItemListResponse,
   KnowledgeItemResponse,
+  KnowledgeReindexJobStatusResponse,
   KnowledgeSearchResponse,
   KnowledgeStatusResponse,
   LLMStatusResponse,
@@ -138,7 +139,7 @@ export const knowledge = {
       .then((r) => r.data),
   reindexJobStatus: (jobId: string) =>
     http
-      .get<{ job_id: string; status: "running" | "ready" | "error"; reindexed: number; error?: string }>(
+      .get<KnowledgeReindexJobStatusResponse>(
         `/knowledge/reindex/jobs/${jobId}`,
       )
       .then((r) => r.data),

@@ -195,7 +195,27 @@ CHAT_DEGRADED_CHUNK_SIZE = _env_int("CHAT_DEGRADED_CHUNK_SIZE", 24)
 # Agent 线程/事件队列硬边界，防止断线或慢客户端造成无界内存与后台调用堆积。
 CHAT_AGENT_EVENT_QUEUE_MAX = max(8, _env_int("CHAT_AGENT_EVENT_QUEUE_MAX", 128))
 CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 120.0))
+CHAT_AGENT_CANCEL_GRACE_SECONDS = max(
+    0.1, _env_float("CHAT_AGENT_CANCEL_GRACE_SECONDS", 1.0)
+)
 CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 32_000))
+# 工具预算同时限制模型单轮并行调用、整轮累计调用和回填到 Prompt 的总字符数。
+CHAT_TOOL_CALLS_PER_ROUND = max(1, _env_int("CHAT_TOOL_CALLS_PER_ROUND", 4))
+CHAT_TOOL_CALLS_PER_TURN = max(
+    CHAT_TOOL_CALLS_PER_ROUND, _env_int("CHAT_TOOL_CALLS_PER_TURN", 10)
+)
+CHAT_TOOL_RESULT_CHARS_PER_TURN = max(
+    1000, _env_int("CHAT_TOOL_RESULT_CHARS_PER_TURN", 12_000)
+)
+CHAT_TOOL_ARGUMENT_CHARS_PER_TURN = max(
+    1000, _env_int("CHAT_TOOL_ARGUMENT_CHARS_PER_TURN", 8_000)
+)
+# 交互快捷场景优先首字速度：客户/RAG 已在 Agent reason 前预取，不再重复工具调用或精炼。
+# PDF 报告单独保留质量优先的精炼轮次。
+CHAT_AGENT_MAX_ITERATIONS = max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 1))
+REPORT_AGENT_MAX_ITERATIONS = max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 2))
+# 运行指标只用于近期容量观察，超过保留期的数据在写入新指标时自动清理。
+CHAT_METRICS_RETENTION_DAYS = max(1, _env_int("CHAT_METRICS_RETENTION_DAYS", 90))
 
 
 # 异步 PDF 导出任务（内存态）：进程内最多保留的任务数，超出后清理最早完成的
@@ -213,6 +233,19 @@ KNOWLEDGE_VECTOR_STORE = os.getenv("KNOWLEDGE_VECTOR_STORE", "chroma")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", os.path.join(BASE_DIR, "data", "chroma"))
 KNOWLEDGE_DATA_DIR = os.getenv("KNOWLEDGE_DATA_DIR", os.path.join(BASE_DIR, "data", "knowledge"))
 KNOWLEDGE_COLLECTION = os.getenv("KNOWLEDGE_COLLECTION", "customer_health_kb")
+# metadata outbox/tombstone 短周期自动重试；完整 ID 对账放到低频后台任务，
+# readiness 只读取计数与最近一次对账结果。
+KNOWLEDGE_MAINTENANCE_INTERVAL_SECONDS = max(
+    1.0, _env_float("KNOWLEDGE_MAINTENANCE_INTERVAL_SECONDS", 5.0)
+)
+KNOWLEDGE_RECONCILE_INTERVAL_SECONDS = max(
+    KNOWLEDGE_MAINTENANCE_INTERVAL_SECONDS,
+    _env_float("KNOWLEDGE_RECONCILE_INTERVAL_SECONDS", 300.0),
+)
+KNOWLEDGE_MAINTENANCE_MAX_BACKOFF_SECONDS = max(
+    KNOWLEDGE_MAINTENANCE_INTERVAL_SECONDS,
+    _env_float("KNOWLEDGE_MAINTENANCE_MAX_BACKOFF_SECONDS", 300.0),
+)
 
 # 知识文档上传/解析资源护栏。限制在调用解析器和 Embedding 之前生效；
 # Office 文件还会检查 ZIP 条目数与声明的解压后总大小。

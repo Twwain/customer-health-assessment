@@ -11,7 +11,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
-from database import engine, Base, SessionLocal, migrate_drop_legacy_customer_columns
+from database import (
+    Base,
+    SessionLocal,
+    engine,
+    migrate_add_chat_message_superseded_column,
+    migrate_drop_legacy_customer_columns,
+)
 import config
 from request_limits import AIRateLimitMiddleware, UploadBodyLimitMiddleware
 from routers import assessment, chat, customers, knowledge
@@ -49,10 +55,10 @@ class SPAStaticFiles(StaticFiles):
 
 
 def _migrate_legacy_data() -> None:
-    """启动时执行幂等数据迁移（历史知识分类名校正等）。失败不阻断启动。
+    """启动时执行非结构性的幂等数据迁移。
 
-    顺序约定：先补 schema 列（迁移后的 ORM 查询会引用新列），再做数据迁移；
-    每个迁移独立 try/except，单个失败不影响后续步骤，避免"缺列库带病启动"。
+    必需的 schema 迁移已由 ``_migrate_required_schema`` 先行执行且失败会阻断启动；
+    这里的分类和种子数据迁移彼此隔离，避免单项失败影响其余迁移。
     """
     import logging
 
@@ -68,20 +74,32 @@ def _migrate_legacy_data() -> None:
     ]
     try:
         from services.rag.knowledge_base import (
-            migrate_add_industry_column,
+            KnowledgeBaseService,
             migrate_legacy_categories,
             migrate_seed_knowledge_status,
         )
-        from services.rag.vector_store import get_vector_store
+    except Exception as exc:  # pragma: no cover - 依赖导入失败不影响启动
+        logger.warning("SQL 数据迁移准备失败：%s", exc)
+    else:
+        store = None
+        try:
+            from services.rag.vector_store import get_vector_store
 
-        store = get_vector_store()
+            store = get_vector_store()
+        except Exception as exc:  # Chroma fail-closed 只影响向量相关迁移
+            logger.warning("向量数据迁移准备失败，SQL 迁移仍会执行：%s", exc)
         steps.extend([
-            ("补 knowledge_items.industry 列", lambda: migrate_add_industry_column(db, store=store)),
             ("校正历史知识分类名", lambda: migrate_legacy_categories(db, store=store)),
             ("seed 知识状态提升为 canonical", lambda: migrate_seed_knowledge_status(db, store=store)),
         ])
-    except Exception as exc:  # pragma: no cover - 依赖导入失败不影响启动
-        logger.warning("数据迁移准备失败：%s", exc)
+        if store is not None:
+            # reconcile 内部会先重试 deleting tombstone，再检查缺失/孤儿向量。
+            steps.append((
+                "对账 SQLite 与持久化向量库",
+                lambda: KnowledgeBaseService(db, store=store).reconcile_vectors(
+                    cleanup_orphans=True
+                ),
+            ))
     try:
         for name, step in steps:
             try:
@@ -93,14 +111,36 @@ def _migrate_legacy_data() -> None:
         db.close()
 
 
+def _migrate_required_schema() -> None:
+    """执行 ORM 当前版本必需的 SQL 补列；失败时阻止带病启动。"""
+    from services.rag.knowledge_base import migrate_add_industry_column
+
+    db = SessionLocal()
+    try:
+        migrate_add_industry_column(db)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """应用启动时初始化数据库；单纯导入 ``main`` 不再产生写库副作用。"""
     Base.metadata.create_all(bind=engine)
     # 结构迁移是当前模型契约的一部分，失败时必须阻止服务启动，不能带病运行。
     migrate_drop_legacy_customer_columns()
+    migrate_add_chat_message_superseded_column()
+    _migrate_required_schema()
     _migrate_legacy_data()
-    yield
+    from services.rag.knowledge_base import (
+        start_vector_maintenance,
+        stop_vector_maintenance,
+    )
+
+    start_vector_maintenance()
+    try:
+        yield
+    finally:
+        stop_vector_maintenance()
 
 
 app = FastAPI(title="客情评估智能体", lifespan=lifespan)
@@ -138,6 +178,74 @@ app.include_router(knowledge.router, prefix="/api")
 @app.get("/api")
 def root():
     return {"message": "客情评估智能体 API"}
+
+
+@app.get("/api/readiness")
+def readiness():
+    """生产就绪探针：向量库不可用或与 SQLite 脱节时明确返回 503。"""
+    db = None
+    try:
+        from services.rag.vector_store import get_vector_store
+        from services.rag.knowledge_base import KnowledgeBaseService
+
+        store = get_vector_store()
+        store.count()
+        db = SessionLocal()
+        integrity = KnowledgeBaseService(db, store=store).inspect_vector_health()
+        if not integrity["consistent"]:
+            problems = []
+            if integrity["missing_ids"]:
+                problems.append(f"缺失 {len(integrity['missing_ids'])} 条向量")
+            if integrity["orphan_ids"]:
+                problems.append(f"存在 {len(integrity['orphan_ids'])} 条孤儿向量")
+            if integrity["metadata_pending"]:
+                problems.append(
+                    f"有 {integrity['metadata_pending']} 条 metadata 等待同步"
+                )
+            if integrity.get("deleting_pending"):
+                problems.append(
+                    f"有 {integrity['deleting_pending']} 个文档等待物理清理"
+                )
+            if integrity.get("migration_required"):
+                problems.append("Embedding 配置变更后尚未完成全量重索引")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ready": False,
+                    "reason": (
+                        "向量索引与数据库不一致："
+                        + "，".join(problems)
+                        + "；请执行向量对账或重索引"
+                    ),
+                    "integrity": {
+                        "sql_vectors": integrity["sql_vectors"],
+                        "store_vectors": integrity["store_vectors"],
+                        "missing_vectors": len(integrity["missing_ids"]),
+                        "orphan_vectors": len(integrity["orphan_ids"]),
+                        "metadata_pending": integrity["metadata_pending"],
+                        "deleting_pending": integrity.get("deleting_pending", 0),
+                        "migration_required": integrity.get("migration_required", False),
+                        "affected_documents": integrity["affected_documents"][:20],
+                    },
+                },
+            )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"ready": False, "reason": f"持久化向量库不可用：{exc}"},
+        )
+    finally:
+        if db is not None:
+            db.close()
+    return {
+        "ready": True,
+        "vector_store": type(store).__name__,
+        "integrity": {
+            "sql_vectors": integrity["sql_vectors"],
+            "store_vectors": integrity["store_vectors"],
+            "metadata_pending": integrity["metadata_pending"],
+        },
+    }
 
 
 # 生产模式：serve 前端静态文件

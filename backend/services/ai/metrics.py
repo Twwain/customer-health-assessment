@@ -74,6 +74,15 @@ class TurnMetricObserver:
     def __post_init__(self) -> None:
         self.started = time.monotonic()
 
+    def consume_usage(self, data: dict[str, Any]) -> None:
+        """接收不依赖客户端消费进度的成本快照，断线时仍能持久化。"""
+        self.tokens_used = max(self.tokens_used, int(data.get("tokens_used") or 0))
+        call = data.get("llm_call") or {}
+        if call:
+            timings = dict(self.timings or {})
+            timings["llm_call_count"] = int(timings.get("llm_call_count") or 0) + 1
+            self.timings = timings
+
     def consume(self, event: Any) -> None:
         data = event.data or {}
         if event.type == "start":
@@ -84,10 +93,19 @@ class TurnMetricObserver:
             code = _error_code(str(data.get("message") or ""))
             if code != "generation_error":
                 self.error_code = code
+        elif event.type == "usage":
+            self.tokens_used = max(self.tokens_used, int(data.get("tokens_used") or 0))
         elif event.type == "error":
             self.error_code = _error_code(str(data.get("message") or ""))
             self.status = "timeout" if self.error_code == "turn_timeout" else "error"
-            self.timings = data.get("timings") or self.timings
+            observed = dict(self.timings or {})
+            incoming = dict(data.get("timings") or {})
+            merged = {**observed, **incoming}
+            merged["llm_call_count"] = max(
+                int(observed.get("llm_call_count") or 0),
+                int(incoming.get("llm_call_count") or 0),
+            )
+            self.timings = merged
             self.tokens_used = int(data.get("tokens_used") or self.tokens_used)
         elif event.type == "done":
             self.tokens_used = int(data.get("tokens_used") or 0)
@@ -95,8 +113,11 @@ class TurnMetricObserver:
             self.model = str(data.get("model") or self.model)
             if data.get("degraded"):
                 self.status = "degraded"
-            elif self.error_code:
-                self.status = "error"
+            elif self.error_code == "turn_timeout":
+                self.status = "timeout"
+            elif data.get("incomplete"):
+                self.status = "partial"
+                self.error_code = self.error_code or "generation_interrupted"
             else:
                 self.status = "success"
 
@@ -128,6 +149,10 @@ class TurnMetricObserver:
             error_code=self.error_code,
         )
         try:
+            cutoff = utcnow() - datetime.timedelta(
+                days=config.CHAT_METRICS_RETENTION_DAYS
+            )
+            db.query(ChatTurnMetric).filter(ChatTurnMetric.created_at < cutoff).delete()
             db.add(metric)
             db.commit()
         except Exception as exc:  # 指标故障绝不能影响主对话

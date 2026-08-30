@@ -167,7 +167,7 @@ def test_pdf_job_customer_mismatch_returns_404(client, customer, db):
 def test_pdf_job_error_state_reported(client, customer, monkeypatch):
     import routers.assessment as mod
 
-    def _failing_job(job_id, customer_id, include_ai, bind):
+    def _failing_job(job_id, customer_id, include_ai, bind, cancel_event, deadline):
         with mod._pdf_jobs_lock:
             job = mod._pdf_jobs.get(job_id)
             if job is not None:

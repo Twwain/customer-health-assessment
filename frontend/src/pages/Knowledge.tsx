@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { knowledge } from "../api";
 import type {
   KnowledgeItemResponse,
+  KnowledgeReindexJobStatusResponse,
   KnowledgeSearchResult,
   KnowledgeStatusResponse,
 } from "../types";
@@ -26,12 +27,7 @@ export default function Knowledge() {
   const [metaItem, setMetaItem] = useState<KnowledgeItemResponse | null>(null);
   const [deleteItem, setDeleteItem] = useState<KnowledgeItemResponse | null>(null);
   const [reindexing, setReindexing] = useState(false);
-  const [reindexJob, setReindexJob] = useState<{
-    id: string;
-    status: "running" | "ready" | "error";
-    reindexed: number;
-    error?: string;
-  } | null>(null);
+  const [reindexJob, setReindexJob] = useState<KnowledgeReindexJobStatusResponse | null>(null);
   const reindexPollRef = useRef<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
@@ -132,10 +128,10 @@ export default function Knowledge() {
     setReindexJob(null);
     try {
       const job = await knowledge.reindexJob();
-      setReindexJob({ id: job.job_id, status: "running", reindexed: 0 });
+      setReindexJob({ job_id: job.job_id, status: "running", reindexed: 0 });
     } catch (e) {
       const message = e instanceof Error ? e.message : "重建索引任务创建失败";
-      setReindexJob({ id: "", status: "error", reindexed: 0, error: message });
+      setReindexJob({ job_id: "", status: "error", reindexed: 0, error: message });
       notify(message, "error");
       setReindexing(false);
     }
@@ -143,22 +139,19 @@ export default function Knowledge() {
 
   useEffect(() => {
     if (!reindexJob || reindexJob.status !== "running") return;
-    const jobId = reindexJob.id;
+    const jobId = reindexJob.job_id;
     stopReindexPolling();
     reindexPollRef.current = window.setInterval(async () => {
       try {
         const status = await knowledge.reindexJobStatus(jobId);
-        if (status.status === "ready" || status.status === "error") {
+        if (status.status === "ready" || status.status === "partial" || status.status === "error") {
           stopReindexPolling();
           setReindexing(false);
-          setReindexJob({
-            id: jobId,
-            status: status.status,
-            reindexed: status.reindexed ?? 0,
-            error: status.error,
-          });
+          setReindexJob(status);
           if (status.status === "ready") {
             notify(`重建索引完成：重新索引 ${status.reindexed ?? 0} 条`, "success");
+          } else if (status.status === "partial") {
+            notify(`重建索引部分完成：成功 ${status.reindexed ?? 0} 条，失败 ${status.failed_documents?.length ?? 0} 条`, "info");
           } else {
             notify(`重建索引失败：${status.error || "未知错误"}`, "error");
           }
@@ -167,7 +160,7 @@ export default function Knowledge() {
         stopReindexPolling();
         setReindexing(false);
         const message = e instanceof Error ? e.message : "任务状态获取失败";
-        setReindexJob({ id: jobId, status: "error", reindexed: 0, error: message });
+        setReindexJob({ job_id: jobId, status: "error", reindexed: 0, error: message });
         notify(message, "error");
       }
     }, 1000);
@@ -203,8 +196,13 @@ export default function Knowledge() {
             ✓ 已完成，共重建 {reindexJob.reindexed} 条
           </span>
         )}
+        {reindexJob?.status === "partial" && (
+          <span className="rounded-lg border border-info/30 bg-info-soft px-3 py-2 text-[13px] text-info">
+            ⚠ 部分完成：成功 {reindexJob.reindexed} 条，失败 {reindexJob.failed_documents?.length ?? 0} 条
+          </span>
+        )}
         {reindexJob?.status === "error" && (
-          <span className="max-w-xs truncate rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger" title={reindexJob.error}>
+          <span className="max-w-xs truncate rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger" title={reindexJob.error ?? undefined}>
             ⚠ 重建失败：{reindexJob.error || "未知错误"}
           </span>
         )}
@@ -215,6 +213,17 @@ export default function Knowledge() {
           ⬆ 上传文档
         </button>
       </div>
+
+      {!!reindexJob?.failed_documents?.length && (
+        <div className="mb-5 rounded-lg border border-danger/30 bg-danger-soft p-3 text-[13px] text-danger" role="status">
+          <p className="font-medium">以下文档重建失败，请处理原因后重试：</p>
+          <ul className="mt-2 list-inside list-disc space-y-1 break-words">
+            {reindexJob.failed_documents.map((doc) => (
+              <li key={doc.document_id}>{doc.title || `文档 #${doc.document_id}`}：{doc.error}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="mb-5 flex flex-col gap-2 lg:flex-row lg:items-center">
         <input

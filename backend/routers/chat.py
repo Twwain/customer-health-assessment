@@ -81,7 +81,10 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
             func.count(ChatMessage.id),
             func.max(ChatMessage.id),
         )
-        .filter(ChatMessage.session_id.in_(session_ids))
+        .filter(
+            ChatMessage.session_id.in_(session_ids),
+            ChatMessage.superseded_by_id.is_(None),
+        )
         .group_by(ChatMessage.session_id)
         .all()
     )
@@ -186,7 +189,11 @@ def get_session(session_id: int, db: Session = Depends(get_db)):
     return ChatSessionDetail(
         **base.model_dump(),
         system_prompt=session.system_prompt,
-        messages=[ChatMessageItem.model_validate(m) for m in session.messages],
+        messages=[
+            ChatMessageItem.model_validate(m)
+            for m in session.messages
+            if m.superseded_by_id is None
+        ],
     )
 
 

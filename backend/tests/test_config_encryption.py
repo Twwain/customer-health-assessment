@@ -44,6 +44,8 @@ def test_decrypt_env_with_env_key_roundtrip(monkeypatch):
 def test_decrypt_env_missing_key_returns_raw_with_warning(monkeypatch, caplog):
     monkeypatch.delenv("CH_SECRET_KEY", raising=False)
     monkeypatch.delenv("SECRET_KEY_FILE", raising=False)
+    # 隔离开发机可能存在的 .ch_secret，确保本用例只验证“密钥缺失”分支。
+    monkeypatch.setattr(config, "_load_secret_key", lambda: None)
     with caplog.at_level(logging.WARNING, logger="config"):
         assert config._decrypt_env("enc:some-token") == "enc:some-token"
     assert any("未找到 Fernet 密钥" in r.message for r in caplog.records)

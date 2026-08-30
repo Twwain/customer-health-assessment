@@ -34,7 +34,7 @@ KNOWLEDGE_CATEGORIES = ("内部规范", "内部指标", "外部指标", "对话�
 KNOWLEDGE_SOURCE_TYPES = ("文档", "对话沉淀")
 KNOWLEDGE_STATUSES = ("proposed", "canonical")
 KNOWLEDGE_STORAGES = ("vector", "structured")
-INDEX_STATUSES = ("pending", "indexing", "indexed", "failed", "empty")
+INDEX_STATUSES = ("pending", "indexing", "indexed", "failed", "empty", "deleting")
 
 
 class Customer(Base):
@@ -140,6 +140,10 @@ class ChatMessage(Base):
     tokens_used: Mapped[int] = mapped_column(Integer, default=0, comment="Token 消耗")
     feedback: Mapped[str] = mapped_column(String(10), default="", comment="用户反馈：up / down")
     degraded: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否为 LLM 降级兜底回复")
+    superseded_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True, index=True,
+        comment="重新生成成功后指向替代该回复的新消息；旧回复保留用于审计",
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
@@ -155,7 +159,7 @@ class ChatTurnMetric(Base):
     scenario: Mapped[str] = mapped_column(String(30), default="free_qa", index=True)
     status: Mapped[str] = mapped_column(
         String(20), default="success", index=True,
-        comment="success / degraded / error / timeout / cancelled",
+        comment="success / partial / degraded / error / timeout / cancelled",
     )
     model: Mapped[str] = mapped_column(String(100), default="")
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
@@ -225,6 +229,34 @@ class KnowledgeChunk(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     document: Mapped["KnowledgeDocument"] = relationship(back_populates="chunks")
+
+
+class KnowledgeVectorMetadataOutbox(Base):
+    """向量 metadata 的持久化待发送队列。
+
+    SQLite 中的切片 metadata 是权威副本；Chroma 暂时不可用时保留最新写入，
+    由当前请求或启动对账幂等重试，避免分类/状态更新永久丢失。
+    """
+
+    __tablename__ = "knowledge_vector_metadata_outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    vector_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, default=utcnow, server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        server_default=func.now(),
+        onupdate=utcnow,
+        nullable=False,
+    )
 
 
 class KnowledgeItem(Base):

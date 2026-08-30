@@ -5,6 +5,9 @@
 """
 
 import json
+import datetime
+import threading
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -14,9 +17,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import config
-from database import Base, get_db
+from database import Base, get_db, migrate_add_chat_message_superseded_column, utcnow
 from models import (
-    AssessmentHistory, ChatMessage, ChatSession, Customer,
+    AssessmentHistory, ChatMessage, ChatSession, ChatTurnMetric, Customer,
     KnowledgeChunk, KnowledgeDocument, KnowledgeItem,
 )
 from services import assessment_history
@@ -566,7 +569,8 @@ def test_strategy_scenario_parses_and_snapshots_items(db, customer):
         '"urgency": "high", "reason": "健康分低于 25", "action": "15 个工作日内召集评审", '
         '"expected_outcome": "完成挽留/退出决策"}]}\n```'
     )
-    llm_adapter.set_chat_adapter(FakeAdapter(chunks=[payload]))
+    adapter = FakeAdapter(chunks=[payload])
+    llm_adapter.set_chat_adapter(adapter)
     assessment_history.record_assessment(db, customer)
 
     session = chat_engine.create_session(db, customer_id=customer.id, scenario="strategy")
@@ -658,8 +662,12 @@ def test_regenerate_replaces_last_answer(db, customer, fake_llm):
         exclude_message_id=exclude_id, supersede_message_id=exclude_id,
     )
     assistants = db.query(ChatMessage).filter(ChatMessage.role == "assistant").all()
-    assert len(assistants) == 1
-    assert assistants[0].content == "换个说法的回答"
+    assert len(assistants) == 2
+    active = [message for message in assistants if message.superseded_by_id is None]
+    old = [message for message in assistants if message.superseded_by_id is not None]
+    assert len(active) == len(old) == 1
+    assert active[0].content == "换个说法的回答"
+    assert old[0].superseded_by_id == active[0].id
     assert db.query(ChatMessage).filter(ChatMessage.role == "user").count() == 1
 
 
@@ -866,7 +874,7 @@ def test_send_message_non_stream_returns_json(client, customer, fake_llm):
     assert body["message"]["content"] == "你好，这是测试回复。"
     assert body["assessment"]["level"] == "高危"
     assert body["timings"]["total_ms"] == body["latency_ms"]
-    assert fake_llm.extra_args[-1] is None
+    assert fake_llm.extra_args[-1] == {"thinking": {"type": "disabled"}}
 
 
 def test_chat_metrics_records_and_aggregates_real_turn_shape(
@@ -1249,6 +1257,141 @@ def test_stream_parses_sse_and_usage(monkeypatch):
     assert usage["total_tokens"] == 42
 
 
+def test_stream_cancel_event_actively_closes_blocking_http_response(monkeypatch):
+    class BlockingResponse(_FakeResponse):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.closed = threading.Event()
+
+        def iter_lines(self):
+            self.started.set()
+            assert self.closed.wait(2)
+            raise RuntimeError("closed")
+            yield  # pragma: no cover
+
+        def close(self):
+            self.closed.set()
+
+    response = BlockingResponse()
+    adapter, _ = _adapter(monkeypatch, [response], max_retries=0)
+    cancelled = threading.Event()
+    errors: list[BaseException] = []
+
+    def consume():
+        try:
+            list(adapter.stream_chat_completion(
+                [{"role": "user", "content": "hi"}], cancel_event=cancelled
+            ))
+        except BaseException as exc:  # 由主线程断言取消类型
+            errors.append(exc)
+
+    worker = threading.Thread(target=consume)
+    worker.start()
+    assert response.started.wait(1)
+    cancelled.set()
+    worker.join(1)
+    assert not worker.is_alive()
+    assert response.closed.is_set()
+    assert len(errors) == 1 and isinstance(errors[0], LLMError)
+
+
+def test_stream_cancel_closes_request_before_response_headers(monkeypatch):
+    """等待响应头期间也必须响应取消，而不是等 HTTP timeout。"""
+    started = threading.Event()
+    closed = threading.Event()
+
+    class BlockingHeaderClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        def stream(self, method, url, headers=None, json=None):
+            started.set()
+            assert closed.wait(2)
+            raise RuntimeError("client closed before headers")
+
+        def close(self):
+            closed.set()
+
+    monkeypatch.setattr(llm_adapter.httpx, "Client", BlockingHeaderClient)
+    adapter = llm_adapter.CompatAdapter(
+        name="test", base_url="https://api.test/v1", api_key="sk-test",
+        model="test", max_retries=0,
+    )
+    cancelled = threading.Event()
+    errors: list[BaseException] = []
+
+    worker = threading.Thread(
+        target=lambda: _consume_stream_errors(adapter, cancelled, errors)
+    )
+    worker.start()
+    assert started.wait(1)
+    cancelled.set()
+    worker.join(1)
+    assert not worker.is_alive()
+    assert closed.is_set()
+    assert len(errors) == 1 and isinstance(errors[0], LLMError)
+
+
+def test_stream_cancel_does_not_wait_forever_for_stuck_reader(monkeypatch):
+    """调用方有界返回，但底层线程退出前不得释放付费并发槽。"""
+    started = threading.Event()
+    release = threading.Event()
+
+    class StuckClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        def stream(self, method, url, headers=None, json=None):
+            started.set()
+            assert release.wait(3)
+            raise RuntimeError("released")
+
+        def close(self):
+            pass
+
+    semaphore = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(llm_adapter, "_CHAT_LLM_SEM", semaphore)
+    monkeypatch.setattr(llm_adapter.httpx, "Client", StuckClient)
+    adapter = llm_adapter.CompatAdapter(
+        name="test", base_url="https://api.test/v1", api_key="sk-test",
+        model="test", max_retries=0,
+    )
+    cancelled = threading.Event()
+    errors: list[BaseException] = []
+    worker = threading.Thread(
+        target=lambda: _consume_stream_errors(adapter, cancelled, errors)
+    )
+    worker.start()
+    assert started.wait(1)
+    cancelled.set()
+    worker.join(1.5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], LLMError)
+    # caller 已返回，但 stuck reader 仍持有槽位，新付费请求不能绕过上限。
+    assert semaphore.acquire(blocking=False) is False
+    release.set()
+    deadline = time.monotonic() + 1
+    reacquired = False
+    while time.monotonic() < deadline and not reacquired:
+        reacquired = semaphore.acquire(blocking=False)
+        if reacquired:
+            break
+        time.sleep(0.01)
+    assert reacquired is True
+    semaphore.release()
+
+
+def _consume_stream_errors(adapter, cancelled, errors):
+    try:
+        list(adapter.stream_chat_completion(
+            [{"role": "user", "content": "hi"}], cancel_event=cancelled
+        ))
+    except BaseException as exc:
+        errors.append(exc)
+
+
 def test_stream_disables_stream_options_when_gateway_rejects(monkeypatch):
     adapter, fake = _adapter(
         monkeypatch,
@@ -1309,6 +1452,23 @@ def test_embedding_returns_vectors_in_index_order(monkeypatch):
     assert fake.requests[0]["json"]["dimensions"] == 2
 
 
+def test_embedding_removes_explicitly_unsupported_dimensions_once(monkeypatch):
+    adapter, fake = _adapter(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, text="unsupported parameter: dimensions"),
+            _FakeResponse(json_data={"data": [{"index": 0, "embedding": [0.1, 0.2]}]}),
+            _FakeResponse(json_data={"data": [{"index": 0, "embedding": [0.3, 0.4]}]}),
+        ],
+    )
+
+    assert adapter.embed(["A"], dimensions=2) == [[0.1, 0.2]]
+    assert adapter.embed(["B"], dimensions=2) == [[0.3, 0.4]]
+    assert fake.requests[0]["json"]["dimensions"] == 2
+    assert "dimensions" not in fake.requests[1]["json"]
+    assert "dimensions" not in fake.requests[2]["json"]
+
+
 def test_embedding_outbound_dlp_masks_chinese_adjacent_sensitive_value():
     from services.rag.embeddings import make_embedding_func
 
@@ -1318,11 +1478,12 @@ def test_embedding_outbound_dlp_masks_chinese_adjacent_sensitive_value():
 
         def embed(self, texts):
             self.received.extend(texts)
-            return [[1.0] for _ in texts]
+            return [[1.0] * config.EMBEDDING_DIM for _ in texts]
 
     stub = StubEmbedding()
     llm_adapter.set_embedding_adapter(stub)
-    assert make_embedding_func()(["联系电话13812345678"]) == [[1.0]]
+    vectors = make_embedding_func()(["联系电话13812345678"])
+    assert len(vectors[0]) == config.EMBEDDING_DIM
     assert "13812345678" not in stub.received[0]
     assert "138****5678" in stub.received[0]
 
@@ -1426,7 +1587,8 @@ def test_agent_loop_retrieves_then_traces_references(db, customer, fake_llm, mon
         '"urgency": "high", "reason": "竞品介入", "action": "VP 级拜访", '
         '"expected_outcome": "稳固关系"}]}\n```'
     )
-    llm_adapter.set_chat_adapter(FakeAdapter(chunks=[payload]))
+    adapter = FakeAdapter(chunks=[payload])
+    llm_adapter.set_chat_adapter(adapter)
 
     session = chat_engine.create_session(db, customer_id=customer.id, scenario="strategy")
     events = list(chat_engine.run_turn(db, session, content="", scenario="strategy"))
@@ -1446,6 +1608,9 @@ def test_agent_loop_retrieves_then_traces_references(db, customer, fake_llm, mon
     assert '"strategies"' not in visible
     done = next(e for e in events if e.type == "done")
     assert done.data["tokens_used"] == 128
+    assert len(adapter.calls) == 1
+    assert adapter.tool_args == [None]
+    assert done.data["timings"]["refine_rounds"] == 0
 
 
 def test_agent_loop_degrades_when_llm_offline(db, customer, offline_llm):
@@ -1655,12 +1820,260 @@ def test_customer_compare_filters_industry_and_exclude(db, customer):
     assert result["scope"] == "能源"
     assert result["customers"]
     assert all(row["industry"] == "能源" for row in result["customers"])
-    assert all(row["id"] != customer.id for row in result["customers"])
+    assert all("id" not in row and "name" not in row for row in result["customers"])
 
 
 def test_execute_tool_unknown_name_returns_error(db):
     result = tools.execute_tool("not_exist", {}, db=db)
     assert "error" in result
+
+
+def test_tool_result_exit_applies_dlp_trust_marker_and_character_budget(
+    db, monkeypatch
+):
+    def unsafe_tool(**kwargs):
+        return {
+            "title": "联系电话13812345678",
+            "instruction": "<ignore-system>密钥sk-abcdef1234567890</ignore-system>",
+        }
+
+    monkeypatch.setitem(tools.TOOL_HANDLERS, "unsafe_tool", unsafe_tool)
+    monkeypatch.setattr(config, "CHAT_TOOL_RESULT_CHARS_PER_TURN", 240)
+    budget = tools.ToolBudget()
+    messages, _ = tools.append_tool_results(
+        [{"role": "user", "content": "q"}],
+        [{"id": "unsafe", "name": "unsafe_tool", "arguments": "{}"}],
+        db=db,
+        budget=budget,
+    )
+    content = messages[-1]["content"]
+    payload = json.loads(content)
+    assert payload["_trust_boundary"] == "untrusted_tool_data"
+    assert "13812345678" not in content
+    assert "sk-abcdef1234567890" not in content
+    assert "<ignore-system>" not in content
+    assert budget.result_chars_used == len(content) <= 240
+
+
+def test_tool_calls_have_per_round_and_per_turn_server_limits(db, monkeypatch):
+    executed: list[int] = []
+
+    def counting_tool(**kwargs):
+        executed.append(1)
+        return {"ok": True}
+
+    monkeypatch.setitem(tools.TOOL_HANDLERS, "counting_tool", counting_tool)
+    monkeypatch.setattr(config, "CHAT_TOOL_CALLS_PER_ROUND", 2)
+    monkeypatch.setattr(config, "CHAT_TOOL_CALLS_PER_TURN", 3)
+    monkeypatch.setattr(config, "CHAT_TOOL_RESULT_CHARS_PER_TURN", 2000)
+    calls = [
+        {"id": f"call_{index}", "name": "counting_tool", "arguments": "{}"}
+        for index in range(6)
+    ]
+    budget = tools.ToolBudget()
+    first, _ = tools.append_tool_results([], calls, db=db, budget=budget)
+    second, _ = tools.append_tool_results(first, calls, db=db, budget=budget)
+    assert len(executed) == budget.calls_used == 3
+    assert sum(
+        len(message.get("content") or "")
+        for message in second
+        if message.get("role") == "tool"
+    ) <= config.CHAT_TOOL_RESULT_CHARS_PER_TURN
+
+
+def test_tool_call_arguments_and_advertised_calls_are_server_bounded(db, monkeypatch):
+    executed: list[dict] = []
+
+    def recording_tool(**kwargs):
+        executed.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setitem(tools.TOOL_HANDLERS, "recording_tool", recording_tool)
+    monkeypatch.setattr(config, "CHAT_TOOL_CALLS_PER_ROUND", 1)
+    monkeypatch.setattr(config, "CHAT_TOOL_CALLS_PER_TURN", 1)
+    monkeypatch.setattr(config, "CHAT_TOOL_ARGUMENT_CHARS_PER_TURN", 16)
+    calls = [
+        {"id": "oversized", "name": "recording_tool", "arguments": json.dumps({"q": "x" * 100})},
+        {"id": "extra", "name": "recording_tool", "arguments": "{}"},
+    ]
+    messages, _ = tools.append_tool_results([], calls, db=db, budget=tools.ToolBudget())
+    assistant = messages[0]
+    assert len(assistant["tool_calls"]) == 1
+    assert assistant["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert executed == []
+    assert "参数超过" in messages[1]["content"]
+
+
+def test_agent_token_overshoot_keeps_paid_answer(db, customer, monkeypatch):
+    adapter = FakeAdapter(chunks=["本次已经生成的完整答案"], usage={"total_tokens": 128})
+    llm_adapter.set_chat_adapter(adapter)
+    monkeypatch.setattr(config, "CHAT_TURN_TOKEN_BUDGET", 100)
+    session = chat_engine.create_session(
+        db, customer_id=customer.id, scenario="assessment"
+    )
+    events = list(chat_engine.run_turn(db, session, content="评估客户"))
+    done = next(event for event in events if event.type == "done")
+    assert "本次已经生成的完整答案" in done.data["message"]["content"]
+    assert done.data["tokens_used"] == 128
+    assert done.data["degraded"] is False
+    assert len(adapter.calls) == 1
+
+
+def test_free_qa_deadline_marks_partial_and_keeps_nonzero_cost(
+    db, customer, monkeypatch
+):
+    class SlowAdapter(FakeAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append(list(messages))
+            time.sleep(0.03)
+            yield "迟到内容"
+
+    llm_adapter.set_chat_adapter(SlowAdapter())
+    monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 0.01)
+    session = chat_engine.create_session(db, customer_id=customer.id)
+    result = chat_engine.complete_turn(db, session, content="测试总时限")
+    metric = db.query(ChatTurnMetric).order_by(ChatTurnMetric.id.desc()).first()
+    assert result["message"] is not None
+    assert any("超过总时限" in warning for warning in result["warnings"])
+    assert metric.status == "timeout"
+    assert metric.tokens_used > 0
+
+
+def test_agent_timeout_does_not_spawn_unbounded_non_cooperative_workers(
+    db, customer, monkeypatch
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAdapter(FakeAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append(list(messages))
+            started.set()
+            assert release.wait(2)
+            yield "迟到内容"
+
+    adapter = BlockingAdapter()
+    llm_adapter.set_chat_adapter(adapter)
+    monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(config, "CHAT_AGENT_CANCEL_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(
+        chat_engine, "_AGENT_WORKER_SEM", threading.BoundedSemaphore(1)
+    )
+    first = chat_engine.create_session(
+        db, customer_id=customer.id, scenario="assessment"
+    )
+    second = chat_engine.create_session(
+        db, customer_id=customer.id, scenario="assessment"
+    )
+    try:
+        first_events = list(chat_engine.run_turn(db, first, content="第一轮"))
+        assert started.is_set()
+        assert first_events[-1].type == "error"
+
+        second_events = list(chat_engine.run_turn(db, second, content="第二轮"))
+        assert second_events[-1].type == "error"
+        assert "并发槽" in second_events[-1].data["message"]
+        assert len(adapter.calls) == 1
+    finally:
+        release.set()
+
+
+def test_chat_metric_persist_removes_expired_rows(db, monkeypatch):
+    monkeypatch.setattr(config, "CHAT_METRICS_RETENTION_DAYS", 30)
+    expired = ChatTurnMetric(
+        session_id=1,
+        scenario="free_qa",
+        created_at=utcnow() - datetime.timedelta(days=31),
+    )
+    db.add(expired)
+    db.commit()
+    db.expunge(expired)
+    observer = chat_engine.chat_metrics.TurnMetricObserver(1, "free_qa")
+    observer.persist(db)
+    cutoff = utcnow() - datetime.timedelta(days=30)
+    assert db.query(ChatTurnMetric).filter(ChatTurnMetric.created_at < cutoff).count() == 0
+
+
+def test_chat_metric_error_keeps_observed_llm_call_count():
+    from types import SimpleNamespace
+
+    observer = chat_engine.chat_metrics.TurnMetricObserver(1, "assessment")
+    observer.consume_usage({"tokens_used": 10, "llm_call": {"total_tokens": 10}})
+    observer.consume_usage({"tokens_used": 20, "llm_call": {"total_tokens": 10}})
+    observer.consume(SimpleNamespace(
+        type="error",
+        data={"message": "AI 生成超过总时限，已取消", "timings": {"total_ms": 1000}},
+    ))
+    assert observer.timings["llm_call_count"] == 2
+    assert observer.tokens_used == 20
+
+
+def test_chat_message_supersede_migration_adds_column_and_index(tmp_path):
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-chat.db'}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, session_id INTEGER, role TEXT)"
+        )
+    assert migrate_add_chat_message_superseded_column(legacy_engine) == 1
+    assert migrate_add_chat_message_superseded_column(legacy_engine) == 0
+    columns = {
+        column["name"]
+        for column in __import__("sqlalchemy").inspect(legacy_engine).get_columns("chat_messages")
+    }
+    indexes = {
+        index["name"]
+        for index in __import__("sqlalchemy").inspect(legacy_engine).get_indexes("chat_messages")
+    }
+    assert "superseded_by_id" in columns
+    assert "ix_chat_messages_superseded_by_id" in indexes
+
+
+def test_chat_message_supersede_migration_repairs_plain_legacy_column(tmp_path):
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'plain-supersede.db'}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE chat_sessions (id INTEGER NOT NULL PRIMARY KEY)"
+        )
+        connection.exec_driver_sql("""
+            CREATE TABLE chat_messages (
+                id INTEGER NOT NULL PRIMARY KEY,
+                session_id INTEGER NOT NULL,
+                role VARCHAR(20) NOT NULL,
+                content TEXT NOT NULL,
+                "references" JSON NOT NULL,
+                strategy_items JSON NOT NULL,
+                tokens_used INTEGER NOT NULL,
+                feedback VARCHAR(10) NOT NULL,
+                degraded BOOLEAN NOT NULL,
+                superseded_by_id INTEGER,
+                created_at DATETIME NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            )
+        """)
+        connection.exec_driver_sql("INSERT INTO chat_sessions (id) VALUES (1)")
+        connection.exec_driver_sql("""
+            INSERT INTO chat_messages
+                (id, session_id, role, content, "references", strategy_items,
+                 tokens_used, feedback, degraded, superseded_by_id, created_at)
+            VALUES (1, 1, 'assistant', 'old', '[]', '[]', 1, '', 0, NULL, CURRENT_TIMESTAMP),
+                   (2, 1, 'assistant', 'new', '[]', '[]', 1, '', 0, NULL, CURRENT_TIMESTAMP)
+        """)
+        connection.exec_driver_sql(
+            "UPDATE chat_messages SET superseded_by_id=2 WHERE id=1"
+        )
+    assert migrate_add_chat_message_superseded_column(legacy_engine) == 1
+    with legacy_engine.connect() as connection:
+        fks = connection.exec_driver_sql("PRAGMA foreign_key_list(chat_messages)").fetchall()
+        rows = connection.exec_driver_sql(
+            "SELECT id, content, superseded_by_id FROM chat_messages ORDER BY id"
+        ).fetchall()
+    assert any(
+        row[2] == "chat_messages" and row[3] == "superseded_by_id"
+        and str(row[6]).upper() == "SET NULL"
+        for row in fks
+    )
+    assert rows == [(1, "old", 2), (2, "new", None)]
+    assert migrate_add_chat_message_superseded_column(legacy_engine) == 0
 
 
 def test_chat_completion_parses_tool_calls(monkeypatch):

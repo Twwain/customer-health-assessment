@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
+import time
 
 import config
 from models import Customer
@@ -39,6 +41,8 @@ def build_report_data(
     *,
     include_ai: bool = True,
     scenario: str = "strategy",
+    cancel_event: threading.Event | None = None,
+    deadline: float | None = None,
 ) -> ReportData:
     """汇总单客户报告的全部数据；``include_ai=False`` 时只产出量化评估 + 趋势。"""
     engine = get_scoring_strategy()
@@ -68,6 +72,8 @@ def build_report_data(
         "策略建议，并尽量标注知识来源。"
     )
     try:
+        cancel_event = cancel_event or threading.Event()
+        deadline = deadline or (time.monotonic() + config.CHAT_TURN_TIMEOUT_SECONDS)
         ctx = context_builder.build_context(db, customer, assessment=assessment, query=question)
         gen = strategy_mod.generate(
             scenario,
@@ -81,6 +87,9 @@ def build_report_data(
             tools_enabled=False,
             thinking_enabled=config.LLM_REPORT_THINKING_ENABLED,
             retrieve_enabled=False,
+            max_iterations=config.REPORT_AGENT_MAX_ITERATIONS,
+            cancel_event=cancel_event,
+            deadline=deadline,
         )
         _body, items = strategy_mod.split_strategy_payload(gen.text)
         data.strategy_items = gen.degraded_items if gen.degraded else items

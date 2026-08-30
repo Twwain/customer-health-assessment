@@ -271,6 +271,7 @@ class ChatMessageItem(BaseModel):
     tokens_used: int = 0
     feedback: str = ""
     degraded: bool = False
+    superseded_by_id: int | None = None
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
@@ -379,6 +380,8 @@ class KnowledgeItemResponse(BaseModel):
     created_by: str = "system"
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    sync_pending: bool = False
+    sync_warnings: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

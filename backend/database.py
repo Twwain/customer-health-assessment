@@ -68,6 +68,105 @@ def migrate_drop_legacy_customer_columns(target_engine: Engine = engine) -> int:
     return removed
 
 
+def migrate_add_chat_message_superseded_column(target_engine: Engine = engine) -> int:
+    """幂等补充重新生成审计指针，并保证升级库具备真实自引用外键。"""
+    inspector = inspect(target_engine)
+    if "chat_messages" not in inspector.get_table_names():
+        return 0
+    existing = {column["name"] for column in inspector.get_columns("chat_messages")}
+    added = 0
+    if "superseded_by_id" not in existing:
+        with target_engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE chat_messages ADD COLUMN superseded_by_id INTEGER "
+                "REFERENCES chat_messages(id) ON DELETE SET NULL"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_chat_messages_superseded_by_id "
+                "ON chat_messages (superseded_by_id)"
+            ))
+        return 1
+
+    with target_engine.connect() as connection:
+        foreign_keys = connection.exec_driver_sql(
+            "PRAGMA foreign_key_list(chat_messages)"
+        ).fetchall()
+    has_superseded_fk = any(
+        str(row[2]) == "chat_messages"
+        and str(row[3]) == "superseded_by_id"
+        and str(row[6]).upper() == "SET NULL"
+        for row in foreign_keys
+    )
+    if has_superseded_fk:
+        with target_engine.begin() as connection:
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_chat_messages_superseded_by_id "
+                "ON chat_messages (superseded_by_id)"
+            ))
+        return 0
+
+    # 3f0ba0b 曾以普通 INTEGER 补列；SQLite 不能给已有列追加外键，只能在事务内
+    # 重建表。关闭外键仅覆盖该连接，数据复制完成后立即校验并恢复。
+    raw = target_engine.raw_connection()
+    try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN")
+        cursor.execute("""
+            CREATE TABLE chat_messages__fk_migration (
+                id INTEGER NOT NULL PRIMARY KEY,
+                session_id INTEGER NOT NULL,
+                role VARCHAR(20) NOT NULL,
+                content TEXT NOT NULL,
+                "references" JSON NOT NULL,
+                strategy_items JSON NOT NULL,
+                tokens_used INTEGER NOT NULL,
+                feedback VARCHAR(10) NOT NULL,
+                degraded BOOLEAN NOT NULL,
+                superseded_by_id INTEGER,
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP) NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(superseded_by_id) REFERENCES chat_messages__fk_migration(id)
+                    ON DELETE SET NULL
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO chat_messages__fk_migration (
+                id, session_id, role, content, "references", strategy_items,
+                tokens_used, feedback, degraded, superseded_by_id, created_at
+            )
+            SELECT id, session_id, role, content, "references", strategy_items,
+                   tokens_used, feedback, degraded, superseded_by_id, created_at
+            FROM chat_messages
+        """)
+        cursor.execute("DROP TABLE chat_messages")
+        cursor.execute("ALTER TABLE chat_messages__fk_migration RENAME TO chat_messages")
+        cursor.execute(
+            "CREATE INDEX ix_chat_messages_session_id ON chat_messages (session_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX ix_chat_messages_superseded_by_id "
+            "ON chat_messages (superseded_by_id)"
+        )
+        violations = cursor.execute("PRAGMA foreign_key_check(chat_messages)").fetchall()
+        if violations:
+            raise RuntimeError(f"chat_messages 外键迁移校验失败：{violations[:3]}")
+        cursor.execute("COMMIT")
+        added = 1
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        # PRAGMA 是连接级状态；即使重建/校验失败也必须恢复，避免把关闭外键的
+        # 连接放回连接池后污染后续请求。
+        try:
+            raw.cursor().execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+        raw.close()
+    return added
+
+
 def get_db():
     db = SessionLocal()
     try:

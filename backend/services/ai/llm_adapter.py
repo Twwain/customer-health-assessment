@@ -12,8 +12,11 @@ BASE_URL / MODEL / API_KEY，不改业务代码。
 from __future__ import annotations
 
 import json
+import inspect
+import queue
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -28,6 +31,30 @@ except ImportError:  # pragma: no cover
 # 进程级共享信号量：所有适配器实例共用，避免通过重复构造客户端绕过上限。
 _CHAT_LLM_SEM = threading.BoundedSemaphore(config.CHAT_LLM_GLOBAL_CONCURRENCY)
 _EMBEDDING_SEM = threading.BoundedSemaphore(config.EMBEDDING_GLOBAL_CONCURRENCY)
+_STREAM_READER_JOIN_TIMEOUT = 0.5
+
+
+@contextmanager
+def _chat_slot(
+    cancel_event: threading.Event | None,
+    deadline: float | None,
+    stop_event: threading.Event | None = None,
+):
+    """可取消地等待全局 LLM 槽位；租约必须由真实网络工作线程持有。"""
+    acquired = False
+    try:
+        while not acquired:
+            if stop_event is not None and stop_event.is_set():
+                raise LLMError("generation cancelled")
+            if cancel_event is not None and cancel_event.is_set():
+                raise LLMError("generation cancelled")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise LLMError("AI 生成超过总时限，已取消")
+            acquired = _CHAT_LLM_SEM.acquire(timeout=0.05)
+        yield
+    finally:
+        if acquired:
+            _CHAT_LLM_SEM.release()
 
 
 # ── 异常 ────────────────────────────────────────────────────────────────────
@@ -122,6 +149,9 @@ class CompatAdapter:
         self.enabled = enabled
         # 部分网关不认 stream_options，握手报 400 后自动关闭并重试
         self._stream_usage = stream_usage
+        # 兼容网关可能实现 /embeddings 却不接受 OpenAI 的 dimensions 参数。
+        # 只有收到明确的参数拒绝后才缓存能力，避免每个 batch 重复触发 400。
+        self._embedding_dimensions_supported: bool | None = None
 
     # ── 可用性 ──────────────────────────────────────────────────────────
 
@@ -161,8 +191,11 @@ class CompatAdapter:
             "Content-Type": "application/json",
         }
 
-    def _timeout(self):
-        return httpx.Timeout(self.timeout, connect=self.connect_timeout)
+    def _timeout(self, deadline: float | None = None):
+        total = self.timeout
+        if deadline is not None:
+            total = max(0.1, min(total, deadline - time.monotonic()))
+        return httpx.Timeout(total, connect=min(self.connect_timeout, total))
 
     def _payload(
         self,
@@ -219,6 +252,8 @@ class CompatAdapter:
         named = parameter.lower() in lowered
         if parameter == "tools":
             named = named or "function calling" in lowered or "tool calling" in lowered
+        elif parameter == "dimensions":
+            named = named or "dimension" in lowered
         return named and any(marker in lowered for marker in markers)
 
     # ── 非流式 ──────────────────────────────────────────────────────────
@@ -286,6 +321,16 @@ class CompatAdapter:
                         payload = {k: v for k, v in payload.items() if k != "tools"}
                         last_error = LLMError(f"HTTP 400: {detail}")
                         continue
+                    if (
+                        response.status_code == 400
+                        and path.endswith("/embeddings")
+                        and "dimensions" in payload
+                        and self._rejects_parameter(detail, "dimensions")
+                    ):
+                        self._embedding_dimensions_supported = False
+                        payload = {k: v for k, v in payload.items() if k != "dimensions"}
+                        last_error = LLMError(f"HTTP 400: {detail}")
+                        continue
                     if self._retryable_status(response.status_code) and attempt < self.max_retries:
                         attempt += 1
                         last_error = LLMError(f"HTTP {response.status_code}: {detail}")
@@ -317,6 +362,8 @@ class CompatAdapter:
         on_usage=None,
         tools: Sequence[dict] | None = None,
         on_tool_calls=None,
+        cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> Iterator[str]:
         """逐 Token 产出文本增量。
 
@@ -326,113 +373,213 @@ class CompatAdapter:
         """
         self._ensure_available()
 
-        with _CHAT_LLM_SEM:
-            attempt = 0
-            while True:
-                payload = self._payload(
-                    messages,
-                    stream=True,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    extra=extra,
-                    tools=tools,
+        attempt = 0
+        while True:
+            payload = self._payload(
+                messages,
+                stream=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra=extra,
+                tools=tools,
+            )
+            try:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise LLMError("generation cancelled")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise LLMError("AI 生成超过总时限，已取消")
+                yield from self._iter_stream(
+                    payload, on_usage, on_tool_calls,
+                    cancel_event=cancel_event, deadline=deadline,
                 )
-                try:
-                    yield from self._iter_stream(payload, on_usage, on_tool_calls)
-                    return
-                except _StreamStarted as exc:  # 已经吐过字，不重试，交给上层收尾
-                    raise LLMError(str(exc.__cause__ or exc)) from exc
-                except _StreamRetry as exc:
-                    if exc.disable_tools and tools:
-                        # 供应商不支持 function calling：去掉 tools 重试一次，
-                        # 避免整条对话被降级为规则引擎。
-                        tools = None
-                        continue
-                    # 网关不认 stream_options：关掉后立刻重来一次，不计入重试次数
-                    if exc.disable_stream_usage and self._stream_usage:
-                        self._stream_usage = False
-                        continue
-                    if exc.disable_thinking and extra and "thinking" in extra:
-                        extra = {k: v for k, v in extra.items() if k != "thinking"}
-                        continue
-                    if exc.retryable and attempt < self.max_retries:
-                        attempt += 1
-                        time.sleep(self.retry_backoff * (2**attempt))
-                        continue
-                    raise LLMUnavailableError(f"LLM 流式请求失败：{exc.reason}") from exc
+                return
+            except _StreamStarted as exc:  # 已经吐过字，不重试，交给上层收尾
+                raise LLMError(str(exc.__cause__ or exc)) from exc
+            except _StreamRetry as exc:
+                if exc.disable_tools and tools:
+                    # 供应商不支持 function calling：去掉 tools 重试一次，
+                    # 避免整条对话被降级为规则引擎。
+                    tools = None
+                    continue
+                # 网关不认 stream_options：关掉后立刻重来一次，不计入重试次数
+                if exc.disable_stream_usage and self._stream_usage:
+                    self._stream_usage = False
+                    continue
+                if exc.disable_thinking and extra and "thinking" in extra:
+                    extra = {k: v for k, v in extra.items() if k != "thinking"}
+                    continue
+                if exc.retryable and attempt < self.max_retries:
+                    attempt += 1
+                    delay = self.retry_backoff * (2**attempt)
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    if cancel_event is not None:
+                        if cancel_event.wait(delay):
+                            raise LLMError("generation cancelled") from exc
+                    elif delay:
+                        time.sleep(delay)
+                    continue
+                raise LLMUnavailableError(f"LLM 流式请求失败：{exc.reason}") from exc
 
-    def _iter_stream(self, payload: dict, on_usage, on_tool_calls=None) -> Iterator[str]:
+    def _iter_stream(
+        self, payload: dict, on_usage, on_tool_calls=None, *,
+        cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
+    ) -> Iterator[str]:
         emitted = False
         tool_acc: dict[int, dict[str, Any]] = {}
+        events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=256)
+        stop_reader = threading.Event()
+        response_box: dict[str, Any] = {}
+        client = httpx.Client(timeout=self._timeout(deadline))
+
+        def _offer(kind: str, value: Any) -> bool:
+            while not stop_reader.is_set():
+                try:
+                    events.put((kind, value), timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def _network_reader() -> None:
+            try:
+                # 整个请求（包括等待响应头）都在可关闭的工作线程中。主消费线程可在
+                # cancel/deadline 到达时关闭 client，而不必等到响应头返回后才启动取消器。
+                # 并发租约由真正执行 HTTP 的线程持有。即使底层 socket
+                # 不响应 close，调用方返回也不会把该付费请求的槽位提前释放。
+                with _chat_slot(cancel_event, deadline, stop_reader):
+                    with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers=self._headers(),
+                        json=payload,
+                    ) as response:
+                        response_box["response"] = response
+                        if response.status_code >= 400:
+                            body = response.read().decode("utf-8", "ignore")[:300]
+                            _offer(
+                                "error",
+                                _StreamRetry(
+                                    reason=self._http_error_message(response.status_code, body),
+                                    disable_stream_usage=(
+                                        response.status_code == 400 and "stream_options" in payload
+                                    ),
+                                    disable_tools=(
+                                        response.status_code == 400 and "tools" in payload
+                                        and self._rejects_parameter(body, "tools")
+                                    ),
+                                    disable_thinking=(
+                                        response.status_code == 400 and "thinking" in payload
+                                        and self._rejects_parameter(body, "thinking")
+                                    ),
+                                    retryable=self._retryable_status(response.status_code),
+                                ),
+                            )
+                            return
+                        for line in response.iter_lines():
+                            if stop_reader.is_set() or not _offer("line", line):
+                                return
+            except BaseException as exc:  # 由消费线程按是否已输出决定错误类型
+                _offer("error", exc)
+            finally:
+                _offer("done", None)
+
+        reader = threading.Thread(
+            target=_network_reader,
+            name="llm-stream-reader",
+            daemon=True,
+        )
+
+        def _close_transport() -> None:
+            stop_reader.set()
+            response = response_box.get("response")
+            close_response = getattr(response, "close", None)
+            if callable(close_response):
+                try:
+                    close_response()
+                except Exception:
+                    pass
+            close_client = getattr(client, "close", None)
+            if callable(close_client):
+                try:
+                    close_client()
+                except Exception:
+                    pass
+
+        reader.start()
         try:
-            with httpx.Client(timeout=self._timeout()) as client:
-                with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers=self._headers(),
-                    json=payload,
-                ) as response:
-                    if response.status_code >= 400:
-                        body = response.read().decode("utf-8", "ignore")[:300]
-                        raise _StreamRetry(
-                            reason=self._http_error_message(response.status_code, body),
-                            disable_stream_usage=(
-                                response.status_code == 400 and "stream_options" in payload
-                            ),
-                            disable_tools=(
-                                response.status_code == 400 and "tools" in payload
-                                and self._rejects_parameter(body, "tools")
-                            ),
-                            disable_thinking=(
-                                response.status_code == 400 and "thinking" in payload
-                                and self._rejects_parameter(body, "thinking")
-                            ),
-                            retryable=self._retryable_status(response.status_code),
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    _close_transport()
+                    raise LLMError("generation cancelled")
+                if deadline is not None and time.monotonic() >= deadline:
+                    _close_transport()
+                    raise LLMError("AI 生成超过总时限，已取消")
+                try:
+                    kind, value = events.get(timeout=0.05)
+                except queue.Empty:
+                    if not reader.is_alive():
+                        break
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error":
+                    raise value
+                line = value
+                if not line:
+                    continue
+                line = line.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if not line or line == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                usage = chunk.get("usage")
+                if usage and on_usage:
+                    on_usage(usage)
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if content:
+                        emitted = True
+                        yield content
+                    for tc in delta.get("tool_calls") or []:
+                        emitted = True
+                        index = int(tc.get("index", 0))
+                        entry = tool_acc.setdefault(
+                            index, {"id": "", "name": "", "arguments": ""}
                         )
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
-                        line = line.strip()
-                        if line.startswith("data:"):
-                            line = line[5:].strip()
-                        if not line or line == "[DONE]":
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        usage = chunk.get("usage")
-                        if usage and on_usage:
-                            on_usage(usage)
-                        for choice in chunk.get("choices") or []:
-                            delta = choice.get("delta") or {}
-                            content = delta.get("content")
-                            if content:
-                                emitted = True
-                                yield content
-                            for tc in delta.get("tool_calls") or []:
-                                emitted = True
-                                index = int(tc.get("index", 0))
-                                entry = tool_acc.setdefault(
-                                    index, {"id": "", "name": "", "arguments": ""}
-                                )
-                                if tc.get("id"):
-                                    entry["id"] = tc["id"]
-                                function = tc.get("function") or {}
-                                if function.get("name"):
-                                    entry["name"] += function["name"]
-                                entry["arguments"] += function.get("arguments") or ""
+                        if tc.get("id"):
+                            entry["id"] = tc["id"]
+                        function = tc.get("function") or {}
+                        if function.get("name"):
+                            entry["name"] += function["name"]
+                        entry["arguments"] += function.get("arguments") or ""
+            reader.join(timeout=_STREAM_READER_JOIN_TIMEOUT)
             if tool_acc and on_tool_calls:
                 on_tool_calls([tool_acc[i] for i in sorted(tool_acc)])
         except (_StreamRetry, GeneratorExit):
             raise
+        except LLMError:
+            raise
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise LLMError("generation cancelled") from exc
+            if deadline is not None and time.monotonic() >= deadline:
+                raise LLMError("AI 生成超过总时限，已取消") from exc
             if emitted:
                 raise _StreamStarted() from exc
             raise _StreamRetry(
                 reason=str(exc), disable_stream_usage=False, disable_tools=False,
                 disable_thinking=False, retryable=True
             ) from exc
+        finally:
+            _close_transport()
+            reader.join(timeout=_STREAM_READER_JOIN_TIMEOUT)
 
     # ── Embedding ───────────────────────────────────────────────────────
 
@@ -443,12 +590,35 @@ class CompatAdapter:
         if not inputs:
             return []
         payload: dict[str, Any] = {"model": self.model, "input": inputs}
-        if dimensions:
+        if dimensions and self._embedding_dimensions_supported is not False:
             payload["dimensions"] = dimensions
         with _EMBEDDING_SEM:
             data = self._post_with_retry("/embeddings", payload)
         rows = sorted(data.get("data") or [], key=lambda r: r.get("index", 0))
         return [list(r.get("embedding") or []) for r in rows]
+
+
+def stream_chat_completion_controlled(
+    adapter: Any, messages: Sequence[LLMMessage | dict], *,
+    cancel_event: threading.Event | None = None,
+    deadline: float | None = None,
+    **kwargs: Any,
+) -> Iterator[str]:
+    """给生产适配器传递取消控制，同时兼容测试/第三方旧适配器签名。"""
+    method = adapter.stream_chat_completion
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_kwargs or "cancel_event" in parameters:
+        kwargs["cancel_event"] = cancel_event
+    if accepts_kwargs or "deadline" in parameters:
+        kwargs["deadline"] = deadline
+    return method(messages, **kwargs)
 
 
 class _StreamRetry(Exception):

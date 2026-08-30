@@ -12,8 +12,10 @@ M4 Agent Loop 调用的四类工具：
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
+import config
 from models import Customer
 from services.ai import guardrails
 from services.ai.context_builder import ChatContext
@@ -25,13 +27,78 @@ MAX_TOOL_ROUNDS = 5
 TOOL_CONTENT_MAX_CHARS = 800
 
 
+@dataclass
+class ToolBudget:
+    """一轮对话共享的工具执行与回填预算。"""
+
+    calls_used: int = 0
+    result_chars_used: int = 0
+    argument_chars_used: int = 0
+
+    @property
+    def calls_remaining(self) -> int:
+        return max(0, config.CHAT_TOOL_CALLS_PER_TURN - self.calls_used)
+
+    @property
+    def chars_remaining(self) -> int:
+        return max(0, config.CHAT_TOOL_RESULT_CHARS_PER_TURN - self.result_chars_used)
+
+    @property
+    def argument_chars_remaining(self) -> int:
+        return max(
+            0,
+            config.CHAT_TOOL_ARGUMENT_CHARS_PER_TURN - self.argument_chars_used,
+        )
+
+
 def _bounded_tool_content(content: str) -> str:
-    prefix = "<untrusted_tool_data>\n"
-    suffix = "\n</untrusted_tool_data>"
-    budget = max(0, TOOL_CONTENT_MAX_CHARS - len(prefix) - len(suffix))
-    cleaned, _ = guardrails.sanitize_for_outbound((content or "")[:budget])
-    cleaned = cleaned.replace("<", "＜").replace(">", "＞")
-    return f"{prefix}{cleaned}{suffix}"
+    cleaned, _ = guardrails.sanitize_for_outbound((content or "")[:TOOL_CONTENT_MAX_CHARS])
+    return cleaned
+
+
+def _sanitize_tool_value(value: Any) -> Any:
+    """递归清洗工具结果中的所有字符串字段，而非只处理知识正文。"""
+    if isinstance(value, str):
+        cleaned, _ = guardrails.sanitize_for_outbound(value)
+        return cleaned.replace("<", "＜").replace(">", "＞")
+    if isinstance(value, list):
+        return [_sanitize_tool_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _sanitize_tool_value(item) for key, item in value.items()}
+    return value
+
+
+def _serialize_tool_result(result: dict[str, Any], budget: ToolBudget) -> str:
+    """统一工具出口：DLP、数据边界标记和整轮字符硬上限。"""
+    if budget.chars_remaining < 80:
+        return ""
+    cleaned = _sanitize_tool_value(result)
+    payload = json.dumps(
+        {"_trust_boundary": "untrusted_tool_data", **cleaned},
+        ensure_ascii=False,
+        default=str,
+    )
+    available = budget.chars_remaining
+    if len(payload) > available:
+        preview_size = max(0, available - 96)
+        while True:
+            truncated = json.dumps(
+                {
+                    "_trust_boundary": "untrusted_tool_data",
+                    "truncated": True,
+                    "preview": payload[:preview_size],
+                },
+                ensure_ascii=False,
+            )
+            if len(truncated) <= available:
+                payload = truncated
+                break
+            if preview_size == 0:
+                payload = "{}" if available >= 2 else ""
+                break
+            preview_size = max(0, preview_size - (len(truncated) - available))
+    budget.result_chars_used += len(payload)
+    return payload
 
 
 def rag_retrieve(
@@ -180,8 +247,8 @@ def customer_compare(
             continue
         customer_rows.append(
             {
-                "id": c.id,
-                "name": c.customer_name,
+                # 横向对比只需要匿名量化事实；不向模型暴露其他客户 ID/名称。
+                "position": len(customer_rows) + 1,
                 "industry": c.industry or "",
                 "total_score": round(assessment.total_score, 1),
                 "level": assessment.level,
@@ -311,12 +378,39 @@ def append_tool_results(
     customer: Customer | None = None,
     db: Any | None = None,
     exclude_ids: set[str] | None = None,
+    budget: ToolBudget | None = None,
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     """把 assistant 的 tool_calls 与工具执行结果回填到消息列表。
 
     返回 ``(消息列表, 工具引用列表)``；``exclude_ids`` 用于对 knowledge_search
     结果去重（通常是预取上下文中已有的 chunk id），避免重复注入。
     """
+    budget = budget or ToolBudget()
+    allowed_count = min(
+        len(tool_calls), config.CHAT_TOOL_CALLS_PER_ROUND, budget.calls_remaining
+    )
+    selected_calls = tool_calls[:allowed_count]
+    prepared_calls: list[tuple[dict[str, Any], str, bool]] = []
+    for tc in selected_calls:
+        raw_arguments = str(tc.get("arguments") or "{}")
+        within_argument_budget = len(raw_arguments) <= budget.argument_chars_remaining
+        if within_argument_budget:
+            budget.argument_chars_used += len(raw_arguments)
+            safe_arguments = raw_arguments
+        else:
+            budget.argument_chars_used = config.CHAT_TOOL_ARGUMENT_CHARS_PER_TURN
+            safe_arguments = "{}"
+        prepared_calls.append((tc, safe_arguments, within_argument_budget))
+
+    if not prepared_calls:
+        return [
+            *messages,
+            {
+                "role": "assistant",
+                "content": "服务端工具调用预算已耗尽，请直接基于现有上下文作答。",
+            },
+        ], []
+
     assistant_msg: dict[str, Any] = {
         "role": "assistant",
         "content": "",
@@ -326,22 +420,28 @@ def append_tool_results(
                 "type": "function",
                 "function": {
                     "name": tc.get("name") or "",
-                    "arguments": tc.get("arguments") or "{}",
+                    "arguments": safe_arguments,
                 },
             }
-            for tc in tool_calls
+            for tc, safe_arguments, _ in prepared_calls
         ],
     }
     messages = [*messages, assistant_msg]
     references: list[dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc, safe_arguments, within_argument_budget in prepared_calls:
         name = tc.get("name") or ""
-        result = execute_tool(
-            name,
-            _parse_arguments(tc.get("arguments")),
-            customer=customer,
-            db=db,
-        )
+        budget.calls_used += 1
+        if not within_argument_budget:
+            result = {"error": "工具参数超过本次对话服务端字符上限，未执行"}
+        elif budget.chars_remaining < 80:
+            result = {"error": "工具调用超过本轮或本次对话服务端上限，未执行"}
+        else:
+            result = execute_tool(
+                name,
+                _parse_arguments(safe_arguments),
+                customer=customer,
+                db=db,
+            )
         if name == "knowledge_search" and isinstance(result, dict):
             results = result.get("results") or []
             if exclude_ids:
@@ -364,7 +464,7 @@ def append_tool_results(
             {
                 "role": "tool",
                 "tool_call_id": tc.get("id") or "",
-                "content": json.dumps(result, ensure_ascii=False, default=str),
+                "content": _serialize_tool_result(result, budget),
             }
         )
     return messages, references

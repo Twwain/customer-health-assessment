@@ -57,6 +57,9 @@ def _sweep_pdf_jobs(now: float | None = None) -> None:
     for jid, v in expired:
         if v["status"] == "running":
             logger.info("PDF 导出任务超时标记失败: job=%s", jid)
+            cancel_event = v.get("cancel_event")
+            if cancel_event is not None:
+                cancel_event.set()
             v["status"] = "error"
             v["error"] = f"生成超时（超过 {config.PDF_JOB_TTL}s）"
     if len(_pdf_jobs) > _PDF_JOBS_MAX:
@@ -69,7 +72,14 @@ def _sweep_pdf_jobs(now: float | None = None) -> None:
             _pdf_jobs.pop(old_id, None)
 
 
-def _run_pdf_job(job_id: str, customer_id: int, include_ai: bool, bind) -> None:
+def _run_pdf_job(
+    job_id: str,
+    customer_id: int,
+    include_ai: bool,
+    bind,
+    cancel_event: threading.Event,
+    deadline: float,
+) -> None:
     """后台线程生成 PDF：与请求共用同一数据库引擎，避免依赖请求级 Session。"""
     from sqlalchemy.orm import sessionmaker
     from services.report_builder import build_report_data
@@ -80,7 +90,13 @@ def _run_pdf_job(job_id: str, customer_id: int, include_ai: bool, bind) -> None:
         customer = db.query(Customer).filter(Customer.id == customer_id).first()
         if customer is None:
             raise HTTPException(status_code=404, detail="客户不存在")
-        report = build_report_data(db, customer, include_ai=include_ai)
+        report = build_report_data(
+            db,
+            customer,
+            include_ai=include_ai,
+            cancel_event=cancel_event,
+            deadline=deadline,
+        )
         db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
         pdf_bytes = pdf_gen.generate(
             report.assessment,
@@ -202,7 +218,13 @@ def download_pdf(
     try:
         from services.report_builder import build_report_data
 
-        report = build_report_data(db, customer, include_ai=include_ai)
+        report = build_report_data(
+            db,
+            customer,
+            include_ai=include_ai,
+            cancel_event=threading.Event(),
+            deadline=time.monotonic() + config.CHAT_TURN_TIMEOUT_SECONDS,
+        )
         db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
         pdf_bytes = pdf_gen.generate(
             report.assessment,
@@ -242,6 +264,8 @@ def create_pdf_job(
         )
     job_id = uuid.uuid4().hex
     bind = db.get_bind()
+    cancel_event = threading.Event()
+    deadline = time.monotonic() + config.CHAT_TURN_TIMEOUT_SECONDS
     try:
         with _pdf_jobs_lock:
             _sweep_pdf_jobs()
@@ -253,10 +277,11 @@ def create_pdf_job(
                 "bytes": None,
                 "error": None,
                 "created": time.time(),
+                "cancel_event": cancel_event,
             }
         threading.Thread(
             target=_run_pdf_job,
-            args=(job_id, customer_id, include_ai, bind),
+            args=(job_id, customer_id, include_ai, bind, cancel_event, deadline),
             daemon=True,
         ).start()
     except Exception:

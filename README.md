@@ -44,7 +44,7 @@
 | 后端 | Python FastAPI + SQLAlchemy + SQLite + Uvicorn |
 | 评分 | 配置驱动引擎（`scoring_config.yaml`，维度/因子/权重/阈值见下文「评分模型」） |
 | AI 对话 | 大模型兼容适配器（对话 / 向量化模型均可配置）；自包含轻量状态机编排 Agent Loop（检索→推理→自批判→精炼） |
-| 知识库 RAG | 解析（md/txt/csv 零依赖；pdf/xlsx/docx lazy import）→ 中文分句 + 滑动窗口切片 → 向量库（Chroma 可选 / InMemory 零依赖回退）→ MetadataReranker（默认）+ BGE Rerank（可选） |
+| 知识库 RAG | 解析（md/txt/csv 零依赖；pdf/xlsx/docx lazy import）→ 中文分句 + 滑动窗口切片 → 向量库（生产 Chroma 持久化 / InMemory 仅显式开发测试）→ MetadataReranker（默认）+ BGE Rerank（可选） |
 | PDF | ReportLab + matplotlib（趋势曲线） |
 | 前端 | React 19 + TypeScript + Vite 8 + TailwindCSS v4 + React Router v7；图表为手写 SVG（未用 Recharts，1:1 还原冻结原型） |
 | 部署 | Docker 多阶段构建 + docker-compose；可选依赖与核心依赖分离 |
@@ -81,7 +81,7 @@ docker compose up -d --build
 # 访问 http://localhost （后端同时托管前端静态资源）
 ```
 
-- 生产可选依赖（chromadb / pymupdf / python-docx）由 `backend/requirements-prod.txt` 安装；任一缺失时镜像仍正常构建并回退内存实现。Docker 镜像默认不安装 FlagEmbedding，以避免引入 PyTorch/CUDA 巨型依赖，重排使用 MetadataReranker。
+- 生产依赖（chromadb / pymupdf / python-docx）由 `backend/requirements-prod.txt` 安装。`KNOWLEDGE_VECTOR_STORE=chroma` 时 Chroma 缺失或不可用会让 readiness 与向量读写返回失败，但知识列表、详情和原文下载仍可只读使用；内存向量库仅允许通过 `KNOWLEDGE_VECTOR_STORE=memory` 显式用于开发或测试。Docker 镜像默认不安装 FlagEmbedding，以避免引入 PyTorch/CUDA 巨型依赖，重排使用 MetadataReranker。
 - 通过 `docker-compose.yml` 的 `env_file: ./backend/.env` 注入 LLM Key 等配置。
 
 ### 云服务器部署
@@ -103,6 +103,11 @@ bash deploy.sh
 | `backend/data/knowledge/` | 预置知识（如 `customer_health_methodology.md` 评估方法论） |
 
 关键环境变量：`LLM_ENABLED` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` / `LLM_EMBEDDING_*` / `LLM_TOOLS_ENABLED`（函数调用工具开关，默认开）/ `LLM_CHAT_THINKING_ENABLED`（前端对话思考模式，默认关）/ `LLM_REPORT_THINKING_ENABLED`（PDF AI 策略思考模式，默认开）/ `KNOWLEDGE_VECTOR_STORE`（chroma|memory）/ `RERANKER`（metadata|bge）/ `RAG_TOP_K` / `RAG_WINDOW`（命中切片窗口扩展，默认 1）/ `CHAT_TREND_POINTS` / `DB_PATH`。
+
+对话资源边界可通过 `CHAT_TURN_TIMEOUT_SECONDS`、`CHAT_TURN_TOKEN_BUDGET`、
+`CHAT_TOOL_CALLS_PER_ROUND`、`CHAT_TOOL_CALLS_PER_TURN` 和
+`CHAT_TOOL_RESULT_CHARS_PER_TURN` 和 `CHAT_AGENT_CANCEL_GRACE_SECONDS` 调整；运行指标默认保留 90 天
+（`CHAT_METRICS_RETENTION_DAYS`），可通过 `GET /api/chat/metrics` 查看分布。
 
 ## 评分模型
 
@@ -131,7 +136,8 @@ V3.0 使用 7 个维度、28 个因子。每个因子先由原子指标映射为
 
 - 对话流式输出（SSE），场景化 Prompt 注入量化评估 + 趋势 + 知识上下文；策略以 ```` ```json ```` 结构化块输出，前端 `StrategyItem` 直接渲染。
 - Agent Loop 自批判/精炼；模型可主动调用工具补充信息：客户横向对比（`customer_compare`）与知识库补充检索（`knowledge_search`），输出含知识溯源（📎 可定位原文切片）。工具由 `LLM_TOOLS_ENABLED` 控制，不支持的网关会自动去掉 tools 重试。策略消息支持 ⭐ 采纳标记（当前为前端本地标记，入库沉淀待实现）。
-- 知识检索链路：metadata 过滤 + 分类权重 → dense 向量召回 → Rerank 重排；命中切片默认扩展相邻 ±1 切片（`RAG_WINDOW`，可关）缓解跨切片截断；结构化指标（行业基准等精确数值）走 SQLite 精确查询，评估时按客户行业注入。
+- 工具结果在进入模型前统一执行 DLP 并标记为不可信数据；客户横向对比只返回匿名评分事实，不返回其他客户 ID 或名称。重新生成成功后以 `superseded_by_id` 原子切换，旧回复保留用于审计但不再进入对话历史。
+- 知识检索链路：metadata 过滤 + 分类权重 → dense 向量召回 → Rerank 重排；命中切片默认扩展相邻 ±1 切片（`RAG_WINDOW`，可关）缓解跨切片截断；结构化指标（行业基准等精确数值）走 SQLite 精确查询，评估时按客户行业注入。SQLite 是向量 ID 与 metadata 的最终权威，Chroma metadata 写入失败会进入持久化 outbox 并在启动对账时重试。
 
 ## 报告与预警
 
@@ -176,8 +182,8 @@ cd backend && python -m pytest tests/ -v
 
 ## 部署要点
 
-- **依赖分层**：`requirements.txt`（核心，Python 3.10+ 可直接装，3.12 验证通过）；`requirements-prod.txt`（chromadb / pymupdf / python-docx，Docker 安装，缺失自动回退）。
-- **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；未装自动回退 `memory`（基础功能可用）。
+- **依赖分层**：`requirements.txt`（核心，Python 3.10+ 可直接装，3.12 验证通过）；`requirements-prod.txt`（chromadb / pymupdf / python-docx，Docker 安装）。
+- **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；缺失或异常时向量读写与 readiness 失败关闭，知识列表、详情和原文下载仍可用。`memory` 仅能通过配置显式启用。Embedding provider、网关、模型或维度任一变更都会进入指纹隔离的影子 collection；整库构建和校验成功后才切换，期间 readiness 返回 503。metadata outbox 和 tombstone 默认每 5 秒自动重试，失败时指数退避并在日志/readiness 告警；完整 SQLite/Chroma ID 对账默认每 5 分钟在后台执行，readiness 不再每次扫描全库。
 - **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 雅黑 / macOS PingFang / Linux 文泉驿）。
 - **数据持久化**：挂载 `./data:/app/data`，数据库与向量库落盘。
 - **访问边界（风险接受）**：系统不提供登录、RBAC 或租户隔离，客户、会话和知识数据在所有访问者之间共享；全部知识管理接口（下载、编辑、删除、审核、批量状态、重索引和指标管理）保持开放，仅通过项目管理约定供项目组成员使用。该约定不是技术访问控制，因此部署内容只能使用虚构或预先脱敏、可公开、可修改、可删除、可重置的数据；不得录入真实或敏感数据，并应将 `.env`、`AGENTS.md`、`dev_process/` 等敏感文件排除出发布内容。若未来需要对外开放、录入真实数据或区分访问者，必须重新实施认证、授权及租户/工作区隔离。

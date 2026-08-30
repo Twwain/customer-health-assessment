@@ -80,7 +80,7 @@ def _run_reindex_job(job_id: str, category: str | None, bind) -> None:
     session_factory = sessionmaker(bind=bind, autoflush=False, autocommit=False)
     db = session_factory()
     try:
-        count = _svc(db).reindex(category=category)
+        count = _vector_recovery_svc_or_503(db).reindex(category=category)
         with _reindex_jobs_lock:
             job = _reindex_jobs.get(job_id)
             if job is not None and job["status"] == "running":
@@ -108,6 +108,29 @@ def _run_reindex_job(job_id: str, category: str | None, bind) -> None:
 
 def _svc(db: Session) -> KnowledgeBaseService:
     return KnowledgeBaseService(db)
+
+
+def _vector_svc(db: Session) -> KnowledgeBaseService:
+    svc = KnowledgeBaseService(db)
+    svc.ensure_vector_available()
+    return svc
+
+
+def _vector_svc_or_503(db: Session) -> KnowledgeBaseService:
+    try:
+        return _vector_svc(db)
+    except KnowledgeIndexError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _vector_recovery_svc_or_503(db: Session) -> KnowledgeBaseService:
+    """重索引/对账必须在迁移状态下仍可进入，但向量库本身仍需可用。"""
+    svc = KnowledgeBaseService(db)
+    try:
+        svc.ensure_vector_available(allow_migration=True)
+        return svc
+    except KnowledgeIndexError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _to_result(chunk: RetrievedChunk) -> KnowledgeSearchResult:
@@ -181,7 +204,7 @@ def search(
         customer = db.query(Customer).filter(Customer.id == payload.customer_id).first()
     # status=None 表示不过滤（检索含 proposed 的全部条目）；"canonical"/"proposed" 按值过滤
     search_status = None if payload.status == "all" else payload.status
-    chunks = _svc(db).search(
+    chunks = _vector_svc_or_503(db).search(
         payload.query,
         customer=customer,
         category=payload.category,
@@ -253,7 +276,7 @@ def upload(
             validate_upload(file.filename or "", raw, file.content_type)
         except ParseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        doc = _svc(db).create_from_upload(
+        doc = _vector_svc_or_503(db).create_from_upload(
             title=title or (file.filename or "未命名文档"),
             category=category,
             filename=file.filename or "upload.bin",
@@ -282,7 +305,7 @@ def update_metadata(
     db: Session = Depends(get_db),
 ) -> KnowledgeItemResponse:
     try:
-        item = _svc(db).update_item_metadata(
+        item = _vector_svc_or_503(db).update_item_metadata(
             item_id,
             title=payload.title,
             category=payload.category,
@@ -299,7 +322,7 @@ def update_metadata(
 @router.delete("/items/{item_id}")
 def delete_item(item_id: int, db: Session = Depends(get_db)) -> dict:
     try:
-        ok = _svc(db).delete_item(item_id)
+        ok = _vector_svc_or_503(db).delete_item(item_id)
     except KnowledgeIndexError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not ok:
@@ -310,7 +333,7 @@ def delete_item(item_id: int, db: Session = Depends(get_db)) -> dict:
 @router.post("/items/{item_id}/approve", response_model=KnowledgeItemResponse)
 def approve(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemResponse:
     """审核通过：proposed → canonical。"""
-    item = _svc(db).approve_item(item_id)
+    item = _vector_svc_or_503(db).approve_item(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     return KnowledgeItemResponse.model_validate(item)
@@ -319,7 +342,7 @@ def approve(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemRespons
 @router.post("/items/{item_id}/revoke", response_model=KnowledgeItemResponse)
 def revoke(item_id: int, db: Session = Depends(get_db)) -> KnowledgeItemResponse:
     """撤销审核（下线）：canonical → proposed。"""
-    item = _svc(db).revoke_item(item_id)
+    item = _vector_svc_or_503(db).revoke_item(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     return KnowledgeItemResponse.model_validate(item)
@@ -331,7 +354,7 @@ def batch_status(
 ) -> dict:
     """批量上线 / 下线：设置条目与文档状态，并同步向量库 metadata。"""
     try:
-        updated, warnings = _svc(db).set_items_status(payload.ids, payload.status)
+        updated, warnings = _vector_svc_or_503(db).set_items_status(payload.ids, payload.status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"updated": updated, "warnings": warnings}
@@ -343,10 +366,11 @@ def reindex(
     db: Session = Depends(get_db),
 ) -> KnowledgeReindexResponse:
     category = payload.category if payload else None
+    svc = _vector_recovery_svc_or_503(db)
     if not _reindex_operation_lock.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="索引正在重建，请等待当前任务完成")
     try:
-        count = _svc(db).reindex(category=category)
+        count = svc.reindex(category=category)
         return KnowledgeReindexResponse(reindexed=count)
     except KnowledgeIndexError as exc:
         return KnowledgeReindexResponse(
@@ -364,6 +388,7 @@ def create_reindex_job(
 ) -> dict:
     """异步重建索引；前端通过 job 状态轮询展示生成进度。"""
     category = payload.category if payload else None
+    _vector_recovery_svc_or_503(db)
     with _reindex_jobs_lock:
         _sweep_reindex_jobs()
         if not _reindex_operation_lock.acquire(blocking=False):
@@ -392,7 +417,9 @@ def reconcile_vectors(
     cleanup_orphans: bool = Query(False), db: Session = Depends(get_db)
 ) -> dict:
     """对账 SQLite 与向量库；显式请求时清理孤儿向量。"""
-    return _svc(db).reconcile_vectors(cleanup_orphans=cleanup_orphans)
+    return _vector_recovery_svc_or_503(db).reconcile_vectors(
+        cleanup_orphans=cleanup_orphans
+    )
 
 
 @router.get("/reindex/jobs/{job_id}")

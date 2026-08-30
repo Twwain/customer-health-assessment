@@ -278,6 +278,14 @@ export interface KnowledgeSearchResponse {
   results: KnowledgeSearchResult[];
 }
 
+export interface KnowledgeReindexJobStatusResponse {
+  job_id: string;
+  status: "running" | "ready" | "partial" | "error";
+  reindexed: number;
+  error?: string | null;
+  failed_documents?: { document_id: number; title: string; error: string }[];
+}
+
 export interface KnowledgeStatusResponse {
   vector_store: string;
   count: number;

@@ -32,14 +32,16 @@ from services.ai.llm_adapter import (
     LLMError,
     LLMMessage,
     LLMUnavailableError,
+    estimate_tokens,
     get_chat_adapter,
+    stream_chat_completion_controlled,
 )
 from services.ai.prompt_templates import get_template
 from . import tools
 
 
 def _thinking_extra(enabled: bool) -> dict[str, Any] | None:
-    return {"thinking": {"type": "enabled"}} if enabled else None
+    return {"thinking": {"type": "enabled" if enabled else "disabled"}}
 
 
 @dataclass
@@ -81,6 +83,7 @@ class AssessmentStrategyAgent:
     def __init__(
         self, adapter=None, max_iterations: int = 2, tools_enabled: bool = True,
         on_event=None, thinking_enabled: bool = False, cancel_event=None,
+        deadline: float | None = None,
     ) -> None:
         self._adapter = adapter or get_chat_adapter()
         self._max = max(1, max_iterations)
@@ -88,6 +91,7 @@ class AssessmentStrategyAgent:
         self._on_event = on_event
         self._thinking_enabled = thinking_enabled
         self._cancel_event = cancel_event
+        self._deadline = deadline
         self._tool_warning = ""
         self._llm_calls: list[dict[str, Any]] = []
         self._tool_rounds = 0
@@ -96,10 +100,14 @@ class AssessmentStrategyAgent:
         self._retrieve_ms = 0
         self._rag_timings: dict[str, int] = {}
         self._total_tokens = 0
+        self._token_budget_exceeded = False
+        self._tool_budget = tools.ToolBudget()
 
     def _check_cancelled(self) -> None:
         if self._cancel_event is not None and self._cancel_event.is_set():
             raise LLMError("generation cancelled")
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise LLMError("AI 生成超过总时限，已取消")
 
     def _consume_stream(
         self, stream, *, phase: str, messages, max_tokens: int, usage: dict[str, Any]
@@ -121,7 +129,16 @@ class AssessmentStrategyAgent:
         finally:
             duration_ms = int((time.monotonic() - started) * 1000)
             completion_tokens = int(usage.get("completion_tokens") or 0)
-            self._total_tokens += int(usage.get("total_tokens") or 0)
+            reported_tokens = int(usage.get("total_tokens") or 0)
+            estimated = reported_tokens == 0
+            call_tokens = reported_tokens or estimate_tokens(
+                "\n".join(
+                    str(m.content if isinstance(m, LLMMessage) else m.get("content", ""))
+                    for m in messages
+                )
+                + "".join(chunks)
+            )
+            self._total_tokens += call_tokens
             self._llm_calls.append(
                 {
                     "phase": phase,
@@ -137,26 +154,41 @@ class AssessmentStrategyAgent:
                     "thinking_enabled": self._thinking_enabled,
                     "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                     "completion_tokens": completion_tokens,
-                    "total_tokens": int(usage.get("total_tokens") or 0),
+                    "total_tokens": call_tokens,
+                    "tokens_estimated": estimated,
                     "completion_tokens_per_second": (
                         round(completion_tokens * 1000 / duration_ms, 2)
                         if completion_tokens and duration_ms else None
                     ),
                 }
             )
-            if self._total_tokens > config.CHAT_TURN_TOKEN_BUDGET:
-                raise LLMError("本轮 Agent 已达到总 token 预算")
+            self._token_budget_exceeded = (
+                self._total_tokens > config.CHAT_TURN_TOKEN_BUDGET
+            )
+            if self._on_event:
+                self._on_event(
+                    "usage",
+                    {
+                        "tokens_used": self._total_tokens,
+                        "token_budget_exceeded": self._token_budget_exceeded,
+                        "tokens_estimated": estimated,
+                        "llm_call": self._llm_calls[-1],
+                    },
+                )
 
     # ── 节点 ────────────────────────────────────────────────────────────────
     def _call_llm(self, messages: list[LLMMessage], template) -> str:
         usage: dict[str, Any] = {}
         max_tokens = min(template.max_tokens, config.LLM_MAX_TOKENS)
-        stream = self._adapter.stream_chat_completion(
+        stream = stream_chat_completion_controlled(
+            self._adapter,
             messages,
             temperature=template.temperature,
             max_tokens=max_tokens,
             on_usage=lambda value: usage.update(value),
             extra=_thinking_extra(self._thinking_enabled),
+            cancel_event=self._cancel_event,
+            deadline=self._deadline,
         )
         return self._consume_stream(
             stream, phase="refine", messages=messages, max_tokens=max_tokens, usage=usage
@@ -196,7 +228,8 @@ class AssessmentStrategyAgent:
             tool_calls: list[dict] = []
             usage: dict[str, Any] = {}
             max_tokens = min(template.max_tokens, config.LLM_MAX_TOKENS)
-            stream = self._adapter.stream_chat_completion(
+            stream = stream_chat_completion_controlled(
+                self._adapter,
                 messages,
                 temperature=template.temperature,
                 max_tokens=max_tokens,
@@ -204,12 +237,17 @@ class AssessmentStrategyAgent:
                 on_tool_calls=lambda tcs: tool_calls.extend(tcs),
                 on_usage=lambda value: usage.update(value),
                 extra=_thinking_extra(self._thinking_enabled),
+                cancel_event=self._cancel_event,
+                deadline=self._deadline,
             )
             phase = "reason" if tool_rounds == 0 else "tool_followup"
             text = self._consume_stream(
                 stream, phase=phase, messages=messages, max_tokens=max_tokens, usage=usage
             )
             self._check_cancelled()
+            if self._token_budget_exceeded:
+                self._tool_warning = "本轮 token 已超过预算，已保留当前结果并停止后续模型调用"
+                return text, refs
             if not tool_calls:
                 return text, refs
             if text and self._on_event:
@@ -218,22 +256,26 @@ class AssessmentStrategyAgent:
             self._tool_rounds += 1
             tool_started = time.monotonic()
             messages, round_refs = tools.append_tool_results(
-                messages, tool_calls, customer=customer, db=db, exclude_ids=exclude
+                messages, tool_calls, customer=customer, db=db, exclude_ids=exclude,
+                budget=self._tool_budget,
             )
             self._tool_ms += int((time.monotonic() - tool_started) * 1000)
             refs.extend(round_refs)
             exclude.update(r["id"] for r in round_refs)
-            if tool_rounds >= tools.MAX_TOOL_ROUNDS:
+            if tool_rounds >= tools.MAX_TOOL_ROUNDS or self._tool_budget.calls_remaining <= 0:
                 # 已回填本轮工具结果：不带工具收尾一次，避免空回复
-                self._tool_warning = "工具调用次数已达上限，已基于已获取信息作答"
+                self._tool_warning = "工具调用次数已达上限（或总预算耗尽），已基于已获取信息作答"
                 usage = {}
-                stream = self._adapter.stream_chat_completion(
+                stream = stream_chat_completion_controlled(
+                    self._adapter,
                     messages,
                     temperature=template.temperature,
                     max_tokens=max_tokens,
                     tools=None,
                     on_usage=lambda value: usage.update(value),
                     extra=_thinking_extra(self._thinking_enabled),
+                    cancel_event=self._cancel_event,
+                    deadline=self._deadline,
                 )
                 final_text = self._consume_stream(
                     stream, phase="tool_final", messages=messages,
@@ -294,6 +336,8 @@ class AssessmentStrategyAgent:
         self._retrieve_ms = 0
         self._rag_timings = {}
         self._total_tokens = 0
+        self._token_budget_exceeded = False
+        self._tool_budget = tools.ToolBudget()
         max_iter = max_iterations or self._max
         today = datetime.date.today().isoformat()
         template = get_template(scenario)
@@ -306,8 +350,9 @@ class AssessmentStrategyAgent:
                 ctx.assessment = tools.score_query(customer, db)
             if not ctx.customer_text:
                 profile = tools.profile_query(customer)
-                ctx.customer_text = "## 客户画像（工具查询）\n" + "；".join(
-                    f"{k}={v}" for k, v in profile.items()
+                ctx.customer_text = "## 客户画像（工具查询）\n" + tools.guardrails.wrap_untrusted(
+                    "；".join(f"{k}={v}" for k, v in profile.items()),
+                    "customer",
                 )
 
         # ① retrieve（Agent 自带 RAG 工具）
@@ -329,7 +374,7 @@ class AssessmentStrategyAgent:
             draft, reason_refs = self._reason(
                 ctx, references, question, today, template, customer=customer, db=db
             )
-            if not draft.strip():
+            if not draft.strip() and not self._token_budget_exceeded:
                 # 空草稿重试一次（不带工具）：避免模型偶发空响应直接带崩整个流程
                 self._tool_warning = "首次生成返回为空，已自动重试"
                 retry_draft, retry_refs = self._reason(
@@ -366,7 +411,11 @@ class AssessmentStrategyAgent:
         text = draft
         iterations = 1
         critique_text = tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge)
-        while tools.needs_refine(critique_text) and iterations < max_iter:
+        while (
+            not self._token_budget_exceeded
+            and tools.needs_refine(critique_text)
+            and iterations < max_iter
+        ):
             iterations += 1
             self._refine_rounds += 1
             if self._on_event:

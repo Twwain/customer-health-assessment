@@ -7,6 +7,10 @@ Embedding 用「词袋」假函数（中文按字向量化），使检索相关�
 """
 
 import io
+import sys
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -17,7 +21,12 @@ from sqlalchemy.pool import StaticPool
 
 import config
 from database import Base, get_db
-from models import Customer, KnowledgeItem
+from models import (
+    Customer,
+    KnowledgeChunk,
+    KnowledgeItem,
+    KnowledgeVectorMetadataOutbox,
+)
 from services.rag.chunker import chunk_text
 from services.rag.embeddings import EmbeddingUnavailableError, make_embedding_func
 from services.rag.parser import ParseError, parse_document
@@ -135,6 +144,36 @@ def test_embedding_unavailable_raises():
         make_embedding_func()(["任意文本"])
 
 
+def test_embedding_func_requests_configured_dimensions(monkeypatch):
+    import services.rag.embeddings as embeddings
+
+    calls: list[tuple[list[str], int | None]] = []
+
+    class StubAdapter:
+        def embed(self, texts, dimensions=None):
+            calls.append((list(texts), dimensions))
+            return [[0.0] * int(dimensions) for _ in texts]
+
+    monkeypatch.setattr(embeddings, "get_embedding_adapter", lambda: StubAdapter())
+    monkeypatch.setattr(embeddings, "EMBEDDING_DIM", 7)
+    result = embeddings.make_embedding_func()(["测试"])
+    assert calls == [(["测试"], 7)]
+    assert len(result[0]) == 7
+
+
+def test_embedding_func_rejects_gateway_native_dimension(monkeypatch):
+    import services.rag.embeddings as embeddings
+
+    class StubAdapter:
+        def embed(self, texts, dimensions=None):
+            return [[0.0] * 5 for _ in texts]
+
+    monkeypatch.setattr(embeddings, "get_embedding_adapter", lambda: StubAdapter())
+    monkeypatch.setattr(embeddings, "EMBEDDING_DIM", 7)
+    with pytest.raises(EmbeddingUnavailableError, match="返回维度与配置不一致"):
+        embeddings.make_embedding_func()(["测试"])
+
+
 # ══════════════════════════ 向量存储 ════════════════════════════════════════
 
 
@@ -179,6 +218,310 @@ def test_chroma_failure_does_not_fallback_to_memory(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="持久化向量库不可用"):
         vs.get_vector_store()
+
+
+def test_chroma_dimension_change_uses_shadow_collection(monkeypatch):
+    import services.rag.vector_store as vs
+
+    class FakeCollection:
+        def __init__(self, name, metadata, embeddings=None):
+            self.name = name
+            self.metadata = metadata
+            self.embeddings = list(embeddings or [])
+
+        def count(self):
+            return len(self.embeddings)
+
+        def get(self, limit=None, include=None):
+            rows = self.embeddings[:limit]
+            return {"embeddings": rows, "ids": [str(i) for i in range(len(rows))]}
+
+        def modify(self, metadata):
+            self.metadata = dict(metadata)
+
+    class FakeClient:
+        def __init__(self):
+            self.collections = {
+                # metadata 故意谎报 7，真实向量维度是 5。
+                "kb": FakeCollection("kb", {"dimension": 7}, [[0.0] * 5, [1.0] * 5])
+            }
+
+        def list_collections(self):
+            return list(self.collections.values())
+
+        def get_collection(self, name):
+            if name not in self.collections:
+                raise KeyError(name)
+            return self.collections[name]
+
+        def get_or_create_collection(self, name, metadata):
+            return self.collections.setdefault(name, FakeCollection(name, metadata))
+
+    client = FakeClient()
+    monkeypatch.setitem(
+        sys.modules,
+        "chromadb",
+        SimpleNamespace(PersistentClient=lambda path: client),
+    )
+    monkeypatch.setattr(vs, "EMBEDDING_DIM", 7)
+
+    store = vs.ChromaVectorStore(persist_dir="unused", collection="kb")
+
+    assert store.dimension_migration_required is True
+    assert store.migration_required is True
+    assert store.collection_name == vs._embedding_collection_name(
+        "kb", store.embedding_fingerprint
+    )
+    assert client.collections["kb"].count() == 2
+    assert client.collections[store.collection_name].metadata["dimension"] == 7
+    with pytest.raises(RuntimeError, match="全量重索引"):
+        store.query([0.0] * 7, 1)
+
+
+def test_real_chroma_detects_lying_legacy_dimension_and_same_dim_model_change(
+    tmp_path, monkeypatch
+):
+    chromadb = pytest.importorskip("chromadb")
+    import services.rag.vector_store as vs
+
+    persist_dir = str(tmp_path / "chroma-fingerprint")
+    client = chromadb.PersistentClient(path=persist_dir)
+    legacy = client.get_or_create_collection(
+        "kb_test", metadata={"hnsw:space": "cosine", "dimension": 7}
+    )
+    legacy.add(
+        ids=["legacy"], documents=["旧向量"], embeddings=[[0.0] * 5],
+        metadatas=[{"status": "canonical"}],
+    )
+    monkeypatch.setattr(vs, "EMBEDDING_DIM", 7)
+    monkeypatch.setattr(vs, "EMBEDDING_MODEL", "model-a")
+
+    migrating = vs.ChromaVectorStore(persist_dir=persist_dir, collection="kb_test")
+    assert migrating.dimension_migration_required is True
+    assert migrating.migration_required is True
+
+    old_dim_dir = str(tmp_path / "chroma-old-dim-name")
+    old_dim_client = chromadb.PersistentClient(path=old_dim_dir)
+    old_dim = old_dim_client.get_or_create_collection(
+        "kb_test__dim_7", metadata={"hnsw:space": "cosine", "dimension": 7}
+    )
+    old_dim.add(
+        ids=["old-dim"], documents=["旧版命名"], embeddings=[[0.0] * 7],
+        metadatas=[{"status": "canonical"}],
+    )
+    old_dim_migration = vs.ChromaVectorStore(
+        persist_dir=old_dim_dir, collection="kb_test"
+    )
+    assert old_dim_migration.migration_required is True
+
+    # 新库上先激活 model-a，再换成同维 model-b；两者仍必须隔离。
+    clean_dir = str(tmp_path / "chroma-same-dim")
+    store_a = vs.ChromaVectorStore(persist_dir=clean_dir, collection="kb_test")
+    store_a.add(
+        ["a"], ["A"], [[1.0] * 7], [{"status": "canonical"}]
+    )
+    name_a = store_a.collection_name
+    restarted_a = vs.ChromaVectorStore(persist_dir=clean_dir, collection="kb_test")
+    assert restarted_a.migration_required is False
+    assert restarted_a.collection_name == name_a
+    monkeypatch.setattr(vs, "EMBEDDING_MODEL", "model-b")
+    store_b = vs.ChromaVectorStore(persist_dir=clean_dir, collection="kb_test")
+    assert store_b.collection_name != name_a
+    assert store_b.migration_required is True
+    assert store_b.count() == 0
+    assert store_b._client.get_collection(name=name_a).count() == 1
+
+    store_b.prepare_rebuild()
+    store_b.add_rebuild(
+        ["b"], ["B"], [[0.5] * 7], [{"status": "canonical"}]
+    )
+    store_b.activate_rebuild()
+    assert store_b.migration_required is False
+    assert store_b.query([0.5] * 7, 1)[0]["id"] == "b"
+    restarted_b = vs.ChromaVectorStore(persist_dir=clean_dir, collection="kb_test")
+    assert restarted_b.migration_required is False
+    assert restarted_b.collection_name == store_b.collection_name
+
+
+def test_embedding_migration_switches_sql_only_after_whole_shadow_succeeds(
+    db, fake_embed
+):
+    from services.rag.knowledge_base import KnowledgeBaseService, KnowledgeIndexError
+
+    old_store = InMemoryVectorStore()
+    original = _kb(db, old_store, fake_embed)
+    original.create_from_upload(
+        title="文档 A", category="内部规范", filename="a.md",
+        raw=METHODOLOGY_MD.encode("utf-8"),
+    )
+    original.create_from_upload(
+        title="文档 B", category="外部指标", filename="b.md",
+        raw=TREND_MD.encode("utf-8"),
+    )
+    old_ids = {row.vector_id for row in db.query(KnowledgeChunk).all()}
+
+    class MigratingStore(InMemoryVectorStore):
+        migration_required = True
+        activated = False
+        collection_name = "kb__emb_new"
+
+        def prepare_rebuild(self):
+            self.reset()
+
+        def add_rebuild(self, ids, documents, embeddings, metadatas):
+            super().add(ids, documents, embeddings, metadatas)
+
+        def activate_rebuild(self):
+            self.migration_required = False
+            self.activated = True
+
+    target = MigratingStore()
+    calls = 0
+
+    def fail_second_document(texts):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("second document failed")
+        return fake_embed(texts)
+
+    svc = KnowledgeBaseService(db, store=target, embed_func=fail_second_document)
+    with pytest.raises(KnowledgeIndexError, match="构建失败"):
+        svc.reindex()
+    assert {row.vector_id for row in db.query(KnowledgeChunk).all()} == old_ids
+    assert target.count() == 0
+    assert target.activated is False
+
+    svc._embed = fake_embed
+    assert svc.reindex() == 2
+    new_ids = {row.vector_id for row in db.query(KnowledgeChunk).all()}
+    assert new_ids and new_ids.isdisjoint(old_ids)
+    assert target.activated is True
+    assert target.count() == len(new_ids)
+
+
+def test_chroma_failure_keeps_sql_knowledge_reads_available(db, monkeypatch):
+    import services.rag.knowledge_base as kb
+    from services.rag.knowledge_base import KnowledgeBaseService, KnowledgeIndexError
+
+    monkeypatch.setattr(
+        kb, "get_vector_store",
+        lambda: (_ for _ in ()).throw(RuntimeError("chroma down")),
+    )
+    svc = KnowledgeBaseService(db)
+    assert svc.list_items() == []
+    with pytest.raises(KnowledgeIndexError, match="持久化向量库不可用"):
+        svc.ensure_vector_available()
+
+
+def test_embedding_migration_blocks_normal_vector_traffic_but_allows_recovery(db):
+    from services.rag.knowledge_base import KnowledgeBaseService, KnowledgeIndexError
+
+    store = InMemoryVectorStore()
+    store.migration_required = True
+    svc = KnowledgeBaseService(db, store=store)
+    with pytest.raises(KnowledgeIndexError, match="全量重索引"):
+        svc.ensure_vector_available()
+    svc.ensure_vector_available(allow_migration=True)
+
+
+def test_readiness_returns_503_when_chroma_is_unavailable(monkeypatch):
+    import main
+    import services.rag.vector_store as vs
+
+    monkeypatch.setattr(
+        vs, "get_vector_store",
+        lambda: (_ for _ in ()).throw(RuntimeError("chroma down")),
+    )
+    response = main.readiness()
+    assert response.status_code == 503
+    assert b'"ready":false' in response.body
+
+
+def test_readiness_rejects_sql_vector_split_brain(
+    db, memory_store, fake_embed, monkeypatch
+):
+    import json
+    import main
+    import services.rag.vector_store as vs
+    from services.rag.knowledge_base import KnowledgeBaseService
+
+    svc = KnowledgeBaseService(db, store=memory_store, embed_func=fake_embed)
+    doc = svc.create_from_upload(
+        title="持久化缺失探针", category="内部规范", filename="probe.md",
+        raw=METHODOLOGY_MD.encode("utf-8"),
+    )
+    vector_ids = list(memory_store.list_ids())
+    memory_store.delete(vector_ids)
+    before = svc.inspect_vector_integrity()
+    db.refresh(doc)
+
+    monkeypatch.setattr(vs, "get_vector_store", lambda: memory_store)
+    monkeypatch.setattr(
+        main, "SessionLocal",
+        sessionmaker(bind=db.get_bind(), autoflush=False, autocommit=False),
+    )
+    response = main.readiness()
+    body = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert body["integrity"]["missing_vectors"] == len(vector_ids)
+    assert body["integrity"]["affected_documents"] == [doc.id]
+    # readiness 必须只读；状态校正由启动对账或显式 reconcile 负责。
+    assert set(before["missing_ids"]) == set(vector_ids)
+    assert doc.index_status == "indexed"
+
+
+def test_readiness_rejects_pending_metadata_outbox(db, memory_store, monkeypatch):
+    import json
+    import main
+    import services.rag.vector_store as vs
+
+    db.add(KnowledgeVectorMetadataOutbox(vector_id="pending", payload={"status": "canonical"}))
+    db.commit()
+    monkeypatch.setattr(vs, "get_vector_store", lambda: memory_store)
+    monkeypatch.setattr(
+        main, "SessionLocal",
+        sessionmaker(bind=db.get_bind(), autoflush=False, autocommit=False),
+    )
+
+    response = main.readiness()
+    body = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert body["integrity"]["metadata_pending"] == 1
+
+
+def test_readiness_reuses_background_integrity_snapshot(
+    db, memory_store, fake_embed, monkeypatch
+):
+    import main
+    import services.rag.vector_store as vs
+    from services.rag.knowledge_base import KnowledgeBaseService
+
+    svc = _kb(db, memory_store, fake_embed)
+    svc.create_from_upload(
+        title="轻量探针", category="内部规范", filename="probe.md",
+        raw=METHODOLOGY_MD.encode("utf-8"),
+    )
+    svc.inspect_vector_integrity()
+    calls = 0
+    original_list_ids = memory_store.list_ids
+
+    def counted_list_ids():
+        nonlocal calls
+        calls += 1
+        return original_list_ids()
+
+    monkeypatch.setattr(memory_store, "list_ids", counted_list_ids)
+    monkeypatch.setattr(vs, "get_vector_store", lambda: memory_store)
+    monkeypatch.setattr(
+        main, "SessionLocal",
+        sessionmaker(bind=db.get_bind(), autoflush=False, autocommit=False),
+    )
+    assert main.readiness()["ready"] is True
+    assert main.readiness()["ready"] is True
+    assert calls == 0
 
 
 # ══════════════════════════ 重排 ════════════════════════════════════════════
@@ -308,6 +651,7 @@ def test_delete_vector_failure_keeps_durable_tombstone(memory_store, db, fake_em
     )
     item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).one()
     svc.approve_item(item.id)
+    original_delete = memory_store.delete
     monkeypatch.setattr(memory_store, "delete", lambda ids: (_ for _ in ()).throw(RuntimeError("down")))
 
     with pytest.raises(KnowledgeIndexError, match="知识已下线"):
@@ -319,6 +663,123 @@ def test_delete_vector_failure_keeps_durable_tombstone(memory_store, db, fake_em
     assert doc.index_status == "deleting"
     assert svc.search("回款逾期") == []
 
+    monkeypatch.setattr(memory_store, "delete", original_delete)
+    result = svc.reconcile_vectors(cleanup_orphans=True)
+    assert result["pending_delete_retried"] == 1
+    assert result["pending_delete_failures"] == []
+    assert db.get(KnowledgeDocument, doc.id) is None
+    assert memory_store.count() == 0
+
+
+def test_reindex_never_resurrects_failed_delete_tombstone(
+    memory_store, db, fake_embed, monkeypatch
+):
+    from models import KnowledgeDocument
+    from services.rag.knowledge_base import KnowledgeIndexError
+
+    svc = _kb(db, memory_store, fake_embed)
+    doc = svc.create_from_upload(
+        title="待删除资料", category="内部规范", filename="m.md",
+        raw=METHODOLOGY_MD.encode("utf-8"),
+    )
+    item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).one()
+    monkeypatch.setattr(
+        memory_store, "delete",
+        lambda ids: (_ for _ in ()).throw(RuntimeError("down")),
+    )
+    with pytest.raises(KnowledgeIndexError):
+        svc.delete_item(item.id)
+
+    assert svc.reindex() == 0
+    db.expire_all()
+    tombstone = db.get(KnowledgeDocument, doc.id)
+    assert tombstone is not None
+    assert tombstone.index_status == "deleting"
+
+
+def test_reconcile_preserves_delete_intent_when_vectors_are_missing(
+    memory_store, db, fake_embed, monkeypatch
+):
+    from pathlib import Path
+    from models import KnowledgeDocument
+    from services.rag.knowledge_base import KnowledgeIndexError
+
+    svc = _kb(db, memory_store, fake_embed)
+    doc = svc.create_from_upload(
+        title="待清理文档", category="内部规范", filename="delete.md",
+        raw=METHODOLOGY_MD.encode("utf-8"),
+    )
+    doc_id, file_path = doc.id, Path(doc.file_path)
+    item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc_id).one()
+    memory_store.reset()  # 删除之前索引已损坏；不能因此丢失后续删除意图。
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            memory_store, "delete",
+            lambda ids: (_ for _ in ()).throw(RuntimeError("delete unavailable")),
+        )
+        with pytest.raises(KnowledgeIndexError):
+            svc.delete_item(item.id)
+        result = svc.reconcile_vectors(cleanup_orphans=True)
+        assert result["pending_delete_failures"]
+        db.expire_all()
+        assert db.get(KnowledgeDocument, doc_id).index_status == "deleting"
+        assert svc.reindex() == 0
+
+    recovered = svc.reconcile_vectors(cleanup_orphans=True)
+    assert recovered["pending_delete_retried"] == 1
+    assert db.get(KnowledgeDocument, doc_id) is None
+    assert not file_path.exists()
+
+
+def test_reconcile_waits_for_shadow_index_commit(memory_store, db, fake_embed, monkeypatch):
+    """对账清理必须与影子索引共享锁，不能把 SQL 切换前的 staged ID 当孤儿删掉。"""
+    svc = _kb(db, memory_store, fake_embed)
+    doc = svc.create_from_upload(
+        title="并发重索引", category="内部规范", filename="m.md",
+        raw=METHODOLOGY_MD.encode("utf-8"),
+    )
+    original_add = memory_store.add
+    staged = threading.Event()
+    release = threading.Event()
+
+    def blocking_add(ids, documents, embeddings, metadatas):
+        original_add(ids, documents, embeddings, metadatas)
+        if any(":v" in vector_id for vector_id in ids):
+            staged.set()
+            assert release.wait(2)
+
+    monkeypatch.setattr(memory_store, "add", blocking_add)
+    errors: list[BaseException] = []
+
+    def reindex_worker():
+        try:
+            svc.reindex()
+        except BaseException as exc:  # pragma: no cover - 失败由主线程断言
+            errors.append(exc)
+
+    reconcile_result: dict = {}
+
+    def reconcile_worker():
+        try:
+            reconcile_result.update(svc.reconcile_vectors(cleanup_orphans=True))
+        except BaseException as exc:  # pragma: no cover - 失败由主线程断言
+            errors.append(exc)
+
+    reindex_thread = threading.Thread(target=reindex_worker)
+    reconcile_thread = threading.Thread(target=reconcile_worker)
+    reindex_thread.start()
+    assert staged.wait(2)
+    reconcile_thread.start()
+    time.sleep(0.05)
+    assert reconcile_thread.is_alive()
+    release.set()
+    reindex_thread.join(2)
+    reconcile_thread.join(2)
+    assert not errors
+    assert reconcile_result["missing_ids"] == []
+    db.refresh(doc)
+    assert doc.index_status == "indexed"
+
 
 def test_revoke_uses_sql_status_when_vector_metadata_update_fails(
     memory_store, db, fake_embed, monkeypatch
@@ -329,19 +790,35 @@ def test_revoke_uses_sql_status_when_vector_metadata_update_fails(
     )
     item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).one()
     svc.approve_item(item.id)
+    original_update = memory_store.update_metadatas
     monkeypatch.setattr(
         memory_store, "update_metadatas",
         lambda ids, metas: (_ for _ in ()).throw(RuntimeError("down")),
     )
-    svc.revoke_item(item.id)
+    revoked = svc.revoke_item(item.id)
+    assert revoked is not None and revoked.sync_pending is True
+    assert revoked.sync_warnings
+    assert db.query(KnowledgeVectorMetadataOutbox).count() == doc.chunk_count
     assert svc.search("回款逾期") == []
+
+    monkeypatch.setattr(memory_store, "update_metadatas", original_update)
+    from services.rag.knowledge_base import run_vector_maintenance_once
+
+    assert run_vector_maintenance_once(db, memory_store) is True
+    result = svc.inspect_vector_health()
+    assert result["metadata_pending"] == 0
+    assert not memory_store.query(
+        _bag_of_chars_embed(["回款逾期"])[0],
+        top_k=10,
+        where={"status": "canonical"},
+    )
 
 
 def test_vector_reconcile_cleans_orphans(memory_store, db, fake_embed):
     svc = _kb(db, memory_store, fake_embed)
     memory_store.add(["orphan"], ["孤儿"], [[1.0] * 64], [{"status": "canonical"}])
     result = svc.reconcile_vectors(cleanup_orphans=True)
-    assert result["orphan_ids"] == ["orphan"]
+    assert result["orphan_ids"] == []
     assert result["orphans_cleaned"] == 1
     assert "orphan" not in memory_store.list_ids()
 
@@ -504,6 +981,73 @@ def test_async_reindex_job_reports_completion(app_client):
     assert status.status_code == 200
     assert status.json()["status"] == "ready"
     assert status.json()["reindexed"] >= 1
+
+
+def _wait_reindex_job(app_client, job_id):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        response = app_client.get(f"/api/knowledge/reindex/jobs/{job_id}")
+        assert response.status_code == 200
+        result = response.json()
+        if result["status"] != "running":
+            return result
+        time.sleep(0.01)
+    pytest.fail("重索引任务未能结束")
+
+
+def test_async_reindex_recovers_embedding_migration(app_client, monkeypatch):
+    uploaded = app_client.post(
+        "/api/knowledge/upload",
+        files={"file": ("migration.md", METHODOLOGY_MD.encode("utf-8"), "text/markdown")},
+        data={"category": "内部规范"},
+    )
+    assert uploaded.status_code == 200
+
+    class MigratingStore(InMemoryVectorStore):
+        migration_required = True
+
+        def prepare_rebuild(self):
+            self.reset()
+
+        def add_rebuild(self, ids, documents, embeddings, metadatas):
+            super().add(ids, documents, embeddings, metadatas)
+
+        def activate_rebuild(self):
+            self.migration_required = False
+
+    target = MigratingStore()
+    monkeypatch.setattr("services.rag.knowledge_base.get_vector_store", lambda: target)
+    created = app_client.post("/api/knowledge/reindex/jobs", json={})
+    assert created.status_code == 200
+    result = _wait_reindex_job(app_client, created.json()["job_id"])
+    assert result["status"] == "ready", result
+    assert result["reindexed"] == 1
+    assert target.migration_required is False
+    assert target.count() == uploaded.json()["chunk_count"]
+
+
+def test_async_reindex_reports_partial_document_failures(app_client, db):
+    from pathlib import Path
+    from models import KnowledgeDocument
+
+    for title in ("可重建文档", "原文缺失文档"):
+        response = app_client.post(
+            "/api/knowledge/upload",
+            files={"file": ("partial.md", METHODOLOGY_MD.encode("utf-8"), "text/markdown")},
+            data={"title": title, "category": "内部规范"},
+        )
+        assert response.status_code == 200
+    missing = db.query(KnowledgeDocument).filter(KnowledgeDocument.title == "原文缺失文档").one()
+    missing_id = missing.id
+    Path(missing.file_path).unlink()
+    created = app_client.post("/api/knowledge/reindex/jobs", json={})
+    assert created.status_code == 200
+    result = _wait_reindex_job(app_client, created.json()["job_id"])
+    assert result["status"] == "partial", result
+    assert result["reindexed"] == 1
+    assert result["failed_documents"] == [{
+        "document_id": missing_id, "title": "原文缺失文档", "error": "文档无可用文本",
+    }]
 
 
 def test_sync_reindex_rejects_when_another_reindex_is_running(app_client):
@@ -1142,3 +1686,33 @@ def test_migrate_add_industry_column_adds_to_legacy_table(tmp_path):
     finally:
         db.close()
         eng.dispose()
+
+
+def test_startup_runs_sql_schema_migration_when_chroma_is_unavailable(
+    tmp_path, monkeypatch
+):
+    """Chroma fail-closed 不能阻断 knowledge_items 的纯 SQL 补列。"""
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.orm import sessionmaker
+    import main
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-knowledge.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(sa_text(
+            "CREATE TABLE knowledge_items ("
+            "id INTEGER PRIMARY KEY, document_id INTEGER, title VARCHAR(200), "
+            "category VARCHAR(30), status VARCHAR(20))"
+        ))
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=legacy_engine))
+    monkeypatch.setattr(
+        "services.rag.vector_store.get_vector_store",
+        lambda: (_ for _ in ()).throw(RuntimeError("chroma down")),
+    )
+    main._migrate_required_schema()
+    main._migrate_legacy_data()
+    with legacy_engine.connect() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(sa_text("PRAGMA table_info(knowledge_items)"))
+        }
+    assert "industry" in columns
