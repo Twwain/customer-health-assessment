@@ -24,6 +24,7 @@ interface StreamMsg {
   trend?: AssessmentTrendResponse | null;
   degraded: boolean;
   scenario?: string;
+  stageMessage?: string;
   streaming: true;
 }
 
@@ -148,7 +149,10 @@ export default function Chat() {
         };
         break;
       case "delta":
-        next = { ...cur, content: cur.content + (ev.data.text as string) };
+        next = { ...cur, content: cur.content + (ev.data.text as string), stageMessage: undefined };
+        break;
+      case "stage":
+        next = { ...cur, stageMessage: ev.data.message as string };
         break;
       case "replace":
         next = { ...cur, content: (ev.data.text as string | undefined) || "" };
@@ -382,6 +386,8 @@ export default function Chat() {
           setExporting(false);
           if (s.status === "error") {
             notify("报告生成失败：" + (s.error || "未知错误"), "error");
+          } else if (s.warnings?.length) {
+            notify(s.warnings.join("；"), "info");
           }
         }
       } catch {
@@ -550,7 +556,7 @@ export default function Chat() {
                 assessment={isStream ? (stream as StreamMsg)?.assessment : ctx.assessment}
                 trend={isStream ? (stream as StreamMsg)?.trend : ctx.trend}
                 streaming={isStream}
-                streamHint={isStream ? streamLabel((stream as StreamMsg)?.scenario) : undefined}
+                streamHint={isStream ? (stream?.stageMessage || streamLabel(stream?.scenario)) : undefined}
                 feedback={feedbacks[mid] || ""}
                 adopted={!!adopted[mid]}
                 onTrace={setTrace}
@@ -674,6 +680,7 @@ function MessageView({
               {renderMarkdown(msg.content)}
               {streaming && <span className="cursor-blink ml-0.5" />}
             </div>
+            {streaming && streamHint && <div className="mt-2 text-[12px] text-muted">{streamHint}</div>}
           </div>
         ) : streaming ? (
           <div className="md-text rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5 text-[14.5px] text-muted">

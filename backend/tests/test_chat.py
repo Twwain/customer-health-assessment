@@ -1244,6 +1244,7 @@ def test_stream_parses_sse_and_usage(monkeypatch):
         'data: {"choices": [{"delta": {"content": "客户"}}]}',
         "",
         'data: {"choices": [{"delta": {"content": "健康度"}}]}',
+        'data: {"choices": [{"delta": {}, "finish_reason": "length"}]}',
         'data: {"choices": [], "usage": {"total_tokens": 42}}',
         "data: [DONE]",
     ]
@@ -1255,6 +1256,7 @@ def test_stream_parses_sse_and_usage(monkeypatch):
     )
     assert "".join(chunks) == "客户健康度"
     assert usage["total_tokens"] == 42
+    assert usage["finish_reason"] == "length"
 
 
 def test_stream_cancel_event_actively_closes_blocking_http_response(monkeypatch):
@@ -1607,10 +1609,12 @@ def test_agent_loop_retrieves_then_traces_references(db, customer, fake_llm, mon
     assert "```json" not in visible
     assert '"strategies"' not in visible
     done = next(e for e in events if e.type == "done")
-    assert done.data["tokens_used"] == 128
-    assert len(adapter.calls) == 1
-    assert adapter.tool_args == [None]
+    assert done.data["tokens_used"] == 256  # 首稿 + 独立核对
+    assert len(adapter.calls) == 2
+    assert adapter.tool_args == [None, None]
     assert done.data["timings"]["refine_rounds"] == 0
+    # 本用例假模型始终返回策略正文，不能将它当成有效核对 JSON。
+    assert done.data["timings"]["verification"][-1]["status"] == "unverified"
 
 
 def test_agent_loop_degrades_when_llm_offline(db, customer, offline_llm):
@@ -2244,10 +2248,39 @@ def test_knowledge_search_tool_dedups_and_returns_refs(db, monkeypatch):
         [{"role": "user", "content": "q"}], tc, db=db, exclude_ids={"1:0"}
     )
     payload = json.loads(messages[-1]["content"])
-    assert payload["count"] == 1
-    assert payload["results"][0]["id"] == "2:1"
+    assert payload["count"] == 2
+    assert [r["id"] for r in payload["results"]] == ["1:0", "2:1"]
+    assert payload["already_in_context_ids"] == ["1:0"]
     assert [r["id"] for r in refs] == ["2:1"]
     assert refs[0]["snippet"] == "内容B"
+
+
+@pytest.mark.parametrize("has_hits", [True, False])
+def test_knowledge_tool_preserves_prefetched_hits_and_true_empty_results(db, monkeypatch, has_hits):
+    from services.rag.retriever import RetrievedChunk as RC
+
+    chunks = [RC(
+        document_id=1, chunk_index=0, item_id=1, item_title="服务手册",
+        category="内部规范", content="P1中断45分钟内响应，48小时内提交根因报告。",
+        score=0.9, metadata={},
+    )] if has_hits else []
+    monkeypatch.setattr("services.rag.retriever.retrieve_knowledge", lambda *a, **kw: chunks)
+    messages, refs = tools.append_tool_results(
+        [{"role": "user", "content": "核实P1时限"}],
+        [{"id": "call_k", "name": "knowledge_search", "arguments": '{"query":"P1"}'}],
+        db=db, exclude_ids={"1:0"},
+    )
+    payload = json.loads(messages[-1]["content"])
+    assert refs == []
+    assert payload["count"] == int(has_hits)
+    if has_hits:
+        assert payload["results"][0]["content"] == chunks[0].content
+        assert payload["already_in_context_ids"] == ["1:0"]
+        assert "有效检索结果" in payload["context_note"]
+    else:
+        assert payload["results"] == []
+        assert "already_in_context_ids" not in payload
+        assert "context_note" not in payload
 
 
 def test_free_qa_knowledge_search_tool_adds_references(db, customer, monkeypatch):

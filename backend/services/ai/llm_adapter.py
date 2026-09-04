@@ -428,6 +428,7 @@ class CompatAdapter:
     ) -> Iterator[str]:
         emitted = False
         tool_acc: dict[int, dict[str, Any]] = {}
+        stream_usage: dict[str, Any] = {}
         events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=256)
         stop_reader = threading.Event()
         response_box: dict[str, Any] = {}
@@ -540,8 +541,12 @@ class CompatAdapter:
                     continue
                 usage = chunk.get("usage")
                 if usage and on_usage:
-                    on_usage(usage)
+                    stream_usage.update(usage)
+                    on_usage(dict(stream_usage))
                 for choice in chunk.get("choices") or []:
+                    if choice.get("finish_reason") and on_usage:
+                        stream_usage["finish_reason"] = choice["finish_reason"]
+                        on_usage(dict(stream_usage))
                     delta = choice.get("delta") or {}
                     content = delta.get("content")
                     if content:

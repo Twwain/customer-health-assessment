@@ -50,7 +50,7 @@ export const customers = {
       .then((r) => r.data),
   pdfJobStatus: (customerId: number, jobId: string) =>
     http
-      .get<{ job_id: string; status: string; error?: string }>(
+      .get<{ job_id: string; status: string; error?: string; degraded?: boolean; warnings?: string[] }>(
         `/assessment/${customerId}/pdf/jobs/${jobId}`,
       )
       .then((r) => r.data),

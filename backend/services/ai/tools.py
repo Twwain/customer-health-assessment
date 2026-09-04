@@ -382,8 +382,8 @@ def append_tool_results(
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     """把 assistant 的 tool_calls 与工具执行结果回填到消息列表。
 
-    返回 ``(消息列表, 工具引用列表)``；``exclude_ids`` 用于对 knowledge_search
-    结果去重（通常是预取上下文中已有的 chunk id），避免重复注入。
+    返回 ``(消息列表, 工具引用列表)``；``exclude_ids`` 仅用于对新增引用去重。
+    模型仍接收本次检索的命中正文，避免把已在上下文中的知识误判为未命中。
     """
     budget = budget or ToolBudget()
     allowed_count = min(
@@ -445,9 +445,18 @@ def append_tool_results(
         if name == "knowledge_search" and isinstance(result, dict):
             results = result.get("results") or []
             if exclude_ids:
-                results = [r for r in results if r.get("id") not in exclude_ids]
-                result = {**result, "count": len(results), "results": results}
+                already_in_context_ids = [
+                    r.get("id") for r in results if r.get("id") in exclude_ids
+                ]
+                if already_in_context_ids:
+                    result = {
+                        **result,
+                        "already_in_context_ids": already_in_context_ids,
+                        "context_note": "这些命中已在上下文中，仍是有效检索结果；请依据正文核实并引用，不要解释为未命中。",
+                    }
             for r in results:
+                if exclude_ids and r.get("id") in exclude_ids:
+                    continue
                 references.append(
                     {
                         "id": r.get("id") or "",

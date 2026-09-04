@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+from xml.sax.saxutils import escape
 
 import matplotlib.font_manager as fm
 
@@ -302,6 +303,7 @@ class PdfReportGenerator(
         strategy_items: list[dict] | None = None,
         references: list[dict] | None = None,
         trend: AssessmentTrendResponse | None = None,
+        generation_warnings: list[str] | None = None,
     ) -> bytes:
         with self._gen_lock:
             buf = io.BytesIO()
@@ -313,6 +315,8 @@ class PdfReportGenerator(
             )
             story = []
             story.extend(self._cover(a, industry=industry))
+            for warning in generation_warnings or []:
+                story.append(Paragraph(escape(f"报告生成提示：{warning}"), self.styles["BodyCN"]))
             story.append(PageBreak())
             story.extend(self._overview(a, trend))
             story.extend(self._trend_section_pdf(trend))

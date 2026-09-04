@@ -291,6 +291,9 @@ def generate(
     retrieve_enabled: bool = True,
     cancel_event=None,
     deadline: float | None = None,
+    reasoning_effort: str | None = None,
+    output_token_limit: int | None = None,
+    token_budget: int | None = None,
 ):
     """运行评估 / 策略 Agent Loop，返回 ``graph_builder.AgentResult``。
 
@@ -305,6 +308,9 @@ def generate(
         thinking_enabled=thinking_enabled,
         cancel_event=cancel_event,
         deadline=deadline,
+        reasoning_effort=reasoning_effort,
+        output_token_limit=output_token_limit,
+        token_budget=token_budget,
     )
     return agent.run(
         scenario,

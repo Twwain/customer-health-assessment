@@ -4,6 +4,8 @@
 """
 
 import datetime
+import time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -160,7 +162,9 @@ def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm, monke
     assert by_title["立即安排高层回访"]["priority"] == "recommended"
     assert by_title["扩大合作面"]["priority"] == "long_term"
     assert report.trend is not None
-    assert adapter.extra_args[-1]["thinking"]["type"] == "enabled"
+    assert adapter.extra_args[0] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+    assert adapter.extra_args[-1]["thinking"]["type"] == "disabled"  # 独立事实核对
+    assert report.timings["llm_calls"][0]["max_tokens"] == config.LLM_REPORT_MAX_TOKENS
     assert adapter.tool_args[-1] is None
 
 
@@ -169,6 +173,30 @@ def test_build_report_data_ai_off_does_not_call_llm(db, customer, fake_llm):
     assert report.has_ai is False
     assert report.strategy_items == []
     assert fake_llm.calls == []  # 不应触发任何 LLM 调用
+
+
+def test_report_generation_budget_is_independent_from_chat(db, customer, fake_llm, monkeypatch):
+    from services.ai import strategy
+
+    monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(config, "LLM_MAX_TOKENS", 500)
+    monkeypatch.setattr(config, "REPORT_GENERATION_TIMEOUT_SECONDS", 300)
+    started = time.monotonic()
+    observed = {}
+
+    def generate(*args, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(text=_STRATEGY_PAYLOAD, references=[], degraded=False,
+                               degraded_items=[], warnings=[], timings={})
+
+    monkeypatch.setattr(strategy, "generate", generate)
+    report = build_report_data(db, customer)
+    assert report.strategy_items and not report.degraded
+    assert observed["deadline"] >= started + 299
+    assert observed["output_token_limit"] == 32768
+    assert observed["token_budget"] == 65536
+    assert observed["thinking_enabled"] is True
+    assert observed["reasoning_effort"] == "high"
 
 
 def test_build_report_data_error_falls_back_to_degraded(db, customer, fake_llm):
@@ -225,7 +253,7 @@ def test_build_report_data_ai_without_strategy_text_falls_back(db, customer, fak
 
     report = build_report_data(db, customer, include_ai=True)
 
-    assert report.degraded is False
+    assert report.degraded is True
     assert report.has_ai is True
     assert report.strategy_items, "无策略块时应有规则引擎兜底建议"
     assert "规则引擎" in (report.error or "")

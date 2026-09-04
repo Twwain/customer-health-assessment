@@ -559,9 +559,8 @@ def run_turn(
                 agent_result["value"] = generate(
                     scenario, worker_ctx, worker_customer, worker_db,
                     adapter=adapter, question=question,
-                    # 快捷场景在进入 Agent 前已经完成客户评分与 RAG 预取；再次开放工具
-                    # 会让模型先做一轮不可见的工具决策，再做正式回答，真实首字延迟
-                    # 会从秒级放大到 27–43 秒。自由问答仍保留按需工具调用。
+                    # 快捷入口先用评分和 RAG 资料生成，再独立核对并按需修订。
+                    # 自由问答保留按需工具调用；核对不新增数据权限。
                     tools_enabled=False,
                     thinking_enabled=config.LLM_CHAT_THINKING_ENABLED,
                     max_iterations=config.CHAT_AGENT_MAX_ITERATIONS,
@@ -612,6 +611,8 @@ def run_turn(
                 elif event_type == "usage":
                     used_tokens = max(used_tokens, int(data.get("tokens_used") or 0))
                     yield TurnEvent("usage", data)
+                elif event_type == "stage":
+                    yield TurnEvent("stage", data)
         finally:
             agent_cancelled.set()
             agent_thread.join(timeout=config.CHAT_AGENT_CANCEL_GRACE_SECONDS)

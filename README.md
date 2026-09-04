@@ -109,6 +109,23 @@ bash deploy.sh
 `CHAT_TOOL_RESULT_CHARS_PER_TURN` 和 `CHAT_AGENT_CANCEL_GRACE_SECONDS` 调整；运行指标默认保留 90 天
 （`CHAT_METRICS_RETENTION_DAYS`），可通过 `GET /api/chat/metrics` 查看分布。
 
+评估、策略和风险分析默认“生成一次 → 独立核对关键事实 → 有问题时最多修订一次”。
+核对会比对原文中的动作、时限、责任角色、评分与引用依据，结果记录在
+`timings.verification`，核对调用单独记为 `phase=verification`；核对 JSON 不作为回答推流。
+核对失败、超时或证据无法定位时提示“未完成核对”，修订后仍有问题时保留提示，不继续循环。
+`CHAT_AGENT_MAX_ITERATIONS` / `REPORT_AGENT_MAX_ITERATIONS` 默认 2、最大 2（含首稿）；
+设为 1 可关闭修订，但仍执行核对。`AI_FACT_CHECK_TIMEOUT_SECONDS` 默认 30 秒，
+`AI_FACT_CHECK_MAX_TOKENS` 默认 2000，正文超过 `AI_FACT_CHECK_MAX_DRAFT_CHARS`（默认 24000）
+时明确标记未核对。核对使用非思考模式，不改变正文生成的思考配置。
+
+PDF 与交互对话的生成预算分开：报告默认开启思考，`LLM_REPORT_REASONING_EFFORT=high`
+（可选 low/high/max），`LLM_REPORT_MAX_TOKENS=32768` 为单次思考加正文的生成上限，
+不再受聊天模板的 8000 上限截断。`REPORT_TURN_TOKEN_BUDGET=65536` 约束整份报告模型调用，
+`REPORT_GENERATION_TIMEOUT_SECONDS=300` 覆盖生成、核对和最多一次修订；
+配置 `PDF_JOB_TTL` 时应大于该时限并留出 PDF 排版时间。300 秒是最终保护边界，不是预期等待时间。
+报告不因首字慢自动关闭思考；因生成 token 耗尽返回空正文时停止盲目重试，并明确提示配置问题。
+降级或未完成核对的提示同时进入任务状态和 PDF，页面也会显示生成提示。
+
 ## 评分模型
 
 V3.0 使用 7 个维度、28 个因子。每个因子先由原子指标映射为 0-10 分，

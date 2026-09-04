@@ -104,13 +104,18 @@ def _run_pdf_job(
             references=report.references,
             trend=report.trend,
             industry=customer.industry or "",
+            generation_warnings=report.warnings,
         )
         with _pdf_jobs_lock:
+            # 生成状态与文件一并保存，避免下载兜底报告却看不到提示。
             job = _pdf_jobs.get(job_id)
             if job is not None and job["status"] == "running":
                 # 先写 bytes 再写 status，避免读方观察到 ready 但 bytes 缺失的中间态
                 job["bytes"] = pdf_bytes
                 job["status"] = "ready"
+                job["degraded"] = report.degraded
+                job["warnings"] = report.warnings
+                job["verification"] = report.timings.get("verification", [])
                 logger.info("PDF 导出任务完成: job=%s customer_id=%s", job_id, customer_id)
             elif job is not None:
                 # 任务已被 TTL 标记为失败（超时），丢弃本次生成结果，避免覆盖错误状态
@@ -223,7 +228,7 @@ def download_pdf(
             customer,
             include_ai=include_ai,
             cancel_event=threading.Event(),
-            deadline=time.monotonic() + config.CHAT_TURN_TIMEOUT_SECONDS,
+            deadline=time.monotonic() + config.REPORT_GENERATION_TIMEOUT_SECONDS,
         )
         db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
         pdf_bytes = pdf_gen.generate(
@@ -232,6 +237,7 @@ def download_pdf(
             references=report.references,
             trend=report.trend,
             industry=customer.industry or "",
+            generation_warnings=report.warnings,
         )
     finally:
         _PDF_JOB_SEM.release()
@@ -265,7 +271,7 @@ def create_pdf_job(
     job_id = uuid.uuid4().hex
     bind = db.get_bind()
     cancel_event = threading.Event()
-    deadline = time.monotonic() + config.CHAT_TURN_TIMEOUT_SECONDS
+    deadline = time.monotonic() + config.REPORT_GENERATION_TIMEOUT_SECONDS
     try:
         with _pdf_jobs_lock:
             _sweep_pdf_jobs()
@@ -303,7 +309,9 @@ def get_pdf_job(customer_id: int, job_id: str):
         job = _pdf_jobs.get(job_id)
         if job is None or job["customer_id"] != customer_id:
             raise HTTPException(status_code=404, detail="导出任务不存在")
-        return {"job_id": job_id, "status": job["status"], "error": job.get("error")}
+        return {"job_id": job_id, "status": job["status"], "error": job.get("error"),
+                "degraded": job.get("degraded", False), "warnings": job.get("warnings", []),
+                "verification": job.get("verification", [])}
 
 
 @router.get("/{customer_id}/pdf/jobs/{job_id}/download")

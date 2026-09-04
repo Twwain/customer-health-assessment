@@ -143,6 +143,13 @@ LLM_TOOLS_ENABLED = _env_bool("LLM_TOOLS_ENABLED", True)
 # DeepSeek V4 默认开启 thinking。交互对话优先首字速度，PDF 报告优先分析质量。
 LLM_CHAT_THINKING_ENABLED = _env_bool("LLM_CHAT_THINKING_ENABLED", False)
 LLM_REPORT_THINKING_ENABLED = _env_bool("LLM_REPORT_THINKING_ENABLED", True)
+# PDF 是独立的后台思考任务。生成预算包含思考与正文，不受聊天模板 8000 限制。
+LLM_REPORT_REASONING_EFFORT = os.getenv("LLM_REPORT_REASONING_EFFORT", "high").strip().lower()
+if LLM_REPORT_REASONING_EFFORT not in {"low", "high", "max"}:
+    raise ValueError("LLM_REPORT_REASONING_EFFORT 必须是 low / high / max")
+LLM_REPORT_MAX_TOKENS = max(1024, _env_int("LLM_REPORT_MAX_TOKENS", 32768))
+REPORT_TURN_TOKEN_BUDGET = max(LLM_REPORT_MAX_TOKENS, _env_int("REPORT_TURN_TOKEN_BUDGET", 65536))
+REPORT_GENERATION_TIMEOUT_SECONDS = max(30.0, _env_float("REPORT_GENERATION_TIMEOUT_SECONDS", 300.0))
 # 进程内 Chat LLM 全局并发上限。所有同步/流式调用（含报告 AI）共用该额度。
 CHAT_LLM_GLOBAL_CONCURRENCY = max(1, _env_int("CHAT_LLM_GLOBAL_CONCURRENCY", 8))
 # 公网匿名部署的轻量突发保护：按客户端 IP 汇总 AI 重型接口请求。
@@ -210,10 +217,12 @@ CHAT_TOOL_RESULT_CHARS_PER_TURN = max(
 CHAT_TOOL_ARGUMENT_CHARS_PER_TURN = max(
     1000, _env_int("CHAT_TOOL_ARGUMENT_CHARS_PER_TURN", 8_000)
 )
-# 交互快捷场景优先首字速度：客户/RAG 已在 Agent reason 前预取，不再重复工具调用或精炼。
-# PDF 报告单独保留质量优先的精炼轮次。
-CHAT_AGENT_MAX_ITERATIONS = max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 1))
-REPORT_AGENT_MAX_ITERATIONS = max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 2))
+# 默认生成一次，独立核对后有问题才修订，最多修订一次。
+CHAT_AGENT_MAX_ITERATIONS = min(2, max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 2)))
+REPORT_AGENT_MAX_ITERATIONS = min(2, max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 2)))
+AI_FACT_CHECK_TIMEOUT_SECONDS = max(1.0, _env_float("AI_FACT_CHECK_TIMEOUT_SECONDS", 30.0))
+AI_FACT_CHECK_MAX_TOKENS = max(256, _env_int("AI_FACT_CHECK_MAX_TOKENS", 2000))
+AI_FACT_CHECK_MAX_DRAFT_CHARS = max(1000, _env_int("AI_FACT_CHECK_MAX_DRAFT_CHARS", 24000))
 # 运行指标只用于近期容量观察，超过保留期的数据在写入新指标时自动清理。
 CHAT_METRICS_RETENTION_DAYS = max(1, _env_int("CHAT_METRICS_RETENTION_DAYS", 90))
 
