@@ -10,14 +10,45 @@ Embedding 不可用时（缺 Key / 网络）**静默降级为空结果**，调�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 import time
 from typing import Any, Sequence
+
+from sqlalchemy import event, update
+from sqlalchemy.orm import Session
 
 from config import RAG_RECALL_K, RAG_TOP_K, RAG_WINDOW
 from services.rag.embeddings import EmbeddingUnavailableError, make_embedding_func
 from services.rag.reranker import MetadataReranker, RerankCandidate, get_reranker
 from services.rag.vector_store import VectorStore, get_vector_store
 from services.ai.guardrails import sanitize_for_outbound
+
+
+_PENDING_HITS = "rag_pending_hits"
+
+
+@event.listens_for(Session, "before_commit")
+def _commit_hits(db: Session) -> None:
+    """生成期间只读；在调用方提交时将累计命中数写入同一个短事务。"""
+    if db.in_nested_transaction():
+        return
+    pending = db.info.pop(_PENDING_HITS, {})
+    if pending:
+        from models import KnowledgeItem
+
+        for item_id, count in pending.items():
+            db.execute(
+                update(KnowledgeItem).where(KnowledgeItem.id == item_id)
+                .values(hit_count=KnowledgeItem.hit_count + count)
+                .execution_options(synchronize_session=False)
+            )
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _clear_hits(db: Session, transaction) -> None:
+    # 回滚或关闭会话时丢弃统计，复用 Session 不能带入上一轮未提交的计数。
+    if transaction.parent is None:
+        db.info.pop(_PENDING_HITS, None)
 
 
 @dataclass
@@ -204,22 +235,8 @@ class KnowledgeRetriever:
 
     @staticmethod
     def _bump_hits(db: Any, item_ids: set[int]) -> None:
-        """命中计数 +1。只 flush 不 commit：提交时机由调用方的事务边界决定，
-        避免在检索中途意外提交调用方未完成的更改。"""
-        try:
-            from models import KnowledgeItem
-
-            for iid in item_ids:
-                if iid:
-                    db.query(KnowledgeItem).filter(KnowledgeItem.id == iid).update(
-                        {KnowledgeItem.hit_count: KnowledgeItem.hit_count + 1}
-                    )
-            db.flush()
-        except Exception:  # pragma: no cover - 命中计数失败不影响检索
-            try:
-                db.rollback()
-            except Exception:
-                pass
+        """不提前写库或提交调用方更改，统计随调用方最终 commit 持久化。"""
+        db.info.setdefault(_PENDING_HITS, Counter()).update(iid for iid in item_ids if iid)
 
 
 def retrieve_knowledge(

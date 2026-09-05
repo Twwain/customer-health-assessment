@@ -97,7 +97,7 @@ def _run_pdf_job(
             cancel_event=cancel_event,
             deadline=deadline,
         )
-        db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
+        db.commit()  # 模型生成结束后再写入累计的知识命中计数
         pdf_bytes = pdf_gen.generate(
             report.assessment,
             strategy_items=report.strategy_items,
@@ -230,7 +230,7 @@ def download_pdf(
             cancel_event=threading.Event(),
             deadline=time.monotonic() + config.REPORT_GENERATION_TIMEOUT_SECONDS,
         )
-        db.commit()  # 持久化知识检索命中计数（retriever 只 flush 不 commit）
+        db.commit()  # 模型生成结束后再写入累计的知识命中计数
         pdf_bytes = pdf_gen.generate(
             report.assessment,
             strategy_items=report.strategy_items,

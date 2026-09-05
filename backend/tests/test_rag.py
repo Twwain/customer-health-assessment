@@ -1716,3 +1716,81 @@ def test_startup_runs_sql_schema_migration_when_chroma_is_unavailable(
             for row in connection.execute(sa_text("PRAGMA table_info(knowledge_items)"))
         }
     assert "industry" in columns
+
+
+def test_retrieval_defers_writes_until_commit(tmp_path, memory_store, fake_embed):
+    """检索与模型生成之间，另一个连接仍能写入；统计不能提交调用方的更改。"""
+    eng = create_engine(f"sqlite:///{tmp_path / 'concurrent-hits.db'}")
+    Base.metadata.create_all(eng)
+    factory = sessionmaker(bind=eng, autoflush=False)
+    try:
+        with factory() as db:
+            svc = _kb(db, memory_store, fake_embed)
+            doc = svc.create_from_upload(title="并发规范", category="内部规范",
+                                         filename="rules.md", raw=METHODOLOGY_MD.encode())
+            item = db.query(KnowledgeItem).filter_by(document_id=doc.id).one()
+            svc.approve_item(item.id)
+            item_id = item.id
+            item.summary = "未提交的更改"
+            for _ in range(2):
+                assert retrieve_knowledge("回款", db=db, store=memory_store, embed_func=fake_embed)
+            # 若检索执行了 UPDATE，这里的独立写入会报 database is locked。
+            with factory() as other:
+                other.add(Customer(customer_name="并发新增客户"))
+                other.commit()
+                stored = other.get(KnowledgeItem, item_id)
+                assert stored.hit_count == 0
+                assert stored.summary != "未提交的更改"
+            db.commit()
+            with factory() as other:
+                stored = other.get(KnowledgeItem, item_id)
+                assert stored.hit_count == 2
+                assert stored.summary == "未提交的更改"
+            assert retrieve_knowledge("回款", db=db, store=memory_store, embed_func=fake_embed)
+            db.rollback()
+            db.commit()
+            assert db.get(KnowledgeItem, item_id).hit_count == 2
+            assert retrieve_knowledge("回款", db=db, store=memory_store, embed_func=fake_embed)
+            db.close()
+            db.commit()
+            assert db.get(KnowledgeItem, item_id).hit_count == 2
+    finally:
+        eng.dispose()
+
+
+def test_pdf_generation_and_check_receive_full_retrieved_source(db, memory_store, fake_embed, monkeypatch):
+    from services.ai import llm_adapter
+    from services.report_builder import build_report_data
+    from test_fact_check import ScriptedAdapter
+
+    full = "回款核验必须保留记录。" * 24 + "必须在37小时内完成核验，在73小时内取得付款排期。"
+    svc = _kb(db, memory_store, fake_embed)
+    doc = svc.create_from_upload(title="回款规则", category="内部规范", filename="full.md", raw=full.encode())
+    item = db.query(KnowledgeItem).filter_by(document_id=doc.id).one()
+    svc.approve_item(item.id)
+    customer = Customer(customer_name="测试客户")
+    db.add(customer)
+    db.commit()
+    monkeypatch.setattr("services.rag.retriever.make_embedding_func", lambda: fake_embed)
+    monkeypatch.setattr("services.rag.retriever.get_vector_store", lambda: memory_store)
+    adapter = ScriptedAdapter(['应在37小时内完成核验。参考：回款规则。', '{"issues":[]}'])
+    monkeypatch.setattr(llm_adapter, "get_chat_adapter", lambda: adapter)
+    report = build_report_data(db, customer, scenario="assessment")
+    assert len(adapter.calls) == 2  # 首次生成 + 独立核对，无修订
+    for messages, _ in adapter.calls:
+        assert "37小时" in messages[-1].content
+        assert "73小时" in messages[-1].content
+    assert report.timings["verification"][0]["status"] == "passed"
+    assert "37小时" not in report.references[0]["snippet"]
+    assert all("_model_content" not in ref for ref in report.references)
+
+
+def test_rag_redaction_preserves_business_sentence_after_credential(db, memory_store, fake_embed):
+    svc = _kb(db, memory_store, fake_embed)
+    raw = '内部升级口令是“demo-472”。\nP1中断必须45分钟内响应，由交付经理牵头。'
+    doc = svc.create_from_upload(title="响应规则", category="内部规范", filename="secret.md", raw=raw.encode())
+    item = db.query(KnowledgeItem).filter_by(document_id=doc.id).one()
+    svc.approve_item(item.id)
+    results = retrieve_knowledge("P1响应", db=db, store=memory_store, embed_func=fake_embed)
+    assert results and "demo-472" not in results[0].content
+    assert "P1中断必须45分钟内响应" in results[0].content

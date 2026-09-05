@@ -464,6 +464,7 @@ def append_tool_results(
                         "category": r.get("category") or "",
                         "score": r.get("score") or 0.0,
                         "snippet": (r.get("snippet") or r.get("content") or "")[:200],
+                        "_model_content": r.get("content") or r.get("snippet") or "",
                         "chunk_id": r.get("chunk_index"),
                         "document_id": r.get("document_id"),
                         "item_id": r.get("item_id"),

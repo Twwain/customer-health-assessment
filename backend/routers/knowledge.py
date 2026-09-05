@@ -211,7 +211,7 @@ def search(
         top_k=payload.top_k,
         status=search_status,
     )
-    db.commit()  # 持久化检索命中计数（retriever 只 flush 不 commit）
+    db.commit()  # 提交时写入检索期间累计的命中计数
     return KnowledgeSearchResponse(
         query=payload.query,
         results=[_to_result(c) for c in chunks],

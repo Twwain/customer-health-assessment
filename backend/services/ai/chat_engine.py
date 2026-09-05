@@ -336,7 +336,7 @@ def _merge_references(*groups: list[dict] | None) -> list[dict]:
             if rid in seen:
                 continue
             seen.add(rid)
-            merged.append(ref)
+            merged.append({key: value for key, value in ref.items() if not key.startswith("_")})
     return merged
 
 
@@ -570,6 +570,8 @@ def run_turn(
                         (event_type, data)
                     ),
                 )
+                # 检索只累计命中数；模型完成后再持久化，避免生成期间持有写锁。
+                worker_db.commit()
             except BaseException as exc:  # 传回主生成器，沿用外层 SSE 兜底
                 agent_result["error"] = exc
             finally:

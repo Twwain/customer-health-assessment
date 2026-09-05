@@ -24,7 +24,8 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         "credential",
         re.compile(
             r"((?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|token|密码|口令|密钥)"
-            r"\s*(?:[:=是为]|：)\s*)([^\s，,；;、'\"]{4,})",
+            r"\s*(?:[:=是为]|：)\s*)"
+            r"(“[^”\r\n]*”?|‘[^’\r\n]*’?|[^\s，,；;、。！？“”‘’'\"]{4,})",
             re.IGNORECASE,
         ),
     ),
