@@ -110,6 +110,7 @@ class AssessmentStrategyAgent:
         self._rag_timings: dict[str, int] = {}
         self._total_tokens = 0
         self._token_budget_exceeded = False
+        self._budget_finalized = False
         self._tool_budget = tools.ToolBudget()
 
     def _check_cancelled(self) -> None:
@@ -190,10 +191,45 @@ class AssessmentStrategyAgent:
                 )
 
     # ── 节点 ────────────────────────────────────────────────────────────────
+    def _generation_limit(self, template) -> int:
+        return self._output_token_limit or min(template.max_tokens, config.LLM_MAX_TOKENS)
+
     def _max_tokens(self, template) -> int:
-        # 报告预算独立于聊天模板；剩余总预算始终约束下一次付费请求。
-        limit = self._output_token_limit or min(template.max_tokens, config.LLM_MAX_TOKENS)
-        return max(1, min(limit, self._token_budget - self._total_tokens))
+        # 探索使用剩余软预算；最终回答可独立使用一次该场景的生成额度。
+        return max(1, min(self._generation_limit(template), self._token_budget - self._total_tokens))
+
+    def _finish_answer(self, messages, template, *, draft: str = "") -> str:
+        self._check_cancelled()
+        over_budget = self._token_budget_exceeded
+        if self._budget_finalized:
+            raise LLMError("本轮已完成预算收尾，不再追加模型调用")
+        if over_budget:
+            self._budget_finalized = True
+            self._tool_warning = "本轮 token 预算已用尽，已停止探索并使用独立额度完成最终回答"
+        final_messages = list(messages)
+        if draft:
+            final_messages.append(LLMMessage(
+                role="assistant", content=tools.guardrails.wrap_untrusted(draft, "tool")
+            ))
+        final_messages.append(LLMMessage(
+            role="user", content="请基于已获取的资料完成最终回答，不再请求工具。保留要求的完整输出结构；资料不足的部分明确说明，不要编造。"
+        ))
+        if self._on_event:
+            self._on_event("replace", {"text": "", "reason": "final_answer"})
+        usage = {}
+        limit = self._generation_limit(template)
+        stream = stream_chat_completion_controlled(
+            self._adapter, final_messages, temperature=template.temperature,
+            max_tokens=limit, tools=None, on_usage=lambda value: usage.update(value),
+            extra=_thinking_extra(self._thinking_enabled, self._reasoning_effort),
+            cancel_event=self._cancel_event, deadline=self._deadline,
+        )
+        text = self._consume_stream(
+            stream, phase="budget_final" if over_budget else "tool_final",
+            messages=final_messages, max_tokens=limit, usage=usage,
+        )
+        self._budget_finalized = self._token_budget_exceeded
+        return text
 
     def _verify(self, draft, ctx, references) -> fact_check.FactCheckResult:
         if self._token_budget_exceeded:
@@ -230,6 +266,8 @@ class AssessmentStrategyAgent:
         return result
 
     def _call_llm(self, messages: list[LLMMessage], template) -> str:
+        if self._token_budget_exceeded:
+            return self._finish_answer(messages, template)
         usage: dict[str, Any] = {}
         max_tokens = self._max_tokens(template)
         stream = stream_chat_completion_controlled(
@@ -242,9 +280,12 @@ class AssessmentStrategyAgent:
             cancel_event=self._cancel_event,
             deadline=self._deadline,
         )
-        return self._consume_stream(
+        text = self._consume_stream(
             stream, phase="refine", messages=messages, max_tokens=max_tokens, usage=usage
         )
+        if self._token_budget_exceeded:
+            return self._finish_answer(messages, template, draft=text)
+        return text
 
     def _reason(
         self, ctx, references, question, today, template, *, customer=None, db=None, tools_enabled=None
@@ -297,10 +338,9 @@ class AssessmentStrategyAgent:
                 stream, phase=phase, messages=messages, max_tokens=max_tokens, usage=usage
             )
             self._check_cancelled()
-            if self._token_budget_exceeded:
-                self._tool_warning = "本轮 token 已超过预算，已保留当前结果并停止后续模型调用"
-                return text, refs
             if not tool_calls:
+                if self._token_budget_exceeded:
+                    return self._finish_answer(messages, template, draft=text), refs
                 return text, refs
             if text and self._on_event:
                 self._on_event("replace", {"text": "", "reason": "tool_followup"})
@@ -314,25 +354,10 @@ class AssessmentStrategyAgent:
             self._tool_ms += int((time.monotonic() - tool_started) * 1000)
             refs.extend(round_refs)
             exclude.update(r["id"] for r in round_refs)
-            if tool_rounds >= tools.MAX_TOOL_ROUNDS or self._tool_budget.calls_remaining <= 0:
+            if self._token_budget_exceeded or tool_rounds >= tools.MAX_TOOL_ROUNDS or self._tool_budget.calls_remaining <= 0:
                 # 已回填本轮工具结果：不带工具收尾一次，避免空回复
                 self._tool_warning = "工具调用次数已达上限（或总预算耗尽），已基于已获取信息作答"
-                usage = {}
-                stream = stream_chat_completion_controlled(
-                    self._adapter,
-                    messages,
-                    temperature=template.temperature,
-                    max_tokens=max_tokens,
-                    tools=None,
-                    on_usage=lambda value: usage.update(value),
-                    extra=_thinking_extra(self._thinking_enabled, self._reasoning_effort),
-                    cancel_event=self._cancel_event,
-                    deadline=self._deadline,
-                )
-                final_text = self._consume_stream(
-                    stream, phase="tool_final", messages=messages,
-                    max_tokens=max_tokens, usage=usage,
-                )
+                final_text = self._finish_answer(messages, template)
                 # 当前工具轮的草稿已经通过 replace 从客户端清除；收尾请求
                 # 才是基于工具结果生成的正式答案，持久化时也只保留它。
                 return final_text, refs
@@ -389,6 +414,7 @@ class AssessmentStrategyAgent:
         self._rag_timings = {}
         self._total_tokens = 0
         self._token_budget_exceeded = False
+        self._budget_finalized = False
         self._tool_budget = tools.ToolBudget()
         self._verification = []
         max_iter = min(2, max(1, max_iterations or self._max))
@@ -473,7 +499,7 @@ class AssessmentStrategyAgent:
             verification.feedback(),
         ]))
         if (
-            not self._token_budget_exceeded
+            not self._budget_finalized
             and tools.needs_refine(critique_text)
             and iterations < max_iter
         ):
@@ -484,6 +510,20 @@ class AssessmentStrategyAgent:
             try:
                 text = self._refine(
                     ctx, references, draft, critique_text, question, today, template, scenario=scenario
+                )
+            except (LLMUnavailableError, LLMError) as exc:
+                return self._degrade(scenario, ctx, question, references, exc)
+            verification = self._verify(text, ctx, references)
+            critique_text = "\n".join(filter(None, [
+                tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
+                verification.feedback(),
+            ]))
+
+        # 核对也计入整轮预算；即使普通修订次数用完，仍保留一次独立收尾。
+        if self._token_budget_exceeded and not self._budget_finalized:
+            try:
+                text = self._refine(
+                    ctx, references, text, critique_text, question, today, template, scenario=scenario
                 )
             except (LLMUnavailableError, LLMError) as exc:
                 return self._degrade(scenario, ctx, question, references, exc)

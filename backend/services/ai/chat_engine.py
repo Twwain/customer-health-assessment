@@ -773,19 +773,20 @@ def run_turn(
                     if progress_callback:
                         progress_callback(usage_event)
                 yield TurnEvent("usage", usage_event)
-                if used_tokens > config.CHAT_TURN_TOKEN_BUDGET:
-                    if round_chunks:
-                        chunks.extend(round_chunks)
-                    warnings.append("本轮 token 已超过预算，已保留当前结果并停止后续模型调用")
-                    break
-                if not tool_calls:
+                budget_exhausted = used_tokens >= config.CHAT_TURN_TOKEN_BUDGET
+                if not tool_calls and not budget_exhausted:
                     chunks.extend(round_chunks)
                     break
+                if not tool_calls and round_chunks:
+                    messages = [*messages, LLMMessage(
+                        role="assistant",
+                        content=guardrails.wrap_untrusted("".join(round_chunks), "tool"),
+                    )]
                 if round_chunks:
                     # 本轮文本是模型发起工具调用前的临时草稿；工具结果回填后
                     # 会重新生成正式答案，因此清空客户端展示且不写入持久化内容。
                     yield TurnEvent("replace", {"text": "", "reason": "tool_followup"})
-                tool_rounds += 1
+                tool_rounds += bool(tool_calls)
                 timings["tool_rounds"] = tool_rounds
                 tool_started = time.monotonic()
                 messages, refs = append_tool_results(
@@ -795,13 +796,19 @@ def run_turn(
                     db=db,
                     exclude_ids=exclude_ids,
                     budget=tool_budget,
-                )
+                ) if tool_calls else (messages, [])
                 timings["tool_ms"] += int((time.monotonic() - tool_started) * 1000)
                 tool_refs.extend(refs)
                 exclude_ids.update(ref["id"] for ref in refs)
-                if tool_rounds >= MAX_TOOL_ROUNDS or tool_budget.calls_remaining <= 0:
+                if budget_exhausted or tool_rounds >= MAX_TOOL_ROUNDS or tool_budget.calls_remaining <= 0:
                     # 已回填本轮工具结果：不带工具收尾一次，避免空回复
-                    warnings.append("工具调用次数已达上限（或总预算耗尽），已基于已获取信息作答")
+                    warnings.append(
+                        "本轮 token 预算已用尽，已停止探索并使用独立额度完成最终回答"
+                        if budget_exhausted else "工具调用次数已达上限，已基于已获取信息作答"
+                    )
+                    messages = [*messages, LLMMessage(
+                        role="user", content="请基于已获取的资料完成最终回答，不再请求工具。资料不足的部分明确说明，不要编造。"
+                    )]
                     round_tokens = 0
                     round_usage.clear()
                     round_chunks = []
@@ -851,7 +858,7 @@ def run_turn(
                                 + "".join(round_chunks)
                             )
                         timings["llm_calls"].append({
-                            "phase": "tool_final", "ttft_ms": call_ttft_ms,
+                            "phase": "budget_final" if budget_exhausted else "tool_final", "ttft_ms": call_ttft_ms,
                             "duration_ms": duration_ms,
                             "message_count": len(messages),
                             "prompt_chars": _message_chars(messages),

@@ -425,6 +425,72 @@ def test_embedding_migration_blocks_normal_vector_traffic_but_allows_recovery(db
     svc.ensure_vector_available(allow_migration=True)
 
 
+@pytest.mark.parametrize("message", ["Embedding 配置已变更，必须全量重索引", "影子索引激活失败"])
+def test_sync_reindex_reports_whole_operation_failure(app_client, monkeypatch, message):
+    from services.rag.knowledge_base import KnowledgeBaseService, KnowledgeIndexError
+    def fail(self, category=None):
+        raise KnowledgeIndexError(message)
+    monkeypatch.setattr(KnowledgeBaseService, "reindex", fail)
+    for _ in range(2):  # 异常也必须释放操作锁，第二次不能变成429。
+        response = app_client.post("/api/knowledge/reindex", json={})
+        assert response.status_code == 503
+        assert response.json()["detail"] == message
+
+
+def test_retired_chroma_cleanup_and_document_delete_retry(db, tmp_path, monkeypatch):
+    pytest.importorskip("chromadb")
+    import services.rag.vector_store as vs
+    import services.rag.knowledge_base as kb
+    from models import KnowledgeDocument
+    monkeypatch.setattr(kb, "KNOWLEDGE_DATA_DIR", str(tmp_path / "sources"))
+    monkeypatch.setattr(vs, "EMBEDDING_DIM", 2)
+    monkeypatch.setattr(vs, "EMBEDDING_MODEL", "model-a")
+    directory = str(tmp_path / "chroma")
+    a = vs.ChromaVectorStore(persist_dir=directory, collection="cleanup_test")
+    embed = lambda texts: [[1.0, 0.0] for _ in texts]
+    svc = kb.KnowledgeBaseService(db, store=a, embed_func=embed)
+    doc = svc.create_from_upload(title="迁移删除", category="内部规范", filename="a.txt", raw="模拟原文".encode())
+    item_id = db.query(KnowledgeItem).filter_by(document_id=doc.id).one().id
+    # 相似前缀的其他库及明确属于其他库的集合不可被删除。
+    unrelated = a._client.get_or_create_collection("cleanup_test__other")
+    other_owned = a._client.get_or_create_collection(
+        "cleanup_test__dim_99", metadata={"base_collection": "another_kb"})
+    monkeypatch.setattr(vs, "EMBEDDING_MODEL", "model-b")
+    b = vs.ChromaVectorStore(persist_dir=directory, collection="cleanup_test")
+    svc._store = b
+    delete_collection = b._client.delete_collection
+    def fail_retirement(name):
+        if name == a.collection_name:
+            raise RuntimeError("模拟旧集合占用")
+        return delete_collection(name=name)
+    monkeypatch.setattr(b._client, "delete_collection", fail_retirement)
+    with pytest.raises(kb.KnowledgeIndexError, match="历史索引清理失败"):
+        svc.reindex()
+    assert not b.migration_required and b.retired_cleanup_pending
+    assert not svc.inspect_vector_health()["consistent"]
+    assert a.count() == 1 and b.count() == 1
+
+    # 清理失败时删除仍须覆盖旧版本；任一旧集合删除失败必须保留tombstone。
+    related = list(b._related_collections())
+    old = next(c for c in related if c.name == a.collection_name)
+    original_delete = old.delete
+    monkeypatch.setattr(old, "delete", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("模拟删除失败")))
+    monkeypatch.setattr(b, "_related_collections", lambda: iter(related))
+    with pytest.raises(kb.KnowledgeIndexError, match="知识已下线"):
+        svc.delete_item(item_id)
+    assert db.get(KnowledgeDocument, doc.id).index_status == "deleting"
+    monkeypatch.setattr(old, "delete", original_delete)
+    assert svc.retry_pending_deletes()["pending_delete_retried"] == 1
+    assert db.get(KnowledgeDocument, doc.id) is None
+    assert a.count() == b.count() == 0
+    monkeypatch.setattr(b._client, "delete_collection", delete_collection)
+    assert kb.run_vector_maintenance_once(db, b) is True
+    assert not b.retired_cleanup_pending and svc.inspect_vector_health()["consistent"]
+    names = {c.name for c in b._client.list_collections()}
+    assert a.collection_name not in names
+    assert {b.collection_name, unrelated.name, other_owned.name} <= names
+
+
 def test_readiness_returns_503_when_chroma_is_unavailable(monkeypatch):
     import main
     import services.rag.vector_store as vs

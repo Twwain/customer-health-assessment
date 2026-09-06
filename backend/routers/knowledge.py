@@ -373,6 +373,8 @@ def reindex(
         count = svc.reindex(category=category)
         return KnowledgeReindexResponse(reindexed=count)
     except KnowledgeIndexError as exc:
+        if not exc.failed:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return KnowledgeReindexResponse(
             reindexed=exc.succeeded, failed_documents=exc.failed
         )

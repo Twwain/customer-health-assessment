@@ -208,6 +208,8 @@ def readiness():
                 )
             if integrity.get("migration_required"):
                 problems.append("Embedding 配置变更后尚未完成全量重索引")
+            if integrity.get("retired_cleanup_pending"):
+                problems.append("历史索引尚未完成清理，后台将重试")
             return JSONResponse(
                 status_code=503,
                 content={
@@ -225,6 +227,7 @@ def readiness():
                         "metadata_pending": integrity["metadata_pending"],
                         "deleting_pending": integrity.get("deleting_pending", 0),
                         "migration_required": integrity.get("migration_required", False),
+                        "retired_cleanup_pending": integrity.get("retired_cleanup_pending", False),
                         "affected_documents": integrity["affected_documents"][:20],
                     },
                 },

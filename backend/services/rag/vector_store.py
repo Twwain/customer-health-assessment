@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from typing import Any, Protocol, Sequence
 
 from config import (
@@ -199,6 +200,7 @@ class ChromaVectorStore:
 
         self._client = chromadb.PersistentClient(path=persist_dir)
         self._base_collection = collection
+        self.retired_cleanup_pending = False
         self.embedding_fingerprint = _embedding_fingerprint()
         active_name = _embedding_collection_name(collection, self.embedding_fingerprint)
         collection_metadata = {
@@ -319,6 +321,41 @@ class ChromaVectorStore:
     def delete(self, ids) -> None:  # type: ignore[override]
         if ids:
             self._collection.delete(ids=list(ids))
+
+    def _related_collections(self):
+        """只枚举同一逻辑知识库，兼容旧版无 base_collection 的命名。"""
+        legacy_pattern = re.compile(
+            re.escape(self._base_collection) + r"__(?:dim_[0-9]+|emb_[0-9a-f]{16})"
+        )
+        for entry in self._client.list_collections():
+            name = entry if isinstance(entry, str) else entry.name
+            candidate = self._client.get_collection(name=name)
+            owner = _collection_metadata(candidate).get("base_collection")
+            if owner == self._base_collection or (
+                owner is None and (name == self._base_collection or legacy_pattern.fullmatch(name))
+            ):
+                yield candidate
+
+    def delete_document(self, document_id: int) -> None:
+        # 迁移期间或历史集合回收失败时，删除意图也必须覆盖所有旧版本 ID。
+        for candidate in self._related_collections():
+            candidate.delete(where={"document_id": document_id})
+
+    def cleanup_retired_collections(self) -> int:
+        """仅在调用方确认当前索引与 SQL 一致后回收历史副本。"""
+        if self.migration_required:
+            return 0
+        self.retired_cleanup_pending = True
+        removed = 0
+        for candidate in self._related_collections():
+            if candidate.name == self._collection.name:
+                continue
+            if _collection_metadata(candidate).get("active"):
+                raise RuntimeError("检测到其他激活索引，拒绝清理，请先完成全量重索引")
+            self._client.delete_collection(name=candidate.name)
+            removed += 1
+        self.retired_cleanup_pending = False
+        return removed
 
     def update_metadatas(self, ids, metadatas) -> None:  # type: ignore[override]
         if ids:

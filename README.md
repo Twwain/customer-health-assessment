@@ -109,6 +109,12 @@ bash deploy.sh
 `CHAT_TOOL_RESULT_CHARS_PER_TURN` 和 `CHAT_AGENT_CANCEL_GRACE_SECONDS` 调整；运行指标默认保留 90 天
 （`CHAT_METRICS_RETENTION_DAYS`），可通过 `GET /api/chat/metrics` 查看分布。
 
+`CHAT_TURN_TOKEN_BUDGET` 与 `REPORT_TURN_TOKEN_BUDGET` 是探索软预算，累计输入和输出 token。
+预算达到上限后停止模型探索，当前已请求的工具仍受工具次数/字符预算限制；随后允许一次不带工具的最终回答，
+独立使用该场景的单次生成额度（聊天为模板与 `LLM_MAX_TOKENS` 的较小值，报告为 `LLM_REPORT_MAX_TOKENS`），
+不再压缩到剩余 token。收尾仍遵守总时限、取消及全局并发限制，实际超额用量正常记录。
+收尾后事实核对明确提示未完成，不再继续修订；若核对本身耗尽预算，即使普通修订次数用完，仍允许唯一一次最终回答。
+
 评估、策略和风险分析默认“生成一次 → 独立核对关键事实 → 有问题时最多修订一次”。
 核对会比对原文中的动作、时限、责任角色、评分与引用依据，结果记录在
 `timings.verification`，核对调用单独记为 `phase=verification`；核对 JSON 不作为回答推流。
@@ -202,6 +208,7 @@ cd backend && python -m pytest tests/ -v
 - **依赖分层**：`requirements.txt`（核心，Python 3.10+ 可直接装，3.12 验证通过）；`requirements-prod.txt`（chromadb / pymupdf / python-docx，Docker 安装）。
 - **向量库**：`KNOWLEDGE_VECTOR_STORE=chroma` 需安装 chromadb；缺失或异常时向量读写与 readiness 失败关闭，知识列表、详情和原文下载仍可用。`memory` 仅能通过配置显式启用。Embedding provider、网关、模型或维度任一变更都会进入指纹隔离的影子 collection；整库构建和校验成功后才切换，期间 readiness 返回 503。metadata outbox 和 tombstone 默认每 5 秒自动重试，失败时指数退避并在日志/readiness 告警；完整 SQLite/Chroma ID 对账默认每 5 分钟在后台执行，readiness 不再每次扫描全库。
 - **中文 PDF 字体**：Docker 装 `fonts-wqy-microhei`；开发环境自动探测系统 CJK 字体（Windows 雅黑 / macOS PingFang / Linux 文泉驿）。
+- **历史索引回收**：新索引完成切换并与 SQLite 对账一致后回收同一知识库的旧 collection。清理失败会在 readiness 告警并由后台重试；删除文档覆盖迁移前后的所有版本，任一副本删除失败会保留 tombstone。同步重索引的整体失败返回 503 和原因，逐文档部分成功仍返回成功数与失败列表。
 - **数据持久化**：挂载 `./data:/app/data`，数据库与向量库落盘。
 - **访问边界（风险接受）**：系统不提供登录、RBAC 或租户隔离，客户、会话和知识数据在所有访问者之间共享；全部知识管理接口（下载、编辑、删除、审核、批量状态、重索引和指标管理）保持开放，仅通过项目管理约定供项目组成员使用。该约定不是技术访问控制，因此部署内容只能使用虚构或预先脱敏、可公开、可修改、可删除、可重置的数据；不得录入真实或敏感数据，并应将 `.env`、`AGENTS.md`、`dev_process/` 等敏感文件排除出发布内容。若未来需要对外开放、录入真实数据或区分访问者，必须重新实施认证、授权及租户/工作区隔离。
 - **资源护栏**：Chat LLM 默认最多同时执行 8 个模型 HTTP 调用，Embedding 默认 1，AI PDF 任务默认 1；每客户端 IP 每分钟最多 60 次 AI 重型请求。知识上传/解析全局并发默认 1，ASGI 入口在 multipart 解析前限制请求体约 21MB，文件本身限制 20MB，并限制 50 万抽取字符、500 个切片、20 万预计 Embedding token、PDF 200 页、Office 解压后 100MB/2000 个 ZIP 条目。具体值可用 `.env.example` 中的配置覆盖；多 Uvicorn worker/多副本部署时并发和限流额度会按进程倍增，模型供应商侧仍需设置费用告警和余额/费用上限。

@@ -822,6 +822,9 @@ class KnowledgeBaseService:
         if vector_ids:
             self._store.delete(list(vector_ids))
             _delete_metadata_updates(self._db, vector_ids)
+        delete_document = getattr(self._store, "delete_document", None)
+        if callable(delete_document):
+            delete_document(doc_id)
         self._db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).delete()
         self._db.commit()
         if file_path:
@@ -968,7 +971,7 @@ class KnowledgeBaseService:
                     f"影子索引已构建但激活失败：{exc}",
                     succeeded=0,
                 ) from exc
-            self.inspect_vector_integrity()
+            self._cleanup_retired_indexes()
             return len(staged)
 
         count = 0
@@ -1029,7 +1032,24 @@ class KnowledgeBaseService:
                 succeeded=count,
                 failed=failures,
             )
+        self._cleanup_retired_indexes()
         return count
+
+    def _cleanup_retired_indexes(self) -> int:
+        integrity = self.inspect_vector_integrity()
+        cleanup = getattr(self._store, "cleanup_retired_collections", None)
+        if (
+            not callable(cleanup) or integrity["migration_required"]
+            or integrity["missing_ids"] or integrity["orphan_ids"]
+            or integrity["metadata_pending"]
+        ):
+            return 0
+        try:
+            return cleanup()
+        except Exception as exc:
+            raise KnowledgeIndexError(f"当前索引已切换，历史索引清理失败，后台将重试：{exc}") from exc
+        finally:
+            self.inspect_vector_integrity()
 
     @_serialized_vector_mutation
     def retry_pending_deletes(self) -> dict[str, Any]:
@@ -1078,11 +1098,13 @@ class KnowledgeBaseService:
             "orphan_ids": orphan_ids,
             "affected_documents": affected_documents,
             "metadata_pending": metadata_pending,
+            "retired_cleanup_pending": bool(getattr(self._store, "retired_cleanup_pending", False)),
             "migration_required": bool(getattr(self._store, "migration_required", False)),
             "consistent": (
                 not missing_ids
                 and not orphan_ids
                 and metadata_pending == 0
+                and not bool(getattr(self._store, "retired_cleanup_pending", False))
                 and not bool(getattr(self._store, "migration_required", False))
             ),
         }
@@ -1114,6 +1136,7 @@ class KnowledgeBaseService:
             "store_vectors": store_vectors,
             "metadata_pending": metadata_pending,
             "deleting_pending": deleting_pending,
+            "retired_cleanup_pending": bool(getattr(self._store, "retired_cleanup_pending", False)),
             "migration_required": bool(getattr(self._store, "migration_required", False)),
         })
         result["consistent"] = bool(
@@ -1121,6 +1144,7 @@ class KnowledgeBaseService:
             and sql_vectors == store_vectors
             and metadata_pending == 0
             and deleting_pending == 0
+            and not result["retired_cleanup_pending"]
             and not result["migration_required"]
         )
         return result
@@ -1151,12 +1175,14 @@ class KnowledgeBaseService:
                 )
                 self._db.commit()
         # 返回操作后的权威状态，避免已清理孤儿后仍误报不一致。
+        retired_cleaned = self._cleanup_retired_indexes() if cleanup_orphans else 0
         final_integrity = self.inspect_vector_integrity()
         return {
             **retry_result,
             **metadata_result,
             **final_integrity,
             "orphans_cleaned": len(orphan_ids) if cleanup_orphans else 0,
+            "retired_collections_cleaned": retired_cleaned,
         }
 
     # ── 预置知识──────────────────────────────────
@@ -1195,7 +1221,7 @@ def run_vector_maintenance_once(
         .filter(KnowledgeDocument.index_status == "deleting")
         .count()
     )
-    if pending_metadata or pending_deletes or force_reconcile:
+    if pending_metadata or pending_deletes or force_reconcile or getattr(store, "retired_cleanup_pending", False):
         result = KnowledgeBaseService(db, store=store).reconcile_vectors(
             cleanup_orphans=True
         )

@@ -906,16 +906,16 @@ def test_chat_metrics_records_and_aggregates_real_turn_shape(
         json={"content": "指标测试", "stream": False},
     )
     assert response.status_code == 200
-    assert response.json()["tokens_used"] == 128
+    assert response.json()["tokens_used"] == 256  # 探索超预算后允许一次最终回答
 
     metrics = client.get("/api/chat/metrics", params={"hours": 24})
     assert metrics.status_code == 200
     body = metrics.json()
     assert body["configured_token_budget"] == 100
     assert body["overall"]["turns"] == 1
-    assert body["overall"]["tokens"]["p95"] == 128
+    assert body["overall"]["tokens"]["p95"] == 256
     assert body["overall"]["token_budget_exceeded_count"] == 1
-    assert body["overall"]["token_overshoot"]["max"] == 28
+    assert body["overall"]["token_overshoot"]["max"] == 156
     assert body["by_scenario"]["free_qa"]["turns"] == 1
 
 
@@ -1932,9 +1932,10 @@ def test_agent_token_overshoot_keeps_paid_answer(db, customer, monkeypatch):
     events = list(chat_engine.run_turn(db, session, content="评估客户"))
     done = next(event for event in events if event.type == "done")
     assert "本次已经生成的完整答案" in done.data["message"]["content"]
-    assert done.data["tokens_used"] == 128
+    assert done.data["tokens_used"] == 256
     assert done.data["degraded"] is False
-    assert len(adapter.calls) == 1
+    assert len(adapter.calls) == 2
+    assert done.data["timings"]["llm_calls"][-1]["phase"] == "budget_final"
 
 
 def test_free_qa_deadline_marks_partial_and_keeps_nonzero_cost(
@@ -1967,12 +1968,12 @@ def test_agent_timeout_does_not_spawn_unbounded_non_cooperative_workers(
         def stream_chat_completion(self, messages, **kwargs):
             self.calls.append(list(messages))
             started.set()
-            assert release.wait(2)
+            assert release.wait(5)
             yield "迟到内容"
 
     adapter = BlockingAdapter()
     llm_adapter.set_chat_adapter(adapter)
-    monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr(config, "CHAT_AGENT_CANCEL_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(
         chat_engine, "_AGENT_WORKER_SEM", threading.BoundedSemaphore(1)
@@ -1988,12 +1989,47 @@ def test_agent_timeout_does_not_spawn_unbounded_non_cooperative_workers(
         assert started.is_set()
         assert first_events[-1].type == "error"
 
+        # 第二轮验证槽位保留，不让其自身的短期限抢先掩盖并发拒绝。
+        monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 2)
         second_events = list(chat_engine.run_turn(db, second, content="第二轮"))
         assert second_events[-1].type == "error"
         assert "并发槽" in second_events[-1].data["message"]
         assert len(adapter.calls) == 1
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("used", [1000, 1200])
+@pytest.mark.parametrize("with_tool", [True, False])
+def test_free_qa_budget_final_replaces_draft_and_persists_full_cost(db, customer, monkeypatch, used, with_tool):
+    class Adapter(FakeAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            if len(self.calls) == 1:
+                if with_tool:
+                    kwargs["on_tool_calls"]([{"id": "one", "name": "unknown", "arguments": "{}"}])
+                kwargs["on_usage"]({"total_tokens": used})
+                yield "这是需要替换的临时草稿。"
+            else:
+                kwargs["on_usage"]({"total_tokens": 700})
+                yield "这是基于已有信息完成的最终答案。"
+    adapter = Adapter()
+    llm_adapter.set_chat_adapter(adapter)
+    monkeypatch.setattr(config, "CHAT_TURN_TOKEN_BUDGET", 1000)
+    session = chat_engine.create_session(db, customer_id=customer.id, title="预算收尾")
+    events = list(chat_engine.run_turn(db, session, content="请分析"))
+    done = next(e.data for e in events if e.type == "done")
+    assert done["message"]["content"].startswith("这是基于已有信息完成的最终答案。")
+    assert "临时草稿" not in done["message"]["content"]
+    assert "本轮 token 预算已用尽" in done["message"]["content"]
+    assert done["tokens_used"] == used + 700 and not done["degraded"]
+    assert len(adapter.calls) == 2
+    assert adapter.calls[-1][1]["tools"] is None
+    assert adapter.calls[-1][1]["max_tokens"] == 2500
+    assert done["timings"]["llm_calls"][-1]["phase"] == "budget_final"
+    assert any(e.type == "replace" for e in events)
+    persisted = db.query(ChatMessage).filter_by(session_id=session.id, role="assistant").one()
+    assert persisted.content == done["message"]["content"]
 
 
 def test_chat_metric_persist_removes_expired_rows(db, monkeypatch):

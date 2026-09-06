@@ -94,7 +94,9 @@ def parse_result(text: str, draft: str, sources: dict[str, str]) -> FactCheckRes
             ):
                 raise ValueError("问题字段不完整")
             source = sources.get(issue["source_id"], "")
-            compact = lambda value: "".join(value.split())
+            # wrap_untrusted 将尖括号转为全角；核对模型逐字摘录的是该表示。
+            # 只统一这两个字符和空白，不合并比较方向或放宽数值/来源校验。
+            compact = lambda value: "".join(value.translate(str.maketrans("＜＞", "<>")).split())
             if compact(issue["claim"]) not in compact(draft) or not source or compact(issue["evidence"]) not in compact(source):
                 raise ValueError("核对引用无法定位到草稿或原文")
         return FactCheckResult("issues" if issues else "passed", issues=issues)

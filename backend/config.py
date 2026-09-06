@@ -205,6 +205,7 @@ CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 120
 CHAT_AGENT_CANCEL_GRACE_SECONDS = max(
     0.1, _env_float("CHAT_AGENT_CANCEL_GRACE_SECONDS", 1.0)
 )
+# 整轮探索软预算（含输入/输出）；耗尽后仍允许一次按场景输出上限生成最终回答。
 CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 32_000))
 # 工具预算同时限制模型单轮并行调用、整轮累计调用和回填到 Prompt 的总字符数。
 CHAT_TOOL_CALLS_PER_ROUND = max(1, _env_int("CHAT_TOOL_CALLS_PER_ROUND", 4))

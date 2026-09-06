@@ -140,3 +140,106 @@ def test_fact_check_input_is_untrusted_and_redacted():
     assert "secret123" not in messages[1].content
     assert messages[1].content.count("</untrusted_tool_data>") == 1
     assert "＜/untrusted_tool_data＞" in messages[1].content
+
+
+def test_fact_check_anchors_visible_comparison_symbols_without_changing_direction():
+    draft = "制度规定：回款逾期<30天触发预警。"
+    sources = {"rag:1": "回款逾期>30天触发预警。"}
+    visible = messages_for_check(draft, sources)[1].content.split("\n", 1)[1].rsplit("\n", 1)[0]
+    payload = json.loads(visible)
+    issue = {"claim": payload["draft"], "source_id": "rag:1",
+             "evidence": payload["sources"]["rag:1"], "reason": "比较方向相反"}
+    assert parse_result(json.dumps({"issues": [issue]}), draft, sources).status == "issues"
+    for bad_evidence in ("回款逾期＜30天触发预警。", "回款逾期＞40天触发预警。"):
+        issue["evidence"] = bad_evidence
+        assert parse_result(json.dumps({"issues": [issue]}), draft, sources).status == "unverified"
+
+
+@pytest.mark.parametrize("used", [1000, 1200])
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_budget_exhaustion_gets_exactly_one_full_allowance_final_answer(used, with_tool):
+    class Adapter(ScriptedAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            if len(self.calls) == 1:
+                if with_tool:
+                    kwargs["on_tool_calls"]([{"id": "one", "name": "unknown", "arguments": "{}"}])
+                kwargs["on_usage"]({"total_tokens": used, "finish_reason": "tool_calls" if with_tool else "length"})
+                yield "尚未完成的草稿"
+            else:
+                kwargs["on_usage"]({"total_tokens": 1500, "finish_reason": "stop"})
+                yield "这是依据已知资料形成的完整结论。"
+    adapter = Adapter([])
+    result = AssessmentStrategyAgent(adapter=adapter, token_budget=1000).run(
+        "assessment", ChatContext(), None, None, retrieve_enabled=False)
+    assert not result.degraded and result.text == "这是依据已知资料形成的完整结论。"
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1][1]["tools"] is None
+    assert adapter.calls[1][1]["max_tokens"] > 1000
+    assert result.timings["llm_calls"][-1]["phase"] == "budget_final"
+    assert result.timings["verification"][-1]["status"] == "unverified"
+    assert result.timings["refine_rounds"] == 0
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+def test_budget_final_respects_cancellation_and_deadline(cancel):
+    event = threading.Event()
+    class Adapter(ScriptedAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            yield "部分内容"
+            kwargs["on_usage"]({"total_tokens": 1000})
+            if cancel:
+                event.set()
+            else:
+                agent._deadline = time.monotonic() - 1
+    adapter = Adapter([])
+    agent = AssessmentStrategyAgent(adapter=adapter, token_budget=1000, cancel_event=event)
+    result = agent.run("assessment", ChatContext(), None, None, retrieve_enabled=False)
+    assert result.degraded
+    assert len(adapter.calls) == 1
+
+
+def test_tool_limit_final_uses_scenario_allowance_not_last_remaining_budget(monkeypatch):
+    from services.ai import tools
+    monkeypatch.setattr(tools, "MAX_TOOL_ROUNDS", 1)
+    class Adapter(ScriptedAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            if len(self.calls) == 1:
+                kwargs["on_tool_calls"]([{"id": "one", "name": "unknown", "arguments": "{}"}])
+                kwargs["on_usage"]({"total_tokens": 900})
+                yield ""
+            else:
+                kwargs["on_usage"]({"total_tokens": 1500})
+                yield "完整收尾"
+    adapter = Adapter([])
+    result = AssessmentStrategyAgent(adapter=adapter, token_budget=1000, output_token_limit=4000).run(
+        "assessment", ChatContext(), None, None, retrieve_enabled=False)
+    assert result.text == "完整收尾" and len(adapter.calls) == 2
+    assert adapter.calls[1][1]["max_tokens"] == 4000
+
+
+@pytest.mark.parametrize("exhaust_phase", ["verification", "refine", "last_verification"])
+def test_budget_final_covers_checks_and_refinement_after_iteration_limit(exhaust_phase):
+    replies = [BAD, CONFLICT, GOOD, '{"issues":[]}']
+    exhaust_at = {"verification": 2, "refine": 3, "last_verification": 4}[exhaust_phase]
+    class Adapter(ScriptedAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            index = len(self.calls)
+            yield replies[index - 1] if index <= exhaust_at else GOOD
+            kwargs["on_usage"]({"total_tokens": 1000 if index == exhaust_at else 100,
+                                "finish_reason": "stop"})
+    adapter = Adapter([])
+    ctx = ChatContext(references=[{"id": "1:0", "title": "回款制度",
+        "_model_content": "36小时内完成单据核验，72小时内取得付款排期。"}])
+    result = AssessmentStrategyAgent(
+        adapter=adapter, token_budget=1000, tools_enabled=False,
+        max_iterations=1 if exhaust_phase == "verification" else 2,
+    ).run("assessment", ctx, None, None, retrieve_enabled=False)
+    assert result.text == GOOD and not result.degraded
+    assert len(adapter.calls) == exhaust_at + 1
+    assert result.timings["llm_calls"][-1]["phase"] == "budget_final"
+    assert adapter.calls[-1][1]["max_tokens"] > 1000
+    assert adapter.calls[-1][1]["tools"] is None
