@@ -124,7 +124,10 @@ class FakeAdapter:
 
 
 @pytest.fixture(autouse=True)
-def _reset_adapters():
+def _reset_adapters(monkeypatch):
+    # 本模块检验模拟会话；避免 .env 的生产 Chroma 路径影响隔离和超时断言。
+    monkeypatch.setattr(config, "KNOWLEDGE_VECTOR_STORE", "memory")
+    monkeypatch.setattr("services.rag.vector_store._MEMORY_STORE", InMemoryVectorStore())
     llm_adapter.reset_adapters()
     yield
     llm_adapter.reset_adapters()
@@ -1055,6 +1058,7 @@ def test_status_endpoint_reports_degraded(client, offline_llm):
 
 
 def test_adapter_unavailable_without_api_key(monkeypatch):
+    monkeypatch.setattr(config, "LLM_ENABLED", True)
     # adapter 先检查 BASE_URL 再检查 API Key，mock 一个有效地址让测试不依赖本机 .env
     monkeypatch.setattr(config, "LLM_BASE_URL", "http://localhost:9999/v1")
     monkeypatch.setattr(config, "LLM_API_KEY", "")

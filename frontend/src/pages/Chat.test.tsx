@@ -92,8 +92,11 @@ describe("Chat 核心操作", () => {
 
   it("用户向上查看历史时不强制滚回底部", async () => {
     let emit: ((event: ChatEvent) => void) | undefined;
-    streamChat.mockImplementation(async (_url, _body, onEvent) => {
+    let finish!: () => void;
+    const activeStream = new Promise<void>((resolve) => { finish = resolve; });
+    streamChat.mockImplementation((_url, _body, onEvent) => {
       emit = onEvent;
+      return activeStream;
     });
     renderChat();
     await screen.findByText("测试会话");
@@ -114,7 +117,20 @@ describe("Chat 核心操作", () => {
     act(() => emit?.({ type: "delta", data: { text: "继续生成" } }));
 
     await screen.findByText("继续生成");
+    // React 提交会安排滚动 rAF，文字出现并不表示该帧已经执行。
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
     expect(messageList.scrollTop).toBe(100);
+    // 回到底部后应重新跟随；同一活动流继续发出内容。
+    messageList.scrollTop = 800;
+    fireEvent.scroll(messageList);
+    act(() => emit?.({ type: "delta", data: { text: "，生成完成" } }));
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(messageList.scrollTop).toBe(1000);
+    await act(async () => { finish(); await activeStream; });
   });
 });
 

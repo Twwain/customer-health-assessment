@@ -10,6 +10,7 @@ import io
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,15 @@ TREND_MD = """# 外部行业趋势
 
 
 # ══════════════════════════ 夹具 ════════════════════════════════════════════
+
+
+@pytest.fixture(autouse=True)
+def isolated_knowledge_files(tmp_path, monkeypatch):
+    """上传、下载与删除使用同一临时根目录，不接触开发知识库。"""
+    root = str(tmp_path / "knowledge")
+    monkeypatch.setattr(config, "KNOWLEDGE_DATA_DIR", root)
+    monkeypatch.setattr("services.rag.knowledge_base.KNOWLEDGE_DATA_DIR", root)
+    monkeypatch.setattr("routers.knowledge.KNOWLEDGE_DATA_DIR", root)
 
 
 @pytest.fixture()
@@ -665,12 +675,13 @@ def _kb(db, memory_store, fake_embed):
     return KnowledgeBaseService(db, store=memory_store, embed_func=fake_embed)
 
 
-def test_upload_index_and_search(db, memory_store, fake_embed):
+def test_upload_index_and_search(db, memory_store, fake_embed, tmp_path):
     svc = _kb(db, memory_store, fake_embed)
     doc = svc.create_from_upload(
         title="评估方法论", category="内部规范", filename="m.md", raw=METHODOLOGY_MD.encode("utf-8")
     )
     assert doc.index_status == "indexed"
+    assert Path(doc.file_path).resolve().is_relative_to(tmp_path.resolve())
     assert doc.chunk_count > 0
     assert memory_store.count() == doc.chunk_count
 

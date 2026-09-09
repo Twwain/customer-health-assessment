@@ -33,15 +33,21 @@ describe("TrendChart", () => {
     const { container } = render(<TrendChart trend={trend([["07-01", 42]])} color="#22c55e" width={200} height={100} />);
     expect(screen.getByText("42")).toBeInTheDocument();
     expect(container.querySelector("svg circle")).not.toBeNull();
-    expect(container.querySelector("path")?.getAttribute("d") ?? "").not.toContain(" L");
+    expect(container.querySelector("path")).toBeNull();
   });
 
   it("多点数据渲染曲线与末点标注", () => {
     const { container } = render(
       <TrendChart trend={trend([["07-01", 42], ["08-01", 66]])} color="#22c55e" width={200} height={100} />,
     );
-    const d = container.querySelector("path")?.getAttribute("d") ?? "";
+    const curve = container.querySelector('path[fill="none"][stroke="#22c55e"]');
+    expect(curve).not.toBeNull();
+    const d = curve?.getAttribute("d") ?? "";
     expect(d.startsWith("M")).toBe(true);
+    expect(d).toContain(" C ");
+    const coordinates = d.replace(/[MC,]/g, " ").trim().split(/\s+/).map(Number);
+    expect(coordinates.length).toBeGreaterThanOrEqual(8);
+    expect(coordinates.every(Number.isFinite)).toBe(true);
     expect(screen.getByText("66")).toBeInTheDocument();
   });
 });

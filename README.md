@@ -201,7 +201,53 @@ Dockerfile / docker-compose.yml / deploy.sh / start.sh / start.bat / .env.exampl
 cd backend && python -m pytest tests/ -v
 ```
 
-覆盖：评分配置化、评估历史与趋势、LLM 适配与 SSE 对话、RAG 检索、Agent Loop（检索→推理→自批判→精炼）、报告整合（AI 解析 / 离线降级 / 趋势图）。前端以 `npm run build` + `npm run lint` + `npm run test`（vitest）验证。
+覆盖：评分配置化、评估历史与趋势、LLM 适配与 SSE 对话、RAG 检索、Agent Loop（检索→推理→自批判→精炼）、报告整合（AI 解析 / 离线降级 / 趋势图）。RAG 上传/下载/删除测试自动使用每项独立的临时文件目录；模拟会话测试使用独立内存向量库；异步 PDF 接口测试使用临时文件 SQLite，避免跨线程共享单条连接。前端以 `npm run build` + `npm run lint` + `npm run test`（vitest）验证。
+
+### 真实 LLM / Embedding 在线测试
+
+`backend/tests/test_live_llm.py` 提供 14 个在线用例，默认跳过，必须显式传入 `--run-live` 才会访问供应商接口并产生 API 费用。复用 `backend/.env` 或进程环境中的配置，不在测试中填写 Key：
+
+- Chat：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`，并启用 `LLM_ENABLED`。
+- Embedding：`LLM_EMBEDDING_API_KEY`、`LLM_EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL`、匹配模型的 `EMBEDDING_DIM`，并启用 `EMBEDDING_ENABLED`。兼容旧的 `EMBEDDING_*` 配置名。
+- 加密 Key：设置 `SECRET_KEY_FILE` 指向项目根目录的 `.ch_secret`，与启动脚本一致。配置缺失、无法解密、接口故障或规则降级都会导致在线用例失败，不视为通过。
+
+Windows PowerShell 在项目根目录运行：
+
+```powershell
+$env:SECRET_KEY_FILE = Join-Path (Get-Location) '.ch_secret'
+Set-Location backend
+.\.venv\Scripts\python.exe -m pytest tests/test_live_llm.py --run-live -q -s -p no:cacheprovider
+```
+
+只验证 Chat 时追加 `-k 'stream_latency or session_turn or tool_call or fact_check'`；只验证 Embedding 检索时追加 `-k rag_retrieval`。`rag_grounded_answer`、`business_agent`、`stream_tool_roundtrip`、`report_ai` 同时需要两套配置。只运行新增业务验收可追加 `-k 'fact_check or business_agent or stream_tool_roundtrip or report_ai'`。
+
+基础 7 项覆盖真实流式首个正文分片与总耗时、会话引擎事件与回复落库、三条语义改写问题的 Top-1 检索、检索后带来源和时限的 JSON 回答、真实工具调用参数。新增 7 项覆盖：
+
+- `business_agent`（评估、策略两项）：生产上下文构建、正式提示词、真实检索和模型生成、事实核对；检查评分/等级、知识来源，策略场景还验证结构化解析。
+- `fact_check`（三项）：识别动作与时限错配，接受正确事实，不把明确建议误报为制度事实；使用正式核对提示词及证据锚点解析器。Agent 自然产生问题时会走修订；本组不强制模型先生成错误，也不保证每次都触发修订。
+- `stream_tool_roundtrip`：使用项目工具定义接收真实流式调用，执行真实知识检索，按生产逻辑回填结果，再调用模型返回结构化答案；分别验证36小时对应单据核验、72小时对应取得付款排期，以及知识标题。首次请求不使用强制 `tool_choice`，以检验模型对用户工具请求的响应。
+- `report_ai`：使用有逾期应收款的合成客户，使回款制度确实适用；经 `build_report_data` 使用当前报告思考模式、输出预算与核对流程，验证非降级、策略可解析、引用有效且核对通过。临时目录中的 `report-ai-evidence.json` 保存策略、引用、警告和计时，便于定位模型波动或失败。不生成 PDF 文件。
+
+向量化和生成均调用真实接口；SQLite 和向量存储使用内存隔离，业务用例将合成制度上传到 pytest 临时目录并真实索引。自由问答会话用例单独关闭 RAG；业务 Agent 与报告用例保留真实 RAG。不覆盖生产 Chroma、浏览器网络传输或 PDF 排版。
+
+首个正文分片/会话 delta 默认要求不超过 30 秒，流式回复/单次检索不超过 90 秒，可通过 `--live-first-token-seconds 10 --live-total-seconds 60` 调整。新增 Agent、事实核对和工具闭环也使用总时限选项；报告使用 `REPORT_GENERATION_TIMEOUT_SECONDS` 及实际报告预算，可能更慢、费用更高。检索耗时不含夹具中的文档向量化；阈值是冒烟验收上限，不是生产 SLA。`-s` 输出 `LIVE_METRICS`，也可追加 `-o junit_family=legacy --junitxml=live-results.xml` 保存指标。真实接口存在波动；这组小样本不计算 P95、并发吞吐或完整检索质量分数。测试关闭配置重试，供应商参数兼容回退仍可能增加请求次数。
+
+### 单独运行的低频 RAG 测试
+
+`backend/tests/test_live_rag_extended.py` 另提供两项测试，只需真实 Embedding 配置，不调用 Chat。除了 `--run-live`，还必须提供对应独立开关；普通在线回归不会意外触发它们。沿用上面的 Key/解密配置，在 `backend` 目录运行：
+
+```powershell
+# 修改索引、存储或 Embedding 配置后：需要已安装 chromadb（缺失即失败）
+.\.venv\Scripts\python.exe -m pytest tests/test_live_rag_extended.py --run-live --run-live-chroma -k chroma -q -s -p no:cacheprovider
+
+# 调整检索参数、更换模型或发布前：默认18题 × 3轮 = 54次真实查询向量化
+.\.venv\Scripts\python.exe -m pytest tests/test_live_rag_extended.py --run-live --run-live-eval -k quality -q -s -p no:cacheprovider
+```
+
+- **临时 Chroma 链路**：在 pytest 临时目录创建 SQLite、上传文件和 Chroma 索引；真实向量化上传内容，由独立 Python 进程重开磁盘索引并查询，随后验证生产检索、撤销审核、重新审核、删除向量和原文件。不会打开业务知识库，也不会以内存库替代 Chroma。临时目录由 pytest 管理；需要排查时可通过 `--basetemp` 指定新的可写目录（pytest 会清理该目标，勿指向业务目录）。
+- **检索质量与性能评测集**：12条合成制度、18个固定标注问题，包含近义改写和相近业务主题干扰；每题唯一相关文档，默认顺序重复3轮，每次查询都调用真实 Embedding。使用内存向量库与生产 MetadataReranker，统计 Recall@1、Recall@3、MRR@3及P50/P95/最大耗时。验收线为 Recall@1 ≥ 85%、Recall@3 ≥ 95%、P95 ≤ 5秒；后者可用 `--live-eval-p95-seconds` 调整，重复次数可用 `--live-eval-repeats` 调整，至少1轮。质量门槛固定，模型不达标会失败。
+
+评测在临时目录输出 `retrieval-evaluation.json`，保存指标、每题预期/实际文档ID、排名和耗时；终端 `LIVE_METRICS` 显示文件路径。耗时包含查询向量化、内存召回及重排，不含文档建库；百分位使用最近秩法，不排除首轮数据。重复查询增加的是延迟样本，并非独立题目数量。这是小型合成回归集，不代表生产语料准确率、Chroma检索性能、并发吞吐或端到端LLM回答质量。
 
 ## 部署要点
 

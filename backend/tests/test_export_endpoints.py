@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from database import Base, get_db
 from models import Customer
@@ -42,15 +41,17 @@ def _offline_llm():
 
 
 @pytest.fixture()
-def engine():
+def engine(tmp_path):
     eng = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+        f"sqlite:///{(tmp_path / 'export.db').as_posix()}",
+        connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=eng)
     try:
         yield eng
     finally:
         Base.metadata.drop_all(bind=eng)
+        eng.dispose()
 
 
 @pytest.fixture()
