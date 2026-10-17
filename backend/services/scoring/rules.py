@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any
@@ -423,6 +424,16 @@ def evaluate_dimension(
 # ──────────────────────────── 条件求值 ────────────────────────────
 
 
+def explicit_list_values(value: Any) -> list | None:
+    """只接受明确的逐项列表；历史区间或汇总值不能还原为个体值。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    return list(value) if isinstance(value, (list, tuple)) else None
+
+
 def evaluate_condition(
     condition: Condition,
     customer: Any,
@@ -470,6 +481,12 @@ def evaluate_condition(
         return hit if op == "in" else not hit
     if op == "contains":
         return _stringify(expected) in _stringify(value)
+    if op == "contains_item":
+        items = explicit_list_values(value)
+        return items is not None and any(
+            item == expected or str(item).strip() == str(expected).strip()
+            for item in items
+        )
     if op in ("days_since_gt", "days_since_gt_or_empty"):
         parsed = _to_date(value)
         if parsed is None:

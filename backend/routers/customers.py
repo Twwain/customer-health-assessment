@@ -30,6 +30,7 @@ from services import assessment_history
 from services.scoring import get_scoring_strategy, load_scoring_config
 from services.scoring.config_loader import (
     FactorConfig,
+    KEY_PERSON_COUNT,
     strip_sub_dimension_annotation,
     sub_dimension_of,
 )
@@ -615,8 +616,8 @@ def _parse_key_person_levels(factor: FactorConfig, value: Any) -> str:
             raw = json.loads(text)
         except (json.JSONDecodeError, TypeError):
             raw = [item.strip() for item in text.strip("[]").split(",") if item.strip()]
-    if not isinstance(raw, (list, tuple)) or len(raw) != 5:
-        raise HTTPException(status_code=400, detail=f"因子「{factor.label}」必须填写 5 位关键人等级")
+    if not isinstance(raw, (list, tuple)) or len(raw) != KEY_PERSON_COUNT:
+        raise HTTPException(status_code=400, detail=f"因子「{factor.label}」必须填写 {KEY_PERSON_COUNT} 位关键人等级")
 
     levels: list[int] = []
     for item in raw:

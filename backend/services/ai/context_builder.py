@@ -20,7 +20,10 @@ import config
 from models import Customer
 from schemas import AssessmentResponse, AssessmentTrendResponse
 from services import assessment_history
+from services.ai.guardrails import sanitize_text
 from services.scoring import get_scoring_strategy, load_scoring_config
+from services.scoring.config_loader import KEY_PERSON_COUNT
+from services.scoring.rules import evaluate_factor, explicit_list_values, resolve_value
 
 NO_KNOWLEDGE_HINT = (
     "## 知识库参考资料\n"
@@ -99,6 +102,64 @@ def fmt_score(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def _sanitize_factor_value(value: object) -> object:
+    """仅清理 AI 副本中的文本，保留评分数据及容器内的数值语义。"""
+    if isinstance(value, str):
+        return sanitize_text(value)[0]
+    if isinstance(value, list):
+        return [_sanitize_factor_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            sanitize_text(key)[0]: _sanitize_factor_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def configured_factor_values(customer: Customer) -> dict[str, object]:
+    """按评分来源提取当前启用因子，并在进入 AI 的边界递归脱敏。"""
+    return {
+        factor.label: _sanitize_factor_value(resolve_value(customer, factor))
+        for dimension in load_scoring_config().enabled_dimensions
+        for factor in dimension.enabled_factors
+    }
+
+
+def configured_factor_definitions(customer: Customer) -> dict[str, dict]:
+    """配置定义与引擎映射分随原值一起送给 AI，避免猜测量表含义。"""
+    definitions = {}
+    for dimension in load_scoring_config().enabled_dimensions:
+        for factor in dimension.enabled_factors:
+            raw = resolve_value(customer, factor)
+            definition = {
+                "description": factor.description,
+                "options": list(factor.input.options),
+                "unit": factor.input.unit,
+                "score": evaluate_factor(factor, raw).score,
+            }
+            if factor.input.type == "key_person_levels":
+                definition["expected_people_count"] = KEY_PERSON_COUNT
+                values = explicit_list_values(raw)
+                options = factor.input.options
+                valid = [str(v) for v in values or [] if not isinstance(v, bool) and str(v) in options]
+                definition["interpretation"] = (
+                    "列表中每项是一位关键人的等级，不是各等级的人数。"
+                    "0若是合法选项，应按配置定义解释，不能当作未填写或未识别人员。"
+                    "达到配置最高等级的人员不得再建议提升到更高的不存在等级。"
+                )
+                if values is not None:
+                    definition["people_count"] = len(values)
+                    definition["valid_people_count"] = len(valid)
+                    definition["level_counts"] = {level: valid.count(level) for level in options}
+                if values is None or len(values) != KEY_PERSON_COUNT or len(valid) != len(values):
+                    definition["verification"] = (
+                        "待核实：缺少完整合法的逐人等级；历史区间或汇总值无法还原个体，"
+                        "不得据此断言存在或不存在反对者，也不得虚构个体等级，请补录逐人数据。"
+                    )
+            definitions[factor.label] = definition
+    return definitions
+
+
 def _customer_profile(c: Customer) -> str:
     """客户基础信息。"""
     lines = [
@@ -106,17 +167,33 @@ def _customer_profile(c: Customer) -> str:
         f"- 客户名称：{c.customer_name}",
         f"- 所属行业：{c.industry or '未填写'}",
         f"- 对接人角色：{'已指定' if c.contact_person else '未指定'}",
-        f"- 合作年限：{c.cooperation_years} 年",
-        f"- 沟通频率：{c.contact_frequency or '未填写'}",
-    ]
-
-    lines += [
-        f"- 年度合同金额：{c.contract_amount} 万元",
-        f"- 增长潜力：{c.growth_potential or '未填写'}",
     ]
 
     if c.notes:
         lines.append(f"- 备注：{c.notes}")
+
+    lines.append("## 当前评分因子原始值")
+    lines.append("解释原值必须使用下列当前配置与引擎映射分，不得自行扩展量表或把等级列表当作人数。")
+    definitions = configured_factor_definitions(c)
+    for label, value in configured_factor_values(c).items():
+        display = "未填写" if value is None or value == "" or value == [] else value
+        lines.append(f"- {label}：{display}")
+        definition = definitions[label]
+        lines.append(f"  配置定义：{definition['description']}；单因子映射分：{fmt_score(definition['score'])}")
+        if definition["options"]:
+            lines.append(f"  合法选项（只能按此量表解释）：{' / '.join(definition['options'])}")
+        if definition["unit"]:
+            lines.append(f"  单位：{definition['unit']}")
+        if "interpretation" in definition:
+            lines.append(f"  列表语义：{definition['interpretation']}")
+            lines.append(f"  应填人数：{definition['expected_people_count']}")
+        if "people_count" in definition:
+            lines.append(
+                f"  序列人数：{definition['people_count']}；已填合法等级人数：{definition['valid_people_count']}；"
+                f"各等级人数：{definition['level_counts']}"
+            )
+        if "verification" in definition:
+            lines.append(f"  {definition['verification']}")
 
     return "\n".join(lines)
 
