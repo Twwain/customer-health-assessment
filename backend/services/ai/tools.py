@@ -15,7 +15,7 @@ import json
 from typing import Any
 
 from models import Customer
-from services.ai.context_builder import ChatContext, configured_factor_values
+from services.ai.context_builder import ChatContext, configured_factor_definitions, configured_factor_values
 from services.rag.retriever import RetrievedChunk, retrieve_knowledge
 
 # 工具循环安全上限：模型连续请求工具的最大轮数，防止死循环
@@ -82,6 +82,7 @@ def profile_query(customer: Customer | None) -> dict:
         "customer_name": customer.customer_name,
         "industry": customer.industry or "",
         "factors": configured_factor_values(customer),
+        "factor_definitions": configured_factor_definitions(customer),
     }
 
 

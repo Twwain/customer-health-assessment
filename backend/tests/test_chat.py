@@ -321,10 +321,125 @@ def test_factor_context_follows_enabled_config_and_sources(monkeypatch, customer
     assert "禁用维度因子" not in text
 
 
+@pytest.mark.parametrize("write_method", ["create", "update"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_factor_sensitive_text_is_masked_before_model_request(
+    db, session_factory, fake_llm, write_method, nested,
+):
+    from copy import deepcopy
+    from routers import customers as customer_router
+
+    sensitive = "联系电话 13812345678 api_key=sk-synthetic1234567890"
+    factor_value = (
+        {"record": [sensitive, 0, False, None, {"13812345678": sensitive}]}
+        if nested else sensitive
+    )
+    raw_fields = {"kcr_01": deepcopy(factor_value)}
+    app = FastAPI()
+    app.include_router(customer_router.router, prefix="/api")
+
+    def override_db():
+        with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/customers",
+            json={"customer_name": "脱敏回归客户", "custom_fields": raw_fields if write_method == "create" else {}},
+        )
+        assert initial.status_code == 200
+        customer_id = initial.json()["id"]
+        if write_method == "update":
+            updated = client.put(
+                f"/api/customers/{customer_id}", json={"custom_fields": raw_fields},
+            )
+            assert updated.status_code == 200
+
+    customer = db.get(Customer, customer_id)
+    session = ChatSession(customer_id=customer_id, scenario="free_qa", title="脱敏回归")
+    db.add(session)
+    db.commit()
+    events = list(chat_engine.run_turn(db, session, scenario="free_qa", content="分析当前因子"))
+    assert events[-1].type == "done"
+    assert fake_llm.calls
+    outgoing = "\n".join(message.content for message in fake_llm.calls[-1])
+    profile = tools.profile_query(customer)
+    for payload in (outgoing, json.dumps(profile, ensure_ascii=False)):
+        assert "13812345678" not in payload
+        assert "sk-synthetic1234567890" not in payload
+        assert "138****5678" in payload
+        assert "api_key=***" in payload
+    if nested:
+        safe = profile["factors"]["KCR-01 决策链识别完整度"]["record"]
+        assert safe[1] == 0 and type(safe[1]) is int
+        assert safe[2] is False
+        assert safe[3] is None
+    db.expire(customer)
+    assert customer.custom_fields == raw_fields
+
+
 def test_context_without_customer_is_generic(db):
     ctx = context_builder.build_context(db, None)
     assert ctx.assessment is None
     assert "未关联具体客户" in ctx.customer_text
+
+
+@pytest.mark.parametrize("levels", [[3, 3, 3, 3, 3], [2, 1, 0, 0, 0], "[3,1,1,3,0]"])
+def test_model_request_and_profile_include_current_person_scale(db, customer, fake_llm, levels):
+    customer.custom_fields = {"kcr_02": levels}
+    db.commit()
+    session = chat_engine.create_session(db, customer_id=customer.id, scenario="free_qa")
+    events = list(chat_engine.run_turn(db, session, scenario="free_qa", content="解释关键人等级"))
+    assert events[-1].type == "done"
+    outgoing = "\n".join(message.content for message in fake_llm.calls[-1])
+    factor = context_builder.load_scoring_config().find_factor("kcr_02")
+    definition = tools.profile_query(customer)["factor_definitions"][factor.label]
+    assert factor.description in outgoing
+    assert definition["description"] == factor.description
+    assert definition["options"] == factor.input.options
+    assert "0中立" in outgoing and "3教练级" in outgoing
+    assert "合法选项（只能按此量表解释）：3 / 2 / 1 / 0 / -1" in outgoing
+    assert "序列人数：5；已填合法等级人数：5" in outgoing
+    assert "不能当作未填写或未识别人员" in outgoing
+    assert definition["people_count"] == definition["valid_people_count"] == 5
+    assert "verification" not in definition
+    if levels == [3, 3, 3, 3, 3]:
+        assert definition["score"] == 10
+        assert definition["level_counts"]["3"] == 5
+        assert "不存在等级" in outgoing
+    else:
+        assert definition["level_counts"]["0"] in (1, 3)
+
+
+def test_factor_definitions_follow_config_without_a_second_scale(monkeypatch, customer):
+    from dataclasses import replace
+
+    config = context_builder.load_scoring_config()
+    dim = config.dimensions[0]
+    factor = replace(
+        dim.factors[1], field="new_levels", label="动态量表", description="6最高、0中立、-2反对",
+        input=replace(dim.factors[1].input, options=["6", "0", "-2"]),
+    )
+    monkeypatch.setattr(context_builder, "load_scoring_config", lambda: replace(config, dimensions=[replace(dim, factors=[factor])]))
+    customer.custom_fields = {"new_levels": [6, 0, -2]}
+    definitions = tools.profile_query(customer)["factor_definitions"]
+    assert list(definitions) == ["动态量表"]
+    assert definitions["动态量表"]["description"] == factor.description
+    assert definitions["动态量表"]["options"] == ["6", "0", "-2"]
+    assert definitions["动态量表"]["level_counts"] == {"6": 1, "0": 1, "-2": 1}
+    assert "6 / 0 / -2" in context_builder._customer_profile(customer)
+
+
+@pytest.mark.parametrize("value", ["1.5-1.9", None, [], "[3,1,0,9,0]", [3, 3], "[3,3]", [3, 3, 3, 3, 3, 3]])
+def test_person_scale_without_complete_individual_values_requires_verification(customer, value):
+    customer.custom_fields = {"kcr_02": value}
+    factor = context_builder.load_scoring_config().find_factor("kcr_02")
+    definition = tools.profile_query(customer)["factor_definitions"][factor.label]
+    assert "待核实" in definition["verification"]
+    assert definition["expected_people_count"] == 5
+    assert "不得据此断言存在或不存在反对者" in context_builder._customer_profile(customer)
+    assert customer.custom_fields["kcr_02"] == value
 
 
 def test_alert_context_lists_alerts(db, customer):
