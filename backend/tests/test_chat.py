@@ -268,12 +268,57 @@ def test_context_excludes_personal_phone(db, customer):
 
 def test_context_excludes_removed_legacy_fields(db, customer):
     ctx = context_builder.build_context(db, customer)
-    for label in ("最近联系：", "回款状态：", "竞品介入："):
+    for label in (
+        "最近联系：", "回款状态：", "竞品介入：", "合作年限：", "沟通频率：",
+        "年度合同金额：", "增长潜力：",
+    ):
         assert label not in ctx.customer_text
 
     profile = tools.profile_query(customer)
-    for field in ("last_contact_date", "payment_status", "competitor_involvement", "risk_signals"):
+    for field in (
+        "last_contact_date", "payment_status", "competitor_involvement", "risk_signals",
+        "cooperation_years", "contact_frequency", "contract_amount", "growth_potential",
+    ):
         assert field not in profile
+
+
+def test_context_and_profile_use_current_factors_only(db, customer):
+    customer.custom_fields = {
+        "his_02": "连续上升", "risk_07": "否", "his_09": 0,
+        "contract_years": 99, "obsolete_factor": "不应出现的旧值",
+    }
+    ctx = context_builder.build_context(db, customer)
+    factors = tools.profile_query(customer)["factors"]
+    assert len(factors) == 28
+    assert factors["HIS-02 年均合作金额趋势"] == "连续上升"
+    assert factors["HIS-09 NPS/客户满意度"] == 0
+    assert "HIS-02 年均合作金额趋势：连续上升" in ctx.customer_text
+    assert "HIS-09 NPS/客户满意度：0" in ctx.customer_text
+    assert "KCR-01 决策链识别完整度：未填写" in ctx.customer_text
+    assert "contract_years" not in ctx.customer_text
+    assert "不应出现的旧值" not in ctx.customer_text
+    assert "contract_years" not in factors
+
+
+def test_factor_context_follows_enabled_config_and_sources(monkeypatch, customer):
+    from dataclasses import replace
+    from services.scoring import load_scoring_config
+
+    config = load_scoring_config()
+    dim = config.dimensions[0]
+    base = dim.factors[0]
+    active = replace(base, field="new_factor", label="新增因子")
+    disabled = replace(base, field="removed_factor", label="禁用因子", enabled=False)
+    model = replace(base, field="industry", label="模型来源因子", source="model")
+    hidden_dim = replace(dim, enabled=False, factors=[replace(base, label="禁用维度因子")])
+    config = replace(config, dimensions=[replace(dim, factors=[active, disabled, model]), hidden_dim])
+    monkeypatch.setattr(context_builder, "load_scoring_config", lambda: config)
+    customer.custom_fields = {"new_factor": False, "removed_factor": "旧值"}
+    assert tools.profile_query(customer)["factors"] == {"新增因子": False, "模型来源因子": "制造"}
+    text = context_builder._customer_profile(customer)
+    assert "新增因子：False" in text
+    assert "禁用因子" not in text
+    assert "禁用维度因子" not in text
 
 
 def test_context_without_customer_is_generic(db):

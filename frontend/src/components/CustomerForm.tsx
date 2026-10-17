@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { CustomerResponse, FactorConfigItem, FactorConfigResponse } from "../types";
 import { groupFactors } from "../lib/factorGroups";
 import { BASIC_FIELDS } from "../lib/customerFields";
+import { factorHelpNotes } from "../lib/factorHelp";
 
 interface CustomerFormProps {
   customer: CustomerResponse;
@@ -311,11 +312,7 @@ function FactorField({
   const inputCls =
     "w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-[14px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:bg-surface-2 disabled:text-muted";
   const err = validateFactor(factor, value);
-  const label = (
-    <label className="mb-1 block text-[13.5px] font-medium text-ink-2">
-      {factor.label}
-    </label>
-  );
+  const label = <FactorHelp factor={factor} />;
 
   let control: React.ReactNode;
   const t = factor.input.type;
@@ -487,9 +484,41 @@ function FactorField({
   return (
     <div>
       {label}
-      {factor.description && <div className="mb-1 text-[12px] text-muted">{factor.description}</div>}
       {control}
       {err && <div className="mt-1 text-[12px] text-danger">{err}</div>}
+    </div>
+  );
+}
+
+function FactorHelp({ factor }: { factor: FactorConfigItem }) {
+  const [open, setOpen] = useState(false);
+  const helpId = useId();
+  const notes = factorHelpNotes(factor);
+  return (
+    <div className="mb-1" onKeyDown={(event) => {
+      if (event.key === "Escape") setOpen(false);
+    }}>
+      <div className="flex items-center gap-1.5">
+        <span className="text-[13.5px] font-medium text-ink-2">{factor.label}</span>
+        <button
+          type="button"
+          aria-label={`查看${factor.label}说明`}
+          aria-expanded={open}
+          aria-controls={helpId}
+          onClick={() => setOpen((current) => !current)}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border-strong text-[13px] text-muted hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          ?
+        </button>
+      </div>
+      {open && (
+        <div id={helpId} role="region" aria-label={`${factor.label}说明`}
+          className="mt-1.5 space-y-1 rounded-lg border border-border bg-surface-2 p-2.5 text-[12px] leading-relaxed text-ink-2">
+          {factor.description && <p>{factor.description}</p>}
+          {notes.map((note) => <p key={note}>{note}</p>)}
+          {!factor.description && notes.length === 0 && <p>请按当前选项和实际记录填报。</p>}
+        </div>
+      )}
     </div>
   );
 }

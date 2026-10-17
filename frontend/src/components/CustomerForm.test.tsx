@@ -80,6 +80,21 @@ const config: FactorConfigResponse = {
 };
 
 describe("CustomerForm 二级维度分组", () => {
+  it("只读模式仍可用键盘查看术语说明，不触发因子修改", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CustomerForm customer={customer} config={config} value={{}} onChange={onChange} readOnly />);
+    await user.click(screen.getByRole("button", { name: /客户关系网络/ }));
+    const help = screen.getByRole("button", { name: "查看关键人客情等级说明" });
+    help.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByText(/教练级＝持续提供内部信息/)).toBeInTheDocument();
+    expect(screen.getByText(/AR：客户经理/)).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(help).toHaveAttribute("aria-expanded", "false");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("维度默认收起，展开后按 sub_dimension 分组展示因子", async () => {
     const user = userEvent.setup();
     render(
@@ -102,8 +117,16 @@ describe("CustomerForm 二级维度分组", () => {
     expect(screen.getByText("信息互通")).toBeInTheDocument();
     expect(screen.getByText("已识别决策链人数占比")).toBeInTheDocument();
     expect(screen.getByText("关键人客情等级")).toBeInTheDocument();
-    // 描述按后端清洗后原样展示
+    // 描述按需展开，避免说明文字挤占填报空间。
+    expect(screen.queryByText("原子指标：已识别决策链人数占比")).not.toBeInTheDocument();
+    const help = screen.getByRole("button", { name: "查看已识别决策链人数占比说明" });
+    expect(help).toHaveAttribute("aria-expanded", "false");
+    await user.click(help);
+    expect(help).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("原子指标：已识别决策链人数占比")).toBeInTheDocument();
+    expect(screen.getByText(/决策链指参与需求提出/)).toBeInTheDocument();
+    await user.click(help);
+    expect(screen.queryByRole("region", { name: "已识别决策链人数占比说明" })).not.toBeInTheDocument();
   });
 
   it("收起某个二级维度分组后其因子隐藏", async () => {

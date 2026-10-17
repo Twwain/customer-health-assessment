@@ -21,6 +21,7 @@ from models import Customer
 from schemas import AssessmentResponse, AssessmentTrendResponse
 from services import assessment_history
 from services.scoring import get_scoring_strategy, load_scoring_config
+from services.scoring.rules import resolve_value
 
 NO_KNOWLEDGE_HINT = (
     "## 知识库参考资料\n"
@@ -99,6 +100,15 @@ def fmt_score(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def configured_factor_values(customer: Customer) -> dict[str, object]:
+    """仅提取当前启用的因子，取值来源与评分引擎一致。"""
+    return {
+        factor.label: resolve_value(customer, factor)
+        for dimension in load_scoring_config().enabled_dimensions
+        for factor in dimension.enabled_factors
+    }
+
+
 def _customer_profile(c: Customer) -> str:
     """客户基础信息。"""
     lines = [
@@ -106,17 +116,15 @@ def _customer_profile(c: Customer) -> str:
         f"- 客户名称：{c.customer_name}",
         f"- 所属行业：{c.industry or '未填写'}",
         f"- 对接人角色：{'已指定' if c.contact_person else '未指定'}",
-        f"- 合作年限：{c.cooperation_years} 年",
-        f"- 沟通频率：{c.contact_frequency or '未填写'}",
-    ]
-
-    lines += [
-        f"- 年度合同金额：{c.contract_amount} 万元",
-        f"- 增长潜力：{c.growth_potential or '未填写'}",
     ]
 
     if c.notes:
         lines.append(f"- 备注：{c.notes}")
+
+    lines.append("## 当前评分因子原始值")
+    for label, value in configured_factor_values(c).items():
+        display = "未填写" if value is None or value == "" or value == [] else value
+        lines.append(f"- {label}：{display}")
 
     return "\n".join(lines)
 
