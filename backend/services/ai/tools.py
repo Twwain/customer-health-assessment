@@ -3,7 +3,7 @@
 M4 Agent Loop 调用的四类工具：
 - ``rag_retrieve``：知识库检索（检索增强上下文，Agent 自带 RAG 能力）
 - ``score_query``：量化评估引擎查询（基础客情分）
-- ``profile_query``：客户画像查询（行业 / 规模 / 回款等）
+- ``profile_query``：客户画像查询（名称 / 行业 / 当前评分因子）
 - ``critique``：自批判（启发式，检查草稿是否含策略块与知识引用；可升级为 LLM 批判）
 
 所有工具对异常静默降级（返回空 / 默认），不让工具故障拖垮 Agent Loop。
@@ -18,7 +18,7 @@ from typing import Any
 import config
 from models import Customer
 from services.ai import guardrails
-from services.ai.context_builder import ChatContext
+from services.ai.context_builder import ChatContext, configured_factor_definitions, configured_factor_values
 from services.rag.retriever import RetrievedChunk, retrieve_knowledge
 
 # 工具循环安全上限：模型连续请求工具的最大轮数，防止死循环
@@ -160,9 +160,8 @@ def profile_query(customer: Customer | None) -> dict:
     return {
         "customer_name": customer.customer_name,
         "industry": customer.industry or "",
-        "cooperation_years": customer.cooperation_years,
-        "contract_amount": customer.contract_amount,
-        "growth_potential": customer.growth_potential or "",
+        "factors": configured_factor_values(customer),
+        "factor_definitions": configured_factor_definitions(customer),
     }
 
 
@@ -173,7 +172,7 @@ CUSTOMER_COMPARE_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "customer_compare",
         "description": (
-            "查询客户库中客户的量化健康评分与四维得分，用于横向对比（例如"
+            "查询客户库中客户的量化健康评分与当前启用维度得分，用于横向对比（例如"
             "“和其他客户对比有什么优势”“和同行业客户比怎么样”）。"
             "默认返回全量客户；仅当用户明确限定行业（如同行业/同行/某行业）时传 industry。"
             "exclude_customer_id 通常传当前对话客户 id，避免把目标客户自身计入对比。"

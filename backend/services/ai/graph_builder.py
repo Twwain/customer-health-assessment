@@ -258,10 +258,13 @@ class AssessmentStrategyAgent:
                 if time.monotonic() >= deadline or usage.get("finish_reason") == "length":
                     result = fact_check.FactCheckResult("unverified", reason="核对时间或输出预算已耗尽")
                 else:
-                    result = fact_check.parse_result(text, draft, sources)
+                    result = fact_check.parse_result(text, draft, sources, customer=ctx.customer,
+                                                     scoring_facts=ctx.scoring_facts or None)
             except Exception as exc:
                 # 核对服务异常不把已经付费生成的正文误判为不可用。
                 result = fact_check.FactCheckResult("unverified", reason=str(exc))
+        result = fact_check.merge_local_checks(result, draft, customer=ctx.customer,
+                                              scoring_facts=ctx.scoring_facts or None)
         self._verification.append({"status": result.status, "issues": result.issues, "reason": result.reason})
         return result
 
@@ -533,7 +536,7 @@ class AssessmentStrategyAgent:
                 verification.feedback(),
             ]))
 
-        if verification.status == "unverified":
+        if verification.status == "unverified" or verification.reason:
             warnings.append(f"关键事实核对未完成：{verification.reason}")
         if tools.needs_refine(critique_text):
             warnings.append(f"草稿精炼达到 {max_iter} 次上限，输出可能未完全满足：{critique_text.strip()}")

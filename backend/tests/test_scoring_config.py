@@ -251,6 +251,40 @@ def test_v3_trend_alert_matches_latest_docx_rule():
     assert rule.drop_gt == 10
 
 
+@pytest.mark.parametrize(("value", "expected"), [
+    ([3, 2, -1, 0, 0], True),
+    ("[3,2,-1,1]", True),
+    (["3", "2", "-1", "0", "0"], True),
+    ([2, 1, 0, 0, 0], False),
+    ("1.5-1.9", False),
+    ("1-1.4", False),
+    ("-1", False),
+    ("[-10,3,0,0,0]", False),
+    ([3, 2, -1.001, 0, 0], False),
+    ("[3,2,-1.001,0,0]", False),
+    ([3, 2, -1.0, 0, 0], True),
+    ("[3,2,-1,1", False),
+    (None, False),
+])
+def test_opposition_alert_uses_explicit_person_level_membership(value, expected):
+    customer = make_customer(custom_fields={"kcr_02": value})
+    result = HealthScoreEngine().evaluate(customer)
+    assert ("key_person_opposition" in {alert.id for alert in result.alerts}) is expected
+    assert customer.custom_fields == {"kcr_02": value}
+    if value == "1.5-1.9":
+        kcr = next(dimension for dimension in result.dimensions if dimension.key == "kcr")
+        assert next(factor.score for factor in kcr.factors if factor.field == "kcr_02") == 8
+
+
+def test_text_contains_condition_keeps_its_existing_semantics():
+    from services.scoring.config_loader import Condition
+    from services.scoring.rules import evaluate_condition
+
+    customer = make_customer(custom_fields={"text": "1.5-1.9"})
+    assert evaluate_condition(Condition(op="contains", field="text", source="custom_fields", value="-1"), customer)
+    assert not evaluate_condition(Condition(op="contains_item", field="text", source="custom_fields", value=-1), customer)
+
+
 def test_all_alerts_use_current_factor_config():
     """每条预警的叶子条件都必须引用当前启用因子，并使用其真实数据来源。"""
     config = load_scoring_config()

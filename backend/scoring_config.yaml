@@ -569,7 +569,7 @@ dimensions:
 alerts:
   - id: key_person_opposition
     level: high
-    when: {field: kcr_02, source: custom_fields, op: contains, value: "-1"}
+    when: {field: kcr_02, source: custom_fields, op: contains_item, value: -1}
     message: "关键人客情等级中出现 -1（反对者），需立即介入"
     suggestion: "立即核实反对原因，由销售主管牵头制定关键人修复计划。"
 

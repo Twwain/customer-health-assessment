@@ -23,6 +23,8 @@ except ImportError as exc:  # pragma: no cover
 
 
 DEFAULT_CONFIG_FILENAME = "scoring_config.yaml"
+# key_person_levels 控件与写入校验共用的固定人数契约。
+KEY_PERSON_COUNT = 5
 
 # 因子描述中的“二级维度”标注（例：“（二级维度：决策链覆盖度）”“（-1~3，二级维度：决策链覆盖度）”）
 SUB_DIM_PATTERN = re.compile(r"二级维度[:：]\s*([^，,。；;）)\]]+)")
@@ -69,7 +71,7 @@ VALID_RULE_TYPES = {
 VALID_CONDITION_OPS = {
     "truthy", "falsy", "is_true", "is_false", "empty",
     "eq", "ne", "lt", "lte", "gt", "gte",
-    "in", "not_in", "contains",
+    "in", "not_in", "contains", "contains_item",
     "days_since_gt", "days_since_gt_or_empty",
 }
 VALID_ALERT_LEVELS = {"high", "medium", "low"}
