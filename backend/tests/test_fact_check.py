@@ -314,6 +314,60 @@ def _with_targets(claim):
             + claim)
 
 
+@pytest.mark.parametrize('draft', [
+    '总分78.9，较上次+18.6分。',
+    '总分78.9，较上次评估上升18.6分。',
+    '总分78.9，比上期提高18.6分。',
+    '总分环比提升18.6分。',
+    '客户总分78.9，处于「亚健康」区间，较上次+18.6分，回升明显。',
+    '{"reason":"总分78.9，较上次+18.6分。","expected_outcome":"改善经营质量"}',
+    '## 预期效果\n不作增分推算。\n## 历史评估\n总分78.9，较上次+18.6分。',
+])
+def test_historical_delta_does_not_require_future_score_targets(draft):
+    from services.ai.fact_check import _score_expressions
+    c, facts, sources = _score_case()
+    assert _score_expressions(draft, facts) == []
+    result = parse_result('{"issues":[],"score_projections":[]}', draft, sources,
+                          customer=c, scoring_facts=facts)
+    assert result.status == 'passed' and not result.reason
+
+
+@pytest.mark.parametrize('draft', [
+    '总分预计较上次提升5分。',
+    '总分目标比上期提高5分。',
+    '建议将总分较上次提升5分。',
+    '计划把总分较上次提升5分。',
+    '总分有望较上次提升5分。',
+    '希望总分较上次提升5分。',
+    '总分较上次提升5分（预期目标）。',
+    '总分较上次提升5分，作为未来三个月的目标。',
+    '总分较上次提升5分，作为本轮工作的追求。',
+    '## 预期效果\n总分较上次提升5分。',
+    '- 预期效果：\n  总分较上次提升5分。',
+    '## 预期效果\n### 评分变化\n总分较上次提升5分。',
+    '**预期效果**：\n总分较上次提升5分。',
+    '**预期效果：**\n总分较上次提升5分。',
+    '{"expected_outcome":"总分较上次提升5分。"}',
+    '{"action":"总分较上次提升5分。"}',
+    '{"reason":"上次数据为基线","expected_outcome":"总分较上次提升5分。"}',
+    '总分提升5分。',
+    '总分78.9提升至83.9。',
+])
+def test_future_projection_still_requires_complete_targets(draft):
+    c, facts, sources = _score_case()
+    result = parse_result('{"issues":[],"score_projections":[]}', draft, sources,
+                          customer=c, scoring_facts=facts)
+    assert result.status == 'unverified'
+
+
+def test_historical_delta_does_not_exempt_a_separate_future_projection():
+    c, facts, sources = _score_case()
+    draft = '总分78.9，较上次+18.6分。总分预计达到83.9分。'
+    result = parse_result('{"issues":[],"score_projections":[]}', draft, sources,
+                          customer=c, scoring_facts=facts)
+    assert result.status == 'unverified'
+
+
 def test_generation_and_verification_share_one_compact_scoring_source():
     from services.ai.context_builder import _scoring_facts_section
     from services.ai.fact_check import build_sources

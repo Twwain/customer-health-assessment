@@ -231,6 +231,81 @@ def test_live_fact_check(live_chat, draft, expected, limits):
                    and "36" in i["evidence"] for i in result.issues)
 
 
+@pytest.mark.parametrize('draft,has_issue', [
+    ('OR与CI是主要短板，SVC得分率为60%。', False),
+    ('OR-01是OR维度的主要失分点。', False),
+    ('OR绝对缺口为所有维度最大。', True),
+    ('OR得分率为所有维度最低。', True),
+    ('OR-01是OR维度全部失分的来源。', True),
+    ('KCR-02中等级1代表中立。', True),
+    ('总分78.9，较上次+18.6分。', False),
+    ('总分78.9，较上次+30分。', True),
+])
+def test_live_fact_check_preserves_major_vs_extreme_boundary(live_chat, limits, draft, has_issue):
+    from services.ai.fact_check import messages_for_check, parse_result
+    from test_fact_check import _score_case
+
+    customer, facts, sources = _score_case()
+    sources['levels'] = '关键人客情等级：-1反对、0中立、1支持、2强支持、3教练级。'
+    sources['history'] = '本次评估总分78.9，上次评估总分60.3，本次较上次增加18.6分。'
+    text = ''.join(live_chat.stream_chat_completion(
+        messages_for_check(draft, sources), temperature=0,
+        max_tokens=config.AI_FACT_CHECK_MAX_TOKENS,
+        extra={'thinking': {'type': 'disabled'}}, deadline=time.monotonic() + limits[1],
+    ))
+    payload = json.loads(text.removeprefix('```json').removesuffix('```').strip())
+    # Check the model's classification too: engine checks must not hide a missed error.
+    assert bool(payload['issues']) == has_issue, text
+    result = parse_result(text, draft, sources, customer=customer, scoring_facts=facts)
+    assert result.status == ('issues' if has_issue else 'passed'), result
+
+
+def test_live_fact_check_extracts_all_combined_score_targets(live_chat, limits):
+    from services.ai.fact_check import messages_for_check, parse_result
+    from test_fact_check import _score_case, _with_targets
+
+    customer, facts, sources = _score_case()
+    draft = _with_targets('KCR由24→29（+5.0），总分由78.9提升至83.9。')
+    text = ''.join(live_chat.stream_chat_completion(
+        messages_for_check(draft, sources), temperature=0,
+        max_tokens=config.AI_FACT_CHECK_MAX_TOKENS,
+        extra={'thinking': {'type': 'disabled'}}, deadline=time.monotonic() + limits[1],
+    ))
+    result = parse_result(text, draft, sources, customer=customer, scoring_facts=facts)
+    assert result.status == 'passed' and not result.reason, (result, text)
+    payload = json.loads(text.removeprefix('```json').removesuffix('```').strip())
+    assert payload['score_projections']
+    for projection in payload['score_projections']:
+        assert set(projection['changes']) == {'kcr_01', 'kcr_04', 'kcr_08', 'kcr_10b'}
+
+
+def test_live_local_patch_preserves_json_strategy_fields(live_chat, limits):
+    from services.ai import local_quality
+    from test_fact_check import _score_case
+
+    _, _, sources = _score_case()
+    item = {'priority': 'recommended', 'urgency': 'high', 'title': '补齐组织绑定',
+            'reason': 'OR得分率70%，为所有维度最低。',
+            'action': '建议客户经理30天内沟通协议升级，OR-01提升至区域级。',
+            'expected_outcome': '记录客户反馈，不预估具体增分。', 'reference': '',
+            'score_targets': {'or_01': '区域级'}}
+    draft = '```json\n' + json.dumps({'strategies': [item]}, ensure_ascii=False) + '\n```'
+    answer = local_quality.parse_answer(draft)
+    issues = [{'claim': item['reason'], 'source_id': 'scoring', 'evidence': sources['scoring'],
+               'reason': 'OR不是得分率最低维度，最低为SVC的60%。'}]
+    text = ''.join(live_chat.stream_chat_completion(
+        local_quality.messages_for_patch(answer, {'u0'}, issues, sources), temperature=0,
+        max_tokens=config.AI_FACT_CHECK_MAX_TOKENS,
+        extra={'thinking': {'type': 'disabled'}}, deadline=time.monotonic() + limits[1],
+    ))
+    rendered, diagnostic = local_quality.apply_patches(text, answer, {'u0'}, sources)
+    revised = local_quality.parse_answer(rendered).units[0].item
+    assert diagnostic['patched'] == ['u0']
+    assert revised['reason'] != item['reason'] and '为所有维度最低' not in revised['reason']
+    assert {key: value for key, value in revised.items() if key != 'reason'} == {
+        key: value for key, value in item.items() if key != 'reason'}
+
+
 @pytest.mark.parametrize("scenario", ["assessment", "strategy"])
 def test_live_business_agent(live_chat, live_business_data, scenario, limits, record_property):
     from services.ai.context_builder import build_context

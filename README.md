@@ -12,11 +12,35 @@
 [![License](https://img.shields.io/badge/License-Internal-blue)](#许可证)
 
 - **客户库 `/customers`**：筛选、新建、Excel 导入、因子编辑（桌面可编辑、移动只读）、评分与历史趋势。
-- **AI 对话 `/chat`**：流式综合评估、策略生成、风险排查与自由问答；支持引用溯源、反馈和完整结果复制。策略正文提供总览，卡片展示分层明细；重新生成完整成功后才替换旧答复。策略采纳仅为前端本地标记。
+- **AI 对话 `/chat`**：流式综合评估、策略生成、风险排查与自由问答；支持引用溯源、反馈和完整结果复制。策略以总览与分层卡片展示，重新生成成功后替换旧答复；采纳状态仅保存在前端。
 - **知识库 `/knowledge`**：文档上传（md/txt/csv/pdf/xlsx/docx）、检索、审核、编辑、删除与重索引。
 - **PDF 报告**：评分明细、预警、三层策略建议、知识引用及趋势图。
 
 数据存储使用 SQLAlchemy + SQLite，向量检索使用 Chroma，报告使用 ReportLab + matplotlib；AI 编排与检索管线为项目内实现。
+
+## 架构与特色
+
+```mermaid
+flowchart LR
+    UI[React 前端] --> API[FastAPI]
+    API --> Scoring[配置驱动评分引擎]
+    API --> Agent[AI 编排与质量核对]
+    Agent --> Scoring
+    Agent --> RAG[知识检索与来源追溯]
+    Agent --> Model[Chat 模型]
+    Scoring --> DB[(SQLite)]
+    RAG --> DB
+    RAG --> Vector[(Chroma)]
+    API --> Report[报告聚合与异步 PDF]
+    Report --> Agent
+    Report --> Scoring
+```
+
+- **评分与生成分工**：评分规则、因子档位、排名及目标增分由引擎计算，AI 负责解释与经营建议，不作为评分事实来源。
+- **知识增强与溯源**：检索包含元数据过滤、向量召回、重排和相邻切片扩展；回答与报告携带知识引用。
+- **局部质量修复**：评估、策略和风险解读在生成后核对关键事实；定点修订或移除错误及其依赖，保留重新核实通过的独立分析。无法可靠保留时使用规则结果，并明确提示。
+- **共享报告链路**：对话与 PDF 复用评分、知识和 AI 分析能力，报告包含评分明细、预警、策略、引用及趋势图。
+- **边界与可观测性**：外部资料作为不可信数据处理；生产向量库故障不静默切换内存。记录模型用量、耗时、修订与降级指标，不记录业务正文。
 
 ## 快速开始
 
@@ -72,13 +96,11 @@ DEPLOY_SERVER=root@203.0.113.10 bash deploy.sh  # 替换为实际服务器地址
 | [.env.example](.env.example) → `backend/.env` | 模型、向量库、资源限制等运行配置 |
 | [config.py](backend/config.py) | 完整环境变量与代码默认值 |
 | [scoring_config.yaml](backend/scoring_config.yaml) | 评分维度、因子、规则与预警；修改后重启后端 |
-| [prompt_templates.yaml](backend/prompt_templates.yaml) | 场景提示词与输出格式 |
+| [prompt_templates.yaml](backend/prompt_templates.yaml) | 用户场景与内部核对、修订、筛选、收尾提示词；按文件修改时间热加载 |
 
-评估、策略和风险分析会生成正文并独立核对事实，有问题时最多修订一次。代码中的 `CHAT_AGENT_MAX_ITERATIONS` / `REPORT_AGENT_MAX_ITERATIONS` 均默认 2（含首稿）；**示例配置将对话设为 1**，关闭修订但保留核对。已定位错误按结论段或完整策略项定点修订；仍有问题时，移除错误及其依赖判断，保留重新核实通过的独立分析。无法分离影响或没有可靠内容时，才改用评分结果与规则建议，并明确提示。策略全部移除时保留已核实概况、补充明确标注的规则行动，重新生成继续保留旧完整答复。评分排名由引擎提供，策略中的完整评分目标由服务端校验和重算。
+提示词分为 `templates`（用户场景）与 `internal_tasks`（内部任务）。内部任务不继承业务输出护栏，不作为场景公开；任务缺失或必需变量未提供时明确报错，不回退为自由问答。安全边界、协议校验、评分重算和调用限制仍由代码控制。
 
-聊天默认关闭思考，报告默认开启；报告单次生成上限为 32768 token，总生成时限为 300 秒。`CHAT_TURN_TOKEN_BUDGET` / `REPORT_TURN_TOKEN_BUDGET` 默认为 256000 / 512000，是探索软预算；耗尽后可另用一次生成额度收尾，并非整轮消耗硬上限。核对单次输出上限 `AI_FACT_CHECK_MAX_TOKENS` 默认为 8000。总时限、并发、输入和工具调用限制同时生效。`PDF_JOB_TTL` 应大于报告生成时限并预留排版时间。
-
-`GET /api/chat/metrics` 提供按场景的 token、耗时、修订和降级分布，运行指标默认保留 90 天，不记录业务正文。
+聊天与报告分别配置模型思考、修订次数、时间和资源预算。**示例配置关闭聊天修订，但保留核对与可靠内容筛选**；探索 token 预算是软预算，耗尽后允许一次独立额度收尾。具体参数见配置入口，PDF 任务存活时间须覆盖生成与排版耗时。
 
 ## 评分模型
 
@@ -103,16 +125,17 @@ V3.0 共 7 个维度、28 个因子；因子映射为 0–10 分，维度内取�
 ## AI、知识库与报告
 
 - **对话**：模型可调用匿名客户对比与知识检索工具，由 `LLM_TOOLS_ENABLED` 控制；工具结果经脱敏并标为不可信数据。预警解读通过对话中的“风险排查”进入。
-- **检索**：metadata 过滤 → 向量召回 → 重排（默认按分类、行业等加权；可选 BGE）→ 相邻切片扩展（`RAG_WINDOW` 默认 1）。结构化指标由 SQLite 查询。
-- **趋势**：箭头比较最近两次评分；页面曲线显示最近 12 次，PDF 由 `CHAT_TREND_POINTS` 控制，默认 6 次。
-- **导出**：前端使用异步任务：`POST /api/assessment/{id}/pdf/jobs` 创建，`GET /api/assessment/{id}/pdf/jobs/{job_id}` 轮询，状态为 `ready` 后在该路径追加 `/download` 下载。保留同步兼容接口 `GET /api/assessment/{id}/pdf`；默认包含 AI 建议，可用 `include_ai=false` 关闭。
-- **降级**：Chat 不可用时显示提示并使用规则回复；AI 报告生成失败时改用规则建议。降级与核对提示会进入报告，导出任务仍可能繁忙或失败。对话中的检索故障不阻断基础回复。
+- **检索**：默认按分类、行业等元数据重排，可选 BGE；结构化指标直接从 SQLite 查询。
+- **趋势**：基于历史评估快照展示变化，页面与报告的展示点数分别控制。
+- **导出与降级**：PDF 通过异步任务生成，可选择是否包含 AI 建议。Chat 不可用或分析无法通过质量核对时使用规则结果，降级提示同步进入报告；检索故障不阻断基础回复。
+
+接口参数和响应结构见运行后的 [API 文档](http://localhost:8000/docs)，实现入口见文末。
 
 ## 运维边界
 
 - **访问权限**：无登录、RBAC 或租户隔离，所有访问者共享数据并可管理知识库。仅用于虚构或已脱敏、可公开修改和删除的演示数据；使用真实数据前须补充访问控制。配置、密钥及本地开发记录不得随站点公开。
 - **向量一致性**：生产 Chroma 不可用时向量读写与 `/api/readiness` 返回失败，不自动回退内存；列表、详情和原文下载仍可用。更换 Embedding 服务、模型或维度后须完成整库重索引，校验成功后才切换并回收旧索引；后台自动重试待同步和待删除记录。
-- **资源限制**：默认模型并发 8、Embedding 并发 1、PDF 并发 1，每 IP 每分钟最多 60 次重型请求，知识文件最大 20MB；更多限制见配置入口。多进程/多副本会放大额度，供应商侧应设置费用上限。
+- **资源限制**：模型、Embedding、PDF 均设有并发和时间限制，重型请求与上传另有限额，详见配置入口。多进程/多副本会放大额度，供应商侧应设置费用上限。
 - **观测**：`GET /api/chat/status` 查看 AI 可用性，`GET /api/chat/metrics` 查看运行指标（默认保留 90 天）。
 
 ## 测试
@@ -127,9 +150,7 @@ Set-Location backend
 .\.venv\Scripts\python.exe -m pytest tests/test_live_llm.py --run-live -q -s -p no:cacheprovider
 ```
 
-该组覆盖流式对话、检索、工具、事实核对与报告 AI。低频 RAG 测试只需 Embedding，将命令中的文件换为 `tests/test_live_rag_extended.py`，并追加 `--run-live-chroma -k chroma`（需 chromadb）或 `--run-live-eval -k quality`。
-
-测试使用隔离的合成数据；配置故障或规则降级不算在线测试通过。覆盖范围、阈值和证据输出详见 [在线用例](backend/tests/test_live_llm.py)、[RAG 评测](backend/tests/test_live_rag_extended.py) 与 [测试选项](backend/tests/conftest.py)，不代表生产 SLA。
+在线测试使用隔离合成数据，覆盖对话、检索、工具、事实核对与报告 AI；配置故障或规则降级不算通过。低频 Chroma 与检索质量评测的启用选项见 [测试选项](backend/tests/conftest.py)，覆盖范围与阈值见 [在线用例](backend/tests/test_live_llm.py) 和 [RAG 评测](backend/tests/test_live_rag_extended.py)。
 
 ## 代码入口
 

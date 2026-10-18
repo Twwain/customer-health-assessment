@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,7 +37,7 @@ from services.ai.llm_adapter import (
     get_chat_adapter,
     stream_chat_completion_controlled,
 )
-from services.ai.prompt_templates import get_template
+from services.ai.prompt_templates import get_internal_prompt, get_template
 from . import tools, fact_check, local_quality
 
 
@@ -213,7 +214,7 @@ class AssessmentStrategyAgent:
                 role="assistant", content=tools.guardrails.wrap_untrusted(draft, "tool")
             ))
         final_messages.append(LLMMessage(
-            role="user", content="请基于已获取的资料完成最终回答，不再请求工具。保留要求的完整输出结构；资料不足的部分明确说明，不要编造。"
+            role="user", content=get_internal_prompt("finish_answer", format_hint="保留要求的完整输出结构；")
         ))
         if self._on_event:
             self._on_event("replace", {"text": "", "reason": "final_answer"})
@@ -241,13 +242,13 @@ class AssessmentStrategyAgent:
             if self._on_event:
                 self._on_event("stage", {"stage": "verification", "message": "正在依据原文核对关键事实"})
             sources = fact_check.build_sources(ctx, references)
-            messages = fact_check.messages_for_check(draft, sources)
             usage = {}
             limit = max(1, min(config.AI_FACT_CHECK_MAX_TOKENS, self._token_budget - self._total_tokens))
             deadline = time.monotonic() + config.AI_FACT_CHECK_TIMEOUT_SECONDS
             if self._deadline is not None:
                 deadline = min(deadline, self._deadline - 0.5)
             try:
+                messages = fact_check.messages_for_check(draft, sources)
                 stream = stream_chat_completion_controlled(
                     self._adapter, messages, temperature=0, max_tokens=limit,
                     tools=None, extra=_thinking_extra(False),
@@ -445,14 +446,11 @@ class AssessmentStrategyAgent:
             if scenario == "strategy"
             else "保留原输出结构（Markdown 正文）。"
         )
-        refine_prompt = (
-            "你上一轮的草稿如下：\n"
-            "---\n"
-            f"{draft}\n"
-            "---\n"
-            "草稿存在的问题：\n"
-            f"{critique_text}\n\n"
-            f"请基于原始要求输出改进后的完整回答（{format_hint}）"
+        refine_prompt = get_internal_prompt(
+            "refine_answer", format_hint=format_hint,
+            revision_data=tools.guardrails.wrap_untrusted(
+                json.dumps({"draft": draft, "issues": critique_text}, ensure_ascii=False), "tool"
+            ),
         )
         user_text = template.render_user(
             today=today,

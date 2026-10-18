@@ -56,7 +56,7 @@ from .llm_adapter import (
     get_chat_adapter,
     stream_chat_completion_controlled,
 )
-from .prompt_templates import DEFAULT_SCENARIO, SCENARIOS, get_template
+from .prompt_templates import DEFAULT_SCENARIO, SCENARIOS, get_internal_prompt, get_template
 from .strategy import generate, split_strategy_payload
 from .tools import MAX_TOOL_ROUNDS, TOOL_SCHEMAS, ToolBudget, append_tool_results
 
@@ -816,7 +816,7 @@ def run_turn(
                         if budget_exhausted else "工具调用次数已达上限，已基于已获取信息作答"
                     )
                     messages = [*messages, LLMMessage(
-                        role="user", content="请基于已获取的资料完成最终回答，不再请求工具。资料不足的部分明确说明，不要编造。"
+                        role="user", content=get_internal_prompt("finish_answer", format_hint="保留要求的完整输出结构；")
                     )]
                     round_tokens = 0
                     round_usage.clear()
