@@ -43,6 +43,9 @@ from services.scoring import get_scoring_strategy
 
 from . import guardrails, metrics as chat_metrics
 from .context_builder import ChatContext, build_context
+from .answer_presentation import (
+    ReadableOutputStream, clean_review_notes, present_answer, present_strategies, present_warning,
+)
 from .fallback import build_degraded_reply
 from .llm_adapter import (
     LLMError,
@@ -240,7 +243,9 @@ def _history_messages(db: Session, session: ChatSession, exclude_id: int | None 
     return [
         LLMMessage(
             role=r.role,
-            content=guardrails.sanitize_for_outbound(r.content or "")[0],
+            content=guardrails.sanitize_for_outbound(
+                clean_review_notes(r.content or "") if r.role == "assistant" else r.content or ""
+            )[0],
         )
         for r in picked
     ]
@@ -316,9 +321,9 @@ def _message_payload(message: ChatMessage) -> dict:
         "id": message.id,
         "session_id": message.session_id,
         "role": message.role,
-        "content": message.content,
+        "content": present_answer(message.content) if message.role == "assistant" else message.content,
         "references": message.references or [],
-        "strategy_items": message.strategy_items or [],
+        "strategy_items": present_strategies(message.strategy_items or []) if message.role == "assistant" else message.strategy_items or [],
         "tokens_used": message.tokens_used,
         "feedback": message.feedback or "",
         "degraded": bool(message.degraded),
@@ -353,7 +358,7 @@ class _VisibleAgentStream:
     def __init__(self) -> None:
         self._pending = ""
         self._inside_json = False
-        self._sanitizer = guardrails.StreamingOutputSanitizer()
+        self._sanitizer = ReadableOutputStream()
 
     def feed(self, text: str) -> str:
         self._pending += text or ""
@@ -676,8 +681,9 @@ def run_turn(
         agent_refs = gen.references
         timings.update(gen.timings)
         chunks.append(gen.text)
-        warnings.extend(gen.warnings)
-        for w in gen.warnings:
+        visible_warnings = list(dict.fromkeys(present_warning(w) for w in gen.warnings))
+        warnings.extend(visible_warnings)
+        for w in visible_warnings:
             yield TurnEvent("warning", {"message": w})
     else:
         messages, template = _build_llm_messages(
@@ -703,7 +709,7 @@ def run_turn(
                 call_ttft_ms: int | None = None
                 call_output_chars = 0
                 round_chunks = []
-                visible_sanitizer = guardrails.StreamingOutputSanitizer()
+                visible_sanitizer = ReadableOutputStream()
                 stream = stream_chat_completion_controlled(
                     adapter,
                     messages,
@@ -815,7 +821,7 @@ def run_turn(
                     call_started = time.monotonic()
                     call_ttft_ms = None
                     call_output_chars = 0
-                    visible_sanitizer = guardrails.StreamingOutputSanitizer()
+                    visible_sanitizer = ReadableOutputStream()
                     stream = stream_chat_completion_controlled(
                         adapter,
                         messages,
@@ -920,11 +926,13 @@ def run_turn(
         raw_text = raw_text.rstrip() + f"\n\n> 💡 {summary_hint}"
 
     body, items = split_strategy_payload(guardrails.sanitize_output(raw_text))
-    if agent_displayed_text is not None and agent_displayed_text != body:
+    body = present_answer(body)
+    if agent_displayed_text is None or agent_displayed_text != body:
         yield TurnEvent("replace", {"text": body, "reason": "final_sync"})
         _mark_client_delta()
     if degraded:
         items = degraded_items
+    items = present_strategies(items)
     if items:
         yield TurnEvent("strategy", {"items": items})
         if customer is not None:

@@ -60,11 +60,12 @@ def build_report_data(
 
     # 懒导入，避免在无需 AI 的路径上硬耦合 LLM / RAG
     from services.ai import context_builder, llm_adapter, strategy as strategy_mod
+    from services.ai.answer_presentation import present_strategies, present_warning
 
     adapter = llm_adapter.get_chat_adapter()
     if not getattr(adapter, "available", False):
         # LLM 不可用：直接走规则引擎兜底（与对话降级同款建议）
-        data.strategy_items = strategy_mod.build_degraded_strategies(assessment)
+        data.strategy_items = present_strategies(strategy_mod.build_degraded_strategies(assessment))
         data.degraded = True
         data.has_ai = True
         data.warnings = ["AI 模型不可用，本报告使用规则引擎建议，未执行 AI 事实核对。"]
@@ -98,21 +99,21 @@ def build_report_data(
             deadline=deadline,
         )
         _body, items = strategy_mod.split_strategy_payload(gen.text)
-        data.strategy_items = gen.degraded_items if gen.degraded else items
+        data.strategy_items = present_strategies(gen.degraded_items if gen.degraded else items)
         data.references = list(gen.references or [])
         data.degraded = gen.degraded
-        data.warnings = list(gen.warnings)
+        data.warnings = list(dict.fromkeys(present_warning(w) for w in gen.warnings))
         data.timings = dict(gen.timings)
         data.has_ai = True
         if not data.strategy_items:
             # AI 已参与但未产出结构化策略：用规则引擎建议兜底，并如实标注
-            data.strategy_items = strategy_mod.build_degraded_strategies(assessment)
+            data.strategy_items = present_strategies(strategy_mod.build_degraded_strategies(assessment))
             data.degraded = True
             if not gen.degraded:
                 data.error = "AI 未返回结构化策略建议，已用规则引擎建议补充"
                 data.warnings.append(data.error)
     except Exception as exc:  # 兜底：绝不能让报告导出失败
-        data.strategy_items = strategy_mod.build_degraded_strategies(assessment)
+        data.strategy_items = present_strategies(strategy_mod.build_degraded_strategies(assessment))
         data.degraded = True
         data.has_ai = True
         data.error = f"AI 建议生成失败，已降级为规则引擎：{exc}"
