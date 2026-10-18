@@ -37,7 +37,7 @@ from services.ai.llm_adapter import (
     stream_chat_completion_controlled,
 )
 from services.ai.prompt_templates import get_template
-from . import tools, fact_check
+from . import tools, fact_check, local_quality
 
 
 def _thinking_extra(enabled: bool, effort: str | None = None) -> dict[str, Any]:
@@ -112,6 +112,7 @@ class AssessmentStrategyAgent:
         self._token_budget_exceeded = False
         self._budget_finalized = False
         self._tool_budget = tools.ToolBudget()
+        self._local_repairs: list[dict] = []
 
     def _check_cancelled(self) -> None:
         if self._cancel_event is not None and self._cancel_event.is_set():
@@ -365,7 +366,78 @@ class AssessmentStrategyAgent:
                 # 才是基于工具结果生成的正式答案，持久化时也只保留它。
                 return final_text, refs
 
-    def _refine(self, ctx, references, draft, critique_text, question, today, template, scenario: str = "strategy") -> str:
+    def _quality_call(self, messages, *, phase: str) -> str:
+        """One bounded, invisible quality operation sharing the real turn budget."""
+        self._check_cancelled()
+        if self._token_budget_exceeded:
+            raise LLMError("本次模型调用预算已用尽")
+        limit = max(1, min(config.AI_FACT_CHECK_MAX_TOKENS, self._token_budget - self._total_tokens))
+        deadline = time.monotonic() + config.AI_FACT_CHECK_TIMEOUT_SECONDS
+        if self._deadline is not None:
+            deadline = min(deadline, self._deadline - 0.5)
+        usage = {}
+        stream = stream_chat_completion_controlled(
+            self._adapter, messages, temperature=0, max_tokens=limit, tools=None,
+            extra=_thinking_extra(False), on_usage=lambda value: usage.update(value),
+            cancel_event=self._cancel_event, deadline=deadline,
+        )
+        result = self._consume_stream(stream, phase=phase, messages=messages, max_tokens=limit,
+                                      usage=usage, visible=False)
+        if time.monotonic() >= deadline or usage.get("finish_reason") == "length":
+            raise LLMError("局部核验时间或输出预算已耗尽")
+        return result
+
+    def _repair_locally(self, ctx, references, draft, verification) -> str:
+        if len(draft) > config.AI_FACT_CHECK_MAX_DRAFT_CHARS:
+            raise ValueError("正文超过局部核验长度上限")
+        answer = local_quality.parse_answer(draft)
+        bad = answer.locate(verification.issues)
+        sources = fact_check.build_sources(ctx, references)
+        messages = local_quality.messages_for_patch(answer, bad, verification.issues, sources)
+        response = self._quality_call(messages, phase="local_repair")
+        text, diagnostic = local_quality.apply_patches(response, answer, bad, sources)
+        if any(fact_check._compact(issue["claim"]) in fact_check._compact(text)
+               for issue in verification.issues):
+            raise ValueError("局部修订仍保留已确认错误的原文")
+        self._local_repairs.append({"operation": "patch", "status": "applied", **diagnostic})
+        return text
+
+    def _select_reliable(self, ctx, references, draft, verification):
+        """Select existing independent units once; never generate business text here."""
+        if len(draft) > config.AI_FACT_CHECK_MAX_DRAFT_CHARS:
+            raise ValueError("正文超过局部核验长度上限")
+        answer = local_quality.parse_answer(draft)
+        bad = answer.locate(verification.issues)
+        sources = fact_check.build_sources(ctx, references)
+        unverified_units = {}
+        unit_checks = []
+        for unit in answer.units:
+            if unit.kind == "heading":
+                continue
+            checked = fact_check.parse_result(
+                '{"issues":[],"score_projections":[]}', unit.text, dict(sources), customer=ctx.customer,
+                scoring_facts=ctx.scoring_facts or None,
+            )
+            if checked.issues:
+                bad.add(unit.id)
+            if checked.status == "unverified" or checked.reason:
+                unverified_units[unit.id] = checked.reason or "评分推算未能完整核算"
+            if checked.status != "passed" or checked.reason:
+                unit_checks.append({"id": unit.id, "status": checked.status,
+                                    "issues": checked.issues, "reason": checked.reason})
+        if unit_checks:
+            self._local_repairs.append({"operation": "local_unit_checks", "status": "completed", "units": unit_checks})
+        messages = local_quality.messages_for_review(answer, bad, verification.issues, sources,
+                                                    unverified_units=unverified_units)
+        response = self._quality_call(messages, phase="unit_review")
+        text, diagnostic = local_quality.apply_review(response, answer, bad | set(unverified_units), sources)
+        self._local_repairs.append({"operation": "selection", "status": "applied", **diagnostic})
+        return text
+
+    def _refine(self, ctx, references, draft, critique_text, question, today, template, scenario: str = "strategy",
+                verification=None) -> str:
+        if verification is not None and verification.issues:
+            return self._repair_locally(ctx, references, draft, verification)
         system_text = template.render_system(today=today)
         knowledge = _format_retrievals(references) or ctx.knowledge_text
         format_hint = (
@@ -420,6 +492,7 @@ class AssessmentStrategyAgent:
         self._budget_finalized = False
         self._tool_budget = tools.ToolBudget()
         self._verification = []
+        self._local_repairs = []
         max_iter = min(2, max(1, max_iterations or self._max))
         iterations = 1
         today = datetime.date.today().isoformat()
@@ -508,40 +581,77 @@ class AssessmentStrategyAgent:
         ):
             iterations += 1
             self._refine_rounds += 1
-            if self._on_event:
+            if not verification.issues and self._on_event:
                 self._on_event("replace", {"text": "", "reason": "refine"})
             try:
-                text = self._refine(
-                    ctx, references, draft, critique_text, question, today, template, scenario=scenario
+                refined = self._refine(
+                    ctx, references, draft, critique_text, question, today, template, scenario=scenario,
+                    verification=verification,
                 )
-            except (LLMUnavailableError, LLMError) as exc:
-                return self._degrade(scenario, ctx, question, references, exc)
-            verification = self._verify(text, ctx, references)
+                if not refined.strip():
+                    raise ValueError("修订返回空正文")
+                text = refined
+                verification = self._verify(text, ctx, references)
+            except Exception as exc:
+                # A failed edit must not erase previously generated independent analysis.
+                self._local_repairs.append({"operation": "patch", "status": "failed", "reason": str(exc)})
+                self._check_cancelled()
             critique_text = "\n".join(filter(None, [
                 tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
                 verification.feedback(),
             ]))
 
-        # 核对也计入整轮预算；即使普通修订次数用完，仍保留一次独立收尾。
-        if self._token_budget_exceeded and not self._budget_finalized:
+        # One selection and one final whole-answer check are the last recovery path.
+        # Unknown/unverified content is not automatically discarded or accepted.
+        if verification.status != "passed" or verification.reason:
             try:
-                text = self._refine(
-                    ctx, references, text, critique_text, question, today, template, scenario=scenario
-                )
-            except (LLMUnavailableError, LLMError) as exc:
-                return self._degrade(scenario, ctx, question, references, exc)
-            verification = self._verify(text, ctx, references)
-            critique_text = "\n".join(filter(None, [
-                tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
-                verification.feedback(),
-            ]))
+                selected = self._select_reliable(ctx, references, text, verification)
+                selected_check = self._verify(selected, ctx, references)
+                if selected_check.status == "passed" and not selected_check.reason:
+                    text, verification = selected, selected_check
+                    critique_text = tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge)
+                else:
+                    self._local_repairs.append({"operation": "final_check", "status": "failed",
+                                                "issues": selected_check.issues, "reason": selected_check.reason})
+                    verification = selected_check
+            except Exception as exc:
+                self._local_repairs.append({"operation": "selection", "status": "failed", "reason": str(exc)})
+                self._check_cancelled()
 
         if verification.status == "unverified" or verification.reason:
             warnings.append(f"关键事实核对未完成：{verification.reason}")
         if tools.needs_refine(critique_text):
-            warnings.append(f"草稿精炼达到 {max_iter} 次上限，输出可能未完全满足：{critique_text.strip()}")
+            warnings.append("部分输出格式尚未完整满足要求，可按需重新生成。")
         if self._tool_warning:
             warnings.append(self._tool_warning)
+
+        if verification.status != "passed" or verification.reason:
+            # 仍有矛盾或无法完成核实，不把已知有问题的模型正文作为正式结论交付。
+            # 规则结果不冒充AI核对通过，内部诊断、真实用量及失败状态仍保留。
+            safe_text, safe_items = build_degraded_reply(scenario, ctx, question, quality_failure=True)
+            if self._on_event:
+                self._on_event("replace", {"text": "", "reason": "quality_fallback"})
+                self._on_event("delta", {"text": safe_text, "phase": "quality_fallback"})
+            return AgentResult(
+                text=safe_text, references=_display_references(references), degraded=True,
+                degraded_items=safe_items,
+                warnings=["AI 关键结论未通过完整核实，已使用评分结果与规则建议。"],
+                iterations=iterations, model=getattr(self._adapter, "model", ""),
+                timings={**self._timings(), "answer_source": "rules_after_quality_check"},
+            )
+
+        # A surviving overview is not a completed strategy. Keep it, but use
+        # explicit rule actions and preserve the old answer during regeneration.
+        from .strategy import split_strategy_payload
+        if scenario == "strategy" and text.strip() and not split_strategy_payload(text)[1]:
+            _, rule_items = build_degraded_reply(scenario, ctx, question, quality_failure=True)
+            return AgentResult(
+                text=text, references=_display_references(references), degraded=True,
+                degraded_items=rule_items,
+                warnings=["概况已通过核实；未形成可核实的 AI 行动策略，以下行动来自规则建议。"],
+                iterations=iterations, model=getattr(self._adapter, "model", ""),
+                timings={**self._timings(), "answer_source": "ai_summary_with_rule_strategies"},
+            )
 
         if not text.strip():
             return self._degrade(
@@ -552,6 +662,13 @@ class AssessmentStrategyAgent:
                 LLMUnavailableError("AI 连续多次返回空内容"),
             )
 
+        repaired = any(item.get("status") == "applied" for item in self._local_repairs)
+        if repaired:
+            warnings = [warning for warning in warnings if not warning.startswith("关键事实核对未完成")]
+            warnings.append("已修正或移除部分依据不足的结论，保留已核实的分析。")
+            if self._on_event:
+                self._on_event("replace", {"text": "", "reason": "local_quality_repair"})
+                self._on_event("delta", {"text": text, "phase": "local_quality_repair"})
         return AgentResult(
             text=text,
             references=_display_references(references),
@@ -560,7 +677,7 @@ class AssessmentStrategyAgent:
             warnings=warnings,
             iterations=iterations,
             model=getattr(self._adapter, "model", ""),
-            timings=self._timings(),
+            timings={**self._timings(), **({"answer_source": "ai_with_local_repairs"} if repaired else {})},
         )
 
     def _timings(self) -> dict[str, Any]:
@@ -573,6 +690,7 @@ class AssessmentStrategyAgent:
             "tool_ms": self._tool_ms,
             "refine_rounds": self._refine_rounds,
             "verification": list(self._verification),
+            "local_repairs": list(self._local_repairs),
         }
 
     def _degrade(self, scenario, ctx, question, references, exc) -> AgentResult:

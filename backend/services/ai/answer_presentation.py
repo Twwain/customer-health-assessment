@@ -9,6 +9,7 @@ from .guardrails import StreamingOutputSanitizer
 
 
 REVIEW_NOTICE = "部分结论尚待核实，请确认关键信息后再用于决策。"
+HISTORY_NOTICE = "这条历史答复未通过完整事实核实，原结论已停止展示。请重新生成，获取经过核实的结论或评分规则建议。"
 _REVIEW_PREFIXES = ("草稿精炼达到 ", "关键事实核对未完成：")
 # 旧消息的证据可跨多行甚至空行，直到下一条生成提示或消息末尾。
 _LEGACY_REVIEW = re.compile(
@@ -62,6 +63,16 @@ class AnswerPresenter:
 
 def present_answer(text: str) -> str:
     return AnswerPresenter().text(clean_review_notes(text))
+
+
+def unverified_history(text: str) -> bool:
+    return bool(_LEGACY_REVIEW.search(text) or re.search(
+        r"(?m)^>[ \t]*⚠️[ \t]*" + re.escape(REVIEW_NOTICE) + r"[ \t]*$", text,
+    ))
+
+
+def present_history_answer(text: str) -> str:
+    return f"> ⚠️ {HISTORY_NOTICE}" if unverified_history(text) else present_answer(text)
 
 
 def present_strategies(items: list[dict]) -> list[dict]:

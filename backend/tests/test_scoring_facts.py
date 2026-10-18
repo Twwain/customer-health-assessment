@@ -80,6 +80,50 @@ def test_person_options_are_not_full_distribution_targets(facts):
     assert customer().custom_fields["kcr_02"] == "[1,2,1,2,3]"
 
 
+def test_source_supplies_engine_rankings_instead_of_model_recomputing_them(facts):
+    summary = scoring_facts.ranking_summary(facts)
+    assert "绝对缺口最大为KCR 关键客户关系（6分）" in summary
+    assert "得分率最低为SVC 服务与支持健康度（60%）" in summary
+    assert summary in format_scoring_facts(facts)
+    assert "该排名不等于业务行动优先级" in format_scoring_facts(facts)
+
+
+def test_engine_rankings_preserve_ties_and_exclude_undefined_percentages():
+    facts = {"dimensions": [
+        {"name": "自定义甲", "gap": 3, "score_percent": 60},
+        {"name": "自定义乙", "gap": 3, "score_percent": 60},
+        {"name": "未计比例", "gap": 0, "score_percent": None},
+    ]}
+    assert scoring_facts.ranking_summary(facts) == "绝对缺口最大为自定义甲、自定义乙（3分）；得分率最低为自定义甲、自定义乙（60%）"
+    assert scoring_facts.ranking_summary({"dimensions": []}) == ""
+
+
+@pytest.mark.parametrize("other_text", ["联系客户", "建议检查是否存在需求变化", "如果客户有时间则开展访谈"])
+def test_compact_cards_do_not_share_ranking_predicates_or_negation(facts, other_text):
+    from services.ai.local_quality import parse_answer
+    items = [
+        {"title": "组织绑定", "reason": "OR得分率70%，为所有维度最低", "action": other_text},
+        {"title": "独立需求访谈", "reason": "了解客户需求", "action": "安排需求沟通"},
+    ]
+    draft = "```json\n" + json.dumps({"strategies": items}, ensure_ascii=False) + "\n```"
+    issues = check_scoring_claims(draft, customer(), facts)
+    assert len(issues) == 1 and "得分率并非" in issues[0]["reason"]
+    assert issues[0]["claim"] in draft
+    assert "独立需求访谈" not in issues[0]["claim"]
+    assert parse_answer(draft).locate(issues) == {"u0"}
+
+
+@pytest.mark.parametrize('text,expected_error', [
+    ('OR组织客户关系得分率70%，绝对缺口4.2，其中OR-01升至集团级可增2.8分，为可枚举完整选项单因子中最大单项收益。', False),
+    ('OR绝对缺口4.2分，单因子收益最大为OR-01。', False),
+    ('OR绝对缺口4.2分，为各维度最大；OR-01升至集团级可增2.8分。', True),
+    ('OR绝对缺口为各维度最大，因此建议提升OR-01。', True),
+])
+def test_absolute_gap_does_not_borrow_the_later_gain_maximum(facts, text, expected_error):
+    issues = check_scoring_claims(text, customer(), facts)
+    assert any('绝对缺口' in issue['reason'] for issue in issues) is expected_error
+
+
 def sum_config():
     return parse_scoring_config({
         "version": "synthetic-sum", "levels": [{"name": "测试", "min_score": 0}],
@@ -291,3 +335,21 @@ def test_dimension_count_and_aliases_follow_a_new_configuration():
     assert check_scoring_claims("维度名称0得分率10%，为八个维度中最低。", c, facts) == []
     # 不把明确的七维子集偷换成新配置的全部八维。
     assert check_scoring_claims("维度名称1得分率20%，为七个维度中最低。", c, facts) == []
+
+
+@pytest.mark.parametrize("draft,wrong", [
+    ("绝对缺口最大在KCR（6分），得分率最低在SVC（60%）。", False),
+    ("绝对缺口最大在KCR（6分），得分率最低位于SVC（60%）。", False),
+    ("绝对缺口最大在KCR（6分），得分率最低的是SVC（60%）。", False),
+    ("绝对缺口最大在KCR（6分），得分率最低为SVC（60%）。", False),
+    ("OR得分率70%，第二低（最低在SVC的60%）。", False),
+    ("各维度得分率最低在OR。", True),
+    ("各维度得分率最低位于CI。", True),
+    ("各维度得分率最低的是OR。", True),
+    ("OR得分率70%，为所有维度最低。", True),
+    ("OR得分率70%，但业务优先级最低在SVC。", False),
+])
+def test_lowest_rate_postposed_subject_prepositions_keep_correct_dimension(draft, wrong, facts):
+    issues = check_scoring_claims(draft, customer(), facts)
+    assert bool(issues) is wrong
+    assert all(issue["claim"] in draft and issue["evidence"] in format_scoring_facts(facts) for issue in issues)

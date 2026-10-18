@@ -113,14 +113,18 @@ templates:
       - long_term（💡 长期建议）：低优先级，持续经营类动作
 
       【输出格式 — 严格遵守，分两段】
-      第一段：Markdown 正文，按「✅ 推荐策略 / □ 备选策略 / 💡 长期建议」三级标题分组，
-      每条策略写明 原因 / 行动 / 预期 三行。
+      第一段：100字以内的 Markdown 总览，概括客户经营方向和选择依据。
+      不在正文重复列出策略标题、原因、行动和预期；这些明细只放入第二段，由页面按卡片展示。
 
       第二段：紧接正文输出一个 json 代码块（```json 开头），结构如下，字段不得增减：
-      {"strategies": [{"priority": "recommended", "title": "策略标题", "urgency": "high", "reason": "为什么要做", "action": "具体怎么做，含责任角色与时限", "expected_outcome": "预期效果", "reference": "引用的知识条目标题，没有则空字符串"}]}
+      {"strategies": [{"priority": "recommended", "title": "策略标题", "urgency": "high", "reason": "为什么要做", "action": "具体怎么做，含责任角色与时限", "expected_outcome": "预期效果", "reference": "引用的知识条目标题，没有则空字符串", "score_targets": {}}]}
 
       约束：策略总数 3–5 条；recommended 至少 1 条且不超过 3 条；
-      urgency 取值仅限 high / medium / low；正文与 json 内容必须一致。
+      urgency 取值仅限 high / medium / low；总览不得另行给出与策略冲突的事实或分数。
+      仅在确有完整评分目标时填写score_targets，键为评分来源中的因子field，值为完整合法目标。
+      action中须逐项写明相同因子编号、目标方向和完整合法目标值；score_targets不得遗漏、添加隐含目标或与行动冲突。
+      同一因子只能有一个目标；明确维持原值的因子也需列入。服务端会核对完整性并用引擎重算。
+      无法明确全部目标时score_targets为空，只写可观察的业务改善，不写预计增分或目标分数。
     user: |
       {{customer_context}}
 

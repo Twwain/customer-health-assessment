@@ -68,6 +68,12 @@ def _legal_target(factor, value):
             raise ValueError(f"{factor.field} 包含非法关键人等级")
         return json.dumps([int(item) for item in value], separators=(",", ":"))
     if spec.options:
+        if isinstance(value, str) and value not in spec.options:
+            # 出站不可信数据包装仅将尖括号改为全角；还原同一比较符号，不改变方向或数值。
+            unescape = str.maketrans("＜＞", "<>")
+            equivalent = [option for option in spec.options if option.translate(unescape) == value.translate(unescape)]
+            if len(equivalent) == 1:
+                value = equivalent[0]
         if value not in spec.options or isinstance(value, bool):
             raise ValueError(f"{factor.field} 目标不是合法选项")
         return value
@@ -220,11 +226,28 @@ def _gain_line(facts):
     )
 
 
+def ranking_summary(facts):
+    """直接陈述引擎排名（含并列），避免生成模型再次自行判断最高/最低。"""
+    dimensions = facts.get("dimensions", [])
+    statements = []
+    if dimensions:
+        largest = max(d["gap"] for d in dimensions)
+        leaders = [d["name"] for d in dimensions if math.isclose(d["gap"], largest, abs_tol=1e-6)]
+        statements.append(f"绝对缺口最大为{'、'.join(leaders)}（{_number(largest)}分）")
+    rated = [d for d in dimensions if d["score_percent"] is not None]
+    if rated:
+        lowest = min(d["score_percent"] for d in rated)
+        leaders = [d["name"] for d in rated if math.isclose(d["score_percent"], lowest, abs_tol=1e-6)]
+        statements.append(f"得分率最低为{'、'.join(leaders)}（{_number(lowest)}%）")
+    return "；".join(statements)
+
+
 def format_scoring_facts(facts):
     """同一份精简原文供生成、模型核对和本地问题锚点使用，不重复多层 JSON。"""
     return "\n".join([
         f"配置版本{facts['config_version']}；总分{_number(facts['total_score'])}/{_number(facts['max_score'])}。",
         *(_dimension_line(dimension) for dimension in facts["dimensions"]),
+        f"引擎确认的排名：{ranking_summary(facts)}。该排名不等于业务行动优先级。",
         *(_factor_line(field, item) for field, item in facts["factors"].items()),
         _gain_line(facts), facts["ranking_scope"],
     ])
@@ -295,6 +318,53 @@ def _extreme_band_claim(fragment, extreme):
     return False
 
 
+def _lowest_rate_subjects(claim, mentions):
+    """将最低谓词绑定到其维度主体，不借用前一维度的得分率。"""
+    rate = r"得分率|得分百分比|得分占比"
+    for lowest in re.finditer(r"最低(?!档|之一|之列)", claim):
+        rates = list(re.finditer(rate, claim[:lowest.start()]))
+        if not rates:
+            continue
+        comparison = claim[rates[-1].end():lowest.start()]
+        if len(comparison) > 80 or re.search(r"优先级|映射|档位|缺口|失分|收益", comparison):
+            continue
+        following = next((mention for mention in mentions if mention[0] >= lowest.end()), None)
+        if following and re.fullmatch(r"\s*(?:(?:的?维度)?(?:为|是|属于|在|位于)|的是|的)\s*",
+                                      claim[lowest.end():following[0]]):
+            if re.search(rate, claim[:lowest.start()]):
+                yield following[2]
+            continue
+        preceding = [mention for mention in mentions if mention[1] <= lowest.start()]
+        if not preceding:
+            continue
+        start, _, dimension = preceding[-1]
+        fragment = claim[start:lowest.start()]
+        if re.search(r"(?:高于|超过|大于|低于|不是|并非)\s*$", fragment):
+            continue
+        if re.search(rate, fragment):
+            yield dimension
+
+
+def _claim_fragments(draft):
+    # 机器JSON的一行可能含所有卡片；字段之间不继承否定语、维度主体或比较谓词。
+    # 保留带引号的原始字符串，确保硬校验引用仍能精确定位到原文。
+    from .local_quality import parse_answer
+    try:
+        units = parse_answer(draft).units
+    except (ValueError, TypeError):
+        units = None
+    texts = []
+    if units is None:
+        texts.append(draft)
+    else:
+        for unit in units:
+            if unit.item is None:
+                texts.append(unit.text)
+            else:
+                texts.extend(match.group(0) for match in re.finditer(r'"(?:\\.|[^"\\])*"', unit.text))
+    return [match.group(0).strip() for text in texts for match in re.finditer(r"[^\n。！？；]+", text)]
+
+
 def check_scoring_claims(draft, customer, facts=None):
     """保守核对明确的档位、最大缺口和单因子最高收益断言。
 
@@ -312,8 +382,7 @@ def check_scoring_claims(draft, customer, facts=None):
             issues.append(issue)
 
     # 连续原文作 claim，避免改写后无法定位；不跨中文句界和换行。
-    for match in re.finditer(r"[^\n。！？；]+", draft):
-        claim = match.group(0).strip()
+    for claim in _claim_fragments(draft):
         if not claim or re.search(r"不是|并非|不应|不能|误称|错误|假设|如果|若|是否|引用|原文|曾称", claim):
             continue
         if re.match(r"^[“‘].*[”’]", claim):
@@ -359,11 +428,11 @@ def check_scoring_claims(draft, customer, facts=None):
         for index, (start, _, dim) in enumerate(dim_matches):
             end = dim_matches[index + 1][0] if index + 1 < len(dim_matches) else len(claim)
             fragment = claim[start:end]
-            if re.search(r"(?:绝对缺口|缺口|失分)(?:(?!优先级|映射|档位|得分率).){0,60}(?:最大|最多)", fragment):
+            if re.search(r"(?:绝对缺口|缺口|失分)(?:(?!优先级|映射|档位|得分率|收益|增分|增益|可增|单因子|单项).){0,60}(?:最大|最多)", fragment):
                 if dim["gap"] < max(d["gap"] for d in facts["dimensions"]) - 1e-6:
                     add(claim, "\n".join(_dimension_line(d) for d in facts["dimensions"]), "按维度满分减当前得分计算的绝对缺口，该维度并非最大。")
-            if re.search(r"(?:得分率|得分百分比|得分占比)(?:(?!优先级|映射|档位|缺口|失分|收益).){0,80}最低(?!档)", fragment):
-                rates = [d["score_percent"] for d in facts["dimensions"] if d["score_percent"] is not None]
-                if dim["score_percent"] is not None and dim["score_percent"] > min(rates) + 1e-6:
-                    add(claim, "\n".join(_dimension_line(d) for d in facts["dimensions"]), "该维度得分率并非所有启用维度最低。")
+        for dimension in _lowest_rate_subjects(claim, dim_matches):
+            rates = [d["score_percent"] for d in facts["dimensions"] if d["score_percent"] is not None]
+            if dimension["score_percent"] is not None and dimension["score_percent"] > min(rates) + 1e-6:
+                add(claim, "\n".join(_dimension_line(d) for d in facts["dimensions"]), "该维度得分率并非所有启用维度最低。")
     return issues

@@ -87,6 +87,14 @@ def customer(db):
     return c
 
 
+def _is_fact_check_call(messages):
+    return any(
+        (message.get("role") if isinstance(message, dict) else message.role) == "system"
+        and "独立的事实核对员" in (message.get("content", "") if isinstance(message, dict) else message.content)
+        for message in messages
+    )
+
+
 class FakeAdapter:
     """可控的假 LLM：按预设分片吐字，或抛出指定异常。"""
 
@@ -117,7 +125,8 @@ class FakeAdapter:
         self.extra_args.append(extra)
         if self.error:
             raise self.error
-        for chunk in self.chunks:
+        chunks = ['{"issues": [], "score_projections": []}'] if _is_fact_check_call(messages) else self.chunks
+        for chunk in chunks:
             yield chunk
         if on_usage:
             on_usage(self.usage)
@@ -580,7 +589,7 @@ def test_degraded_strategies_from_rule_engine(db, customer):
     items = strategy.build_degraded_strategies(assessment)
     assert items
     assert any(i["priority"] == "recommended" for i in items)
-    assert all(i["reference"].startswith("规则引擎") for i in items)
+    assert all(i["reference"].startswith("评分规则建议") for i in items)
 
     markdown = strategy.render_strategies_markdown(items)
     assert "✅ 推荐策略" in markdown
@@ -1791,8 +1800,9 @@ def test_agent_loop_retrieves_then_traces_references(db, customer, fake_llm, mon
     assert len(adapter.calls) == 2
     assert adapter.tool_args == [None, None]
     assert done.data["timings"]["refine_rounds"] == 0
-    # 本用例假模型始终返回策略正文，不能将它当成有效核对 JSON。
-    assert done.data["timings"]["verification"][-1]["status"] == "unverified"
+    assert done.data["timings"]["verification"][-1]["status"] == "passed"
+    assert done.data["degraded"] is False
+    assert _is_fact_check_call(adapter.calls[-1])
 
 
 def test_agent_loop_degrades_when_llm_offline(db, customer, offline_llm):
@@ -1824,8 +1834,11 @@ def test_agent_loop_refines_when_missing_strategy_block(db, customer, fake_llm, 
         on_event=lambda event_type, data: streamed_events.append((event_type, data)),
     )
     assert result.iterations == 2  # reason + 1 次 refine
-    assert result.degraded is False
-    assert result.text  # 至少返回了文本，不空转
+    assert result.degraded is True  # 两次均无策略，不能以只有概况宣告策略成功
+    assert result.text == "只是一段普通回答，不含策略块。"  # 已核实正文仍保留
+    assert result.degraded_items
+    assert result.timings["answer_source"] == "ai_summary_with_rule_strategies"
+    assert any("以下行动来自规则建议" in warning for warning in result.warnings)
     assert streamed_events[0][0] == "delta"
     assert any(event_type == "replace" for event_type, _ in streamed_events)
     assert result.timings["llm_calls"][0]["prompt_chars"] > 0
@@ -1845,6 +1858,9 @@ class _EmptyThenContentAdapter(FakeAdapter):
         self.tool_args.append(kwargs.get("tools"))
         if kwargs.get("on_usage"):
             kwargs["on_usage"](self.usage)
+        if _is_fact_check_call(messages):
+            yield '{"issues": [], "score_projections": []}'
+            return
         if self._round < self._empty_rounds:
             self._round += 1
             return
@@ -2086,7 +2102,7 @@ def test_tool_call_arguments_and_advertised_calls_are_server_bounded(db, monkeyp
     assert "参数超过" in messages[1]["content"]
 
 
-def test_agent_token_overshoot_keeps_paid_answer(db, customer, monkeypatch):
+def test_agent_token_overshoot_uses_rules_when_answer_cannot_be_verified(db, customer, monkeypatch):
     adapter = FakeAdapter(chunks=["本次已经生成的完整答案"], usage={"total_tokens": 128})
     llm_adapter.set_chat_adapter(adapter)
     monkeypatch.setattr(config, "CHAT_TURN_TOKEN_BUDGET", 100)
@@ -2095,9 +2111,12 @@ def test_agent_token_overshoot_keeps_paid_answer(db, customer, monkeypatch):
     )
     events = list(chat_engine.run_turn(db, session, content="评估客户"))
     done = next(event for event in events if event.type == "done")
-    assert "本次已经生成的完整答案" in done.data["message"]["content"]
+    assert "本次已经生成的完整答案" not in done.data["message"]["content"]
+    assert "评分结果与规则建议" in done.data["message"]["content"]
     assert done.data["tokens_used"] == 256
-    assert done.data["degraded"] is False
+    assert done.data["degraded"] is True
+    assert done.data["timings"]["verification"][-1]["status"] == "unverified"
+    assert done.data["timings"]["answer_source"] == "rules_after_quality_check"
     assert len(adapter.calls) == 2
     assert done.data["timings"]["llm_calls"][-1]["phase"] == "budget_final"
 
@@ -2153,11 +2172,11 @@ def test_agent_timeout_does_not_spawn_unbounded_non_cooperative_workers(
         assert started.is_set()
         assert first_events[-1].type == "error"
 
-        # 第二轮验证槽位保留，不让其自身的短期限抢先掩盖并发拒绝。
+        # 槽位等待与总期限可能同时结束；两种错误都必须禁止启动第二次模型调用。
         monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 2)
         second_events = list(chat_engine.run_turn(db, second, content="第二轮"))
         assert second_events[-1].type == "error"
-        assert "并发槽" in second_events[-1].data["message"]
+        assert any(label in second_events[-1].data["message"] for label in ("并发槽", "超过总时限"))
         assert len(adapter.calls) == 1
     finally:
         release.set()
@@ -2367,6 +2386,11 @@ class ToolCallingFakeAdapter(FakeAdapter):
     ):
         self.calls.append(list(messages))
         self.tool_args.append(tools)
+        if _is_fact_check_call(messages):
+            yield '{"issues": [], "score_projections": []}'
+            if on_usage:
+                on_usage(self.usage)
+            return
         self.rounds += 1
         if self.rounds <= self.tool_rounds:
             if on_tool_calls:

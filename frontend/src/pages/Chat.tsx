@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import { useLLMStatus } from "../statusContext";
 import { renderMarkdown } from "../lib/ui";
+import { additionalStrategies, completeAnswerText } from "../lib/chatAnswer";
 import HealthCard from "../components/HealthCard";
 import { RefsBox, StrategyList } from "../components/StrategyList";
 import { useUiFeedback } from "../components/UiFeedback";
@@ -76,6 +77,9 @@ export default function Chat() {
   const followLatestRef = useRef(true);
   const createdIdRef = useRef<number | null>(null); // 草稿已建库的真实会话 id（待流式结束后跳转）
   const creatingRef = useRef(false); // 草稿建库中，防重复点击
+  const activeRef = useRef(true);
+  const generationRef = useRef(0);
+  const replacementIdRef = useRef<number | null>(null);
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
@@ -113,7 +117,9 @@ export default function Chat() {
       const msg = ev.data.message as ChatMessageItem;
       streamRef.current = null;
       setStream(null);
-      setMessages((prev) => [...prev, msg]);
+      const replacedId = replacementIdRef.current;
+      replacementIdRef.current = null;
+      setMessages((prev) => [...prev.filter((item) => item.id !== replacedId && item.id !== msg.id), msg]);
       stopPolling();
       setResuming(false);
       leaveDraft();
@@ -171,12 +177,15 @@ export default function Chat() {
     setStream(next);
   };
 
-  const sendTurn = async (id: number, endpoint: string, body: Record<string, unknown>) => {
+  const sendTurn = async (id: number, endpoint: string, body: Record<string, unknown>, replacementId: number | null = null) => {
     if (busyRef.current) return;
     busyRef.current = true;
     followLatestRef.current = true;
     setBusy(true);
     setError(null);
+    replacementIdRef.current = replacementId;
+    const generation = ++generationRef.current;
+    let terminal = false;
     if (body.content) {
       const um: ChatMessageItem = {
         id: -Date.now(),
@@ -202,14 +211,27 @@ export default function Chat() {
     };
     setStream(streamRef.current);
     try {
-      await streamChat(`/api${endpoint}`, { stream: true, ...body }, handleEvent);
+      await streamChat(`/api${endpoint}`, { stream: true, ...body }, (event) => {
+        if (!activeRef.current || generation !== generationRef.current || terminal) return;
+        terminal = event.type === "done" || event.type === "error";
+        handleEvent(event);
+      });
+      if (replacementId !== null && !terminal && activeRef.current && generation === generationRef.current) {
+        setError("重新生成未完成，已保留原答案");
+        streamRef.current = null;
+        setStream(null);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "流式请求失败");
+      if (!activeRef.current || generation !== generationRef.current || terminal) return;
+      setError(replacementId !== null ? "重新生成未完成，已保留原答案" : e instanceof Error ? e.message : "流式请求失败");
       streamRef.current = null;
       setStream(null);
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      if (activeRef.current && generation === generationRef.current) {
+        replacementIdRef.current = null;
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -230,6 +252,7 @@ export default function Chat() {
     chat
       .getSession(id)
       .then((s) => {
+        if (!activeRef.current) return;
         setMessages(s.messages);
         setSessionTitle(s.title || "AI 对话");
         setSessionCustomerId(s.customer_id);
@@ -262,7 +285,14 @@ export default function Chat() {
   }, [sessionIdNum]);
 
   // 组件卸载时停止恢复轮询
-  useEffect(() => () => stopPolling(), []);
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+      generationRef.current += 1;
+      stopPolling();
+    };
+  }, []);
 
   // 默认跟随最新消息；用户主动向上查看历史后暂停，回到底部附近时恢复。
   useEffect(() => {
@@ -332,11 +362,10 @@ export default function Chat() {
     const idx = [...messages].reverse().findIndex((m) => m.role === "assistant");
     if (idx < 0) return;
     const lastId = messages[messages.length - 1 - idx].id;
-    setMessages((prev) => prev.filter((m) => m.id !== lastId));
     sendTurn(sessionIdNum, `/chat/sessions/${sessionIdNum}/regenerate`, {
       scenario: scenarioRef.current,
       customer_id: customerIdRef.current ?? undefined,
-    });
+    }, lastId);
   };
 
   const setFeedback = async (msgId: number, fb: string) => {
@@ -494,7 +523,7 @@ export default function Chat() {
             <button
               className="rounded-lg border border-border px-2.5 py-1.5 text-[13.5px] text-ink-2 transition hover:border-accent hover:text-accent disabled:opacity-40"
               onClick={regenerate}
-              disabled={busy || display.filter((m) => m.role === "assistant").length === 0}
+              disabled={busy || resuming || display.filter((m) => m.role === "assistant").length === 0}
             >
               🔄 重新生成
             </button>
@@ -556,7 +585,7 @@ export default function Chat() {
                 assessment={isStream ? (stream as StreamMsg)?.assessment : ctx.assessment}
                 trend={isStream ? (stream as StreamMsg)?.trend : ctx.trend}
                 streaming={isStream}
-                streamHint={isStream ? (stream?.stageMessage || streamLabel(stream?.scenario)) : undefined}
+                streamHint={isStream ? `草稿预览 · ${stream?.stageMessage || streamLabel(stream?.scenario)}` : undefined}
                 feedback={feedbacks[mid] || ""}
                 adopted={!!adopted[mid]}
                 onTrace={setTrace}
@@ -660,6 +689,17 @@ function MessageView({
   onFeedback: (fb: string) => void;
   onAdopt: () => void;
 }) {
+  const { notify } = useUiFeedback();
+  const strategies = additionalStrategies(msg.content, msg.strategy_items ?? []);
+  const copyAnswer = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(completeAnswerText(msg));
+      notify("已复制完整结果", "success");
+    } catch {
+      notify("复制失败，请允许浏览器访问剪贴板，或手动选择内容复制", "error");
+    }
+  };
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
@@ -688,9 +728,9 @@ function MessageView({
             {streamHint ?? "思考中…"}
           </div>
         ) : null}
-        {msg.strategy_items && msg.strategy_items.length > 0 && (
+        {strategies.length > 0 && (
           <div className="mt-2">
-            <StrategyList items={msg.strategy_items} references={msg.references} onTrace={onTrace} />
+            <StrategyList items={strategies} references={msg.references} onTrace={onTrace} />
           </div>
         )}
         <RefsBox references={msg.references} onTrace={onTrace} />
@@ -706,9 +746,10 @@ function MessageView({
           </button>
           <button
             className="rounded-md px-2 py-1 text-[13px] text-ink-2 transition hover:bg-surface-2"
-            onClick={() => navigator.clipboard?.writeText(msg.content)}
+            onClick={copyAnswer}
+            disabled={streaming}
           >
-            📋 复制
+            📋 复制完整结果
           </button>
           {msg.degraded && <span className="ml-auto text-[12px] text-warning">规则引擎兜底</span>}
         </div>

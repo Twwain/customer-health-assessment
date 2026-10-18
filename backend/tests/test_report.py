@@ -90,7 +90,13 @@ class _FakeAdapter:
         self.tool_args.append(tools)
         if self.error:
             raise self.error
-        for chunk in self.chunks:
+        checking = any(
+            (message.get("role") if isinstance(message, dict) else message.role) == "system"
+            and "独立的事实核对员" in (message.get("content", "") if isinstance(message, dict) else message.content)
+            for message in messages
+        )
+        chunks = ['{"issues": [], "score_projections": []}'] if checking else self.chunks
+        for chunk in chunks:
             yield chunk
 
 
@@ -140,7 +146,7 @@ def test_build_report_data_offline_uses_degraded_strategies(db, customer, offlin
     assert report.degraded is True
     assert report.strategy_items, "降级时仍应产出规则引擎建议"
     # 降级建议带规则引擎溯源标记
-    assert any("规则引擎" in (i.get("reference") or "") for i in report.strategy_items)
+    assert all((i.get("reference") or "").startswith("评分规则建议") for i in report.strategy_items)
 
 
 def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm, monkeypatch):
@@ -165,6 +171,7 @@ def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm, monke
     assert adapter.extra_args[0] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
     assert adapter.extra_args[-1]["thinking"]["type"] == "disabled"  # 独立事实核对
     assert report.timings["llm_calls"][0]["max_tokens"] == config.LLM_REPORT_MAX_TOKENS
+    assert report.timings["verification"][-1]["status"] == "passed"
     assert adapter.tool_args[-1] is None
 
 
@@ -258,8 +265,10 @@ def test_build_report_data_ai_without_strategy_text_falls_back(db, customer, fak
     assert report.degraded is True
     assert report.has_ai is True
     assert report.strategy_items, "无策略块时应有规则引擎兜底建议"
-    assert "规则引擎" in (report.error or "")
-    assert any("规则引擎" in (i.get("reference") or "") for i in report.strategy_items)
+    assert report.timings["answer_source"] == "ai_summary_with_rule_strategies"
+    assert any("未形成可核实的 AI 行动策略" in warning and "规则建议" in warning
+               for warning in report.warnings)
+    assert all((i.get("reference") or "").startswith("评分规则建议") for i in report.strategy_items)
 
 
 def test_split_strategy_payload_unclosed_fence_recovers_items():

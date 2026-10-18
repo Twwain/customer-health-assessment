@@ -7,7 +7,7 @@ import pytest
 from models import ChatMessage
 from services.ai import chat_engine, strategy
 from services.ai.answer_presentation import (
-    REVIEW_NOTICE, AnswerPresenter, ReadableOutputStream, clean_review_notes, present_answer,
+    HISTORY_NOTICE, REVIEW_NOTICE, AnswerPresenter, ReadableOutputStream, clean_review_notes, present_answer,
 )
 from services.report_builder import build_report_data
 from test_chat import (
@@ -74,10 +74,8 @@ def test_history_get_and_preview_are_readable_without_overwriting_originals(clie
     detail = client.get(f"/api/chat/sessions/{session.id}").json()
     assert detail['messages'][0]['content'] == user.content
     answer = detail['messages'][1]
-    assert_readable(answer['content'])
-    assert "生成报告" in answer['content'] and REVIEW_NOTICE in answer['content']
-    assert answer['strategy_items'][0]['action'] == "提升主动服务频次至4-5次"
-    assert answer['strategy_items'][0]['reference'] == ITEM['reference']
+    assert HISTORY_NOTICE in answer['content'] and BODY not in answer['content']
+    assert answer['strategy_items'] == []
     assert "OR-01" not in client.get('/api/chat/sessions').json()['items'][0]['last_message']
     db.expire_all()
     assert db.get(ChatMessage, assistant.id).content == OLD_CONTENT
@@ -103,11 +101,11 @@ def test_chat_stream_warnings_done_and_saved_answer_share_readable_content(db, c
     assert warnings == [REVIEW_NOTICE]
     assert_readable(''.join(e.data['text'] for e in events if e.type == 'delta'))
     final = next(e.data for e in events if e.type == 'done')
-    assert_readable(final['message']['content'])
+    assert HISTORY_NOTICE in final['message']['content']
     assert final['timings']['verification'] == diagnostics['verification']  # 核对证据不被展示转换改写
-    assert final['message']['strategy_items'][0]['action'] == "提升主动服务频次至4-5次"
-    assert next(e.data['text'] for e in events if e.type == 'replace') == final['message']['content']
-    assert db.get(ChatMessage, final['message']['id']).content == final['message']['content']
+    assert final['message']['strategy_items'] == []
+    # 此模拟返回了违反新质量契约的gen；历史DTO仍不能展示它，原始记录保留。
+    assert REVIEW_NOTICE in db.get(ChatMessage, final['message']['id']).content
 
 
 def test_free_qa_chunked_codes_and_user_question_preserved(db, fake_llm):

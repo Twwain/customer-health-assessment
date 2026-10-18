@@ -200,8 +200,8 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
                 "urgency": urgency,
                 "reason": alert.message,
                 "action": suggestion,
-                "expected_outcome": "消除该项预警，对应维度分数回升",
-                "reference": "规则引擎（LLM 不可用时的兜底建议）",
+                "expected_outcome": "完成所列行动后复核相关预警与客户反馈，评分以重新评估结果为准",
+                "reference": "评分规则建议",
             }
         )
 
@@ -217,8 +217,8 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
                 "urgency": "low",
                 "reason": "规则引擎识别到的机会点",
                 "action": suggestion,
-                "expected_outcome": "扩大合作面，提升商业价值维度得分",
-                "reference": "规则引擎（LLM 不可用时的兜底建议）",
+                "expected_outcome": "记录合作进展与客户反馈，评分以重新评估结果为准",
+                "reference": "评分规则建议",
             }
         )
 
@@ -230,8 +230,8 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
                 "urgency": "low",
                 "reason": f"当前客情评分 {assessment.total_score}，未触发任何预警规则",
                 "action": "按既定周期回访，关注满意度与回款两项先行指标",
-                "expected_outcome": "维持健康度不下滑",
-                "reference": "规则引擎（LLM 不可用时的兜底建议）",
+                "expected_outcome": "记录回访与客户反馈，定期复核评分变化",
+                "reference": "评分规则建议",
             }
         )
 

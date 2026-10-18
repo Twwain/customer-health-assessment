@@ -40,7 +40,7 @@ from schemas import (
     MessageFeedbackResponse,
 )
 from services.ai import chat_engine, llm_adapter, metrics as chat_metrics
-from services.ai.answer_presentation import present_answer
+from services.ai.answer_presentation import present_history_answer
 from services.ai.prompt_templates import PromptTemplateError, load_prompt_templates
 
 router = APIRouter(prefix="/chat", tags=["AI 对话"])
@@ -100,7 +100,7 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
             .filter(ChatMessage.id.in_(last_msg_ids))
             .all()
         ):
-            last_content_by_mid[mid] = present_answer(content or "") if role == "assistant" else content or ""
+            last_content_by_mid[mid] = present_history_answer(content or "") if role == "assistant" else content or ""
     last_content_by_sid = {
         sid: last_content_by_mid.get(max_id, "")
         for sid, _, max_id in stats_rows

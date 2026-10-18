@@ -71,9 +71,14 @@ def _suggestion_lines(ctx: ChatContext) -> list[str]:
     return lines
 
 
-def build_degraded_reply(scenario: str, ctx: ChatContext, question: str = "") -> tuple[str, list[dict]]:
+def build_degraded_reply(
+    scenario: str, ctx: ChatContext, question: str = "", *, quality_failure: bool = False,
+) -> tuple[str, list[dict]]:
     """返回 ``(Markdown 正文, 结构化策略条目)``。"""
-    lines = [DEGRADED_BANNER, ""]
+    lines = [(
+        "> ⚠️ **以下为评分结果与规则建议**，未采用未通过核实的 AI 结论。"
+        if quality_failure else DEGRADED_BANNER
+    ), ""]
     items: list[dict] = []
 
     if scenario == "strategy":
@@ -81,7 +86,7 @@ def build_degraded_reply(scenario: str, ctx: ChatContext, question: str = "") ->
         lines.append("## 📋 策略建议（规则引擎）")
         lines.append(_score_line(ctx))
         lines.append("")
-        lines.append(render_strategies_markdown(items))
+        lines.append("具体行动按推荐、备选和长期建议列于下方策略卡片。")
 
     elif scenario == "alert_analysis":
         lines.append("## ⚠️ 预警解读（规则引擎）")

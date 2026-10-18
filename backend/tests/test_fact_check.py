@@ -46,6 +46,12 @@ CONFLICT = json.dumps({"issues": [{"claim": "72小时内完成单据核验", "so
                                    "evidence": "36小时内完成单据核验", "reason": "核验应为36小时"}]})
 
 
+def patch_one(text, *, source_id="rag:1:0", evidence="36小时内完成单据核验"):
+    return json.dumps({"dependencies": [{"id": "u0", "depends_on": []}],
+                       "patches": [{"id": "u0", "text": text,
+                                    "sources": [{"source_id": source_id, "evidence": evidence}]}]}, ensure_ascii=False)
+
+
 def test_clean_draft_is_checked_without_revision():
     result, adapter, events = run_checked([GOOD, '{"issues":[]}'])
     assert result.text == GOOD and result.iterations == 1
@@ -57,7 +63,7 @@ def test_clean_draft_is_checked_without_revision():
 
 
 def test_conflict_is_revised_once_then_checked_again():
-    result, adapter, events = run_checked([BAD, CONFLICT, GOOD, '{"issues":[]}'])
+    result, adapter, events = run_checked([BAD, CONFLICT, patch_one(GOOD), '{"issues":[]}'])
     assert result.text == GOOD and result.iterations == 2
     assert result.timings["refine_rounds"] == 1 and len(adapter.calls) == 4
     assert [v["status"] for v in result.timings["verification"]] == ["issues", "passed"]
@@ -65,23 +71,26 @@ def test_conflict_is_revised_once_then_checked_again():
     assert "36小时内完成单据核验" in adapter.calls[1][0][-1].content  # 使用正文，非短摘录
     assert "_model_content" not in result.references[0]
     assert all(CONFLICT != d.get("text") for _, d in events)
-    assert result.warnings == []
+    assert result.warnings == ["已修正或移除部分依据不足的结论，保留已核实的分析。"]
+    assert result.timings["llm_calls"][2]["phase"] == "local_repair"
 
 
 def test_unresolved_conflict_never_causes_second_revision():
     result, adapter, _ = run_checked([BAD, CONFLICT, BAD, CONFLICT], max_iterations=99)
     assert result.iterations == 2 and len(adapter.calls) == 4
     assert result.timings["verification"][-1]["status"] == "issues"
-    assert any("上限" in warning for warning in result.warnings)
+    assert result.degraded and BAD not in result.text
+    assert "规则" in result.text and any("未通过完整核实" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize("reply", ['{"issues":', LLMUnavailableError("核对超时")])
-def test_failed_check_preserves_answer_with_unverified_warning(reply):
-    result, adapter, _ = run_checked([GOOD, reply])
-    assert result.text == GOOD and not result.degraded
-    assert len(adapter.calls) == 2
+def test_failed_check_returns_rules_without_claiming_verification_passed(reply):
+    result, adapter, _ = run_checked([GOOD, reply, '{"units":[]}'])
+    assert result.degraded and result.text != GOOD
+    assert len(adapter.calls) == 3
+    assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "unit_review"]
     assert result.timings["verification"][-1]["status"] == "unverified"
-    assert any("核对未完成" in warning for warning in result.warnings)
+    assert any("未通过完整核实" in warning for warning in result.warnings)
 
 
 def test_fact_check_uses_cancellation_and_remaining_deadline(monkeypatch):
@@ -147,8 +156,8 @@ def test_fact_check_anchors_visible_comparison_symbols_without_changing_directio
     sources = {"rag:1": "回款逾期>30天触发预警。"}
     visible = messages_for_check(draft, sources)[1].content.split("\n", 1)[1].rsplit("\n", 1)[0]
     payload = json.loads(visible)
-    issue = {"claim": payload["draft"], "source_id": "rag:1",
-             "evidence": payload["sources"]["rag:1"], "reason": "比较方向相反"}
+    issue = {"claim": payload["draft_segments"]["0"], "source_id": "rag:1",
+             "evidence": payload["sources"][0]["segments"]["0"], "reason": "比较方向相反"}
     assert parse_result(json.dumps({"issues": [issue]}), draft, sources).status == "issues"
     for bad_evidence in ("回款逾期＜30天触发预警。", "回款逾期＞40天触发预警。"):
         issue["evidence"] = bad_evidence
@@ -172,7 +181,7 @@ def test_budget_exhaustion_gets_exactly_one_full_allowance_final_answer(used, wi
     adapter = Adapter([])
     result = AssessmentStrategyAgent(adapter=adapter, token_budget=1000).run(
         "assessment", ChatContext(), None, None, retrieve_enabled=False)
-    assert not result.degraded and result.text == "这是依据已知资料形成的完整结论。"
+    assert result.degraded and "这是依据已知资料形成的完整结论。" not in result.text
     assert len(adapter.calls) == 2
     assert adapter.calls[1][1]["tools"] is None
     assert adapter.calls[1][1]["max_tokens"] > 1000
@@ -216,13 +225,13 @@ def test_tool_limit_final_uses_scenario_allowance_not_last_remaining_budget(monk
     adapter = Adapter([])
     result = AssessmentStrategyAgent(adapter=adapter, token_budget=1000, output_token_limit=4000).run(
         "assessment", ChatContext(), None, None, retrieve_enabled=False)
-    assert result.text == "完整收尾" and len(adapter.calls) == 2
+    assert result.degraded and "完整收尾" not in result.text and len(adapter.calls) == 2
     assert adapter.calls[1][1]["max_tokens"] == 4000
 
 
 @pytest.mark.parametrize("exhaust_phase", ["verification", "refine", "last_verification"])
-def test_budget_final_covers_checks_and_refinement_after_iteration_limit(exhaust_phase):
-    replies = [BAD, CONFLICT, GOOD, '{"issues":[]}']
+def test_quality_budget_exhaustion_stops_at_spending_phase_without_unverifiable_rewrite(exhaust_phase):
+    replies = [BAD, CONFLICT, patch_one(GOOD), '{"issues":[]}']
     exhaust_at = {"verification": 2, "refine": 3, "last_verification": 4}[exhaust_phase]
     class Adapter(ScriptedAdapter):
         def stream_chat_completion(self, messages, **kwargs):
@@ -238,10 +247,17 @@ def test_budget_final_covers_checks_and_refinement_after_iteration_limit(exhaust
         adapter=adapter, token_budget=1000, tools_enabled=False,
         max_iterations=1 if exhaust_phase == "verification" else 2,
     ).run("assessment", ctx, None, None, retrieve_enabled=False)
-    assert result.text == GOOD and not result.degraded
-    assert len(adapter.calls) == exhaust_at + 1
-    assert result.timings["llm_calls"][-1]["phase"] == "budget_final"
-    assert adapter.calls[-1][1]["max_tokens"] > 1000
+    if exhaust_phase == "last_verification":
+        # A completed final check remains valid even when that call crosses the
+        # soft budget; it must not trigger an unnecessary new answer generation.
+        assert not result.degraded and result.text == GOOD
+    else:
+        assert result.degraded and GOOD not in result.text
+    assert len(adapter.calls) == exhaust_at
+    phases = [call["phase"] for call in result.timings["llm_calls"]]
+    assert phases == ["reason", "verification", "local_repair", "verification"][:exhaust_at]
+    assert sum(call["total_tokens"] for call in result.timings["llm_calls"]) == 1000 + (exhaust_at - 1) * 100
+    assert phases.count("unit_review") <= 1 and phases.count("local_repair") <= 1
 
 
 @pytest.mark.parametrize("report,usage", [
@@ -257,7 +273,7 @@ def test_observed_normal_usage_keeps_revision_and_final_verification(report, usa
             yield self.replies[index]
             kwargs["on_usage"]({"total_tokens": usage[index], "finish_reason": "stop"})
     adapter = Adapter([])
-    adapter.replies = [BAD, CONFLICT, GOOD, '{"issues":[]}']
+    adapter.replies = [BAD, CONFLICT, patch_one(GOOD), '{"issues":[]}']
     ctx = ChatContext(references=[{"id": "1:0", "title": "回款制度",
         "_model_content": "36小时内完成单据核验，72小时内取得付款排期。"}])
     result = AssessmentStrategyAgent(
@@ -265,8 +281,9 @@ def test_observed_normal_usage_keeps_revision_and_final_verification(report, usa
         token_budget=config.REPORT_TURN_TOKEN_BUDGET if report else config.CHAT_TURN_TOKEN_BUDGET,
         output_token_limit=config.LLM_REPORT_MAX_TOKENS if report else None,
     ).run("assessment", ctx, None, None, retrieve_enabled=False)
-    assert result.text == GOOD and not result.degraded and result.warnings == []
-    assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "refine", "verification"]
+    assert result.text == GOOD and not result.degraded
+    assert result.warnings == ["已修正或移除部分依据不足的结论，保留已核实的分析。"]
+    assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "local_repair", "verification"]
     assert result.timings["verification"][-1]["status"] == "passed"
     assert sum(call["total_tokens"] for call in result.timings["llm_calls"]) == sum(usage)
     assert all(kwargs["max_tokens"] >= 4000 for _, kwargs in adapter.calls)
@@ -458,7 +475,9 @@ def test_budget_final_answer_gets_local_scoring_check():
     result = agent.run("assessment", ChatContext(customer=c, scoring_facts=facts), c, None, retrieve_enabled=False)
     assert result.timings["llm_calls"][-1]["phase"] == "budget_final"
     assert result.timings["verification"][-1]["status"] == "issues"
-    assert any("当前映射分高于配置最低分" in warning for warning in result.warnings)
+    assert result.degraded and "SVC-05当前4分为最低档" not in result.text
+    assert any("当前映射分高于配置最低分" in issue["reason"]
+               for issue in result.timings["verification"][-1]["issues"])
 
 
 def test_agent_revises_false_scoring_claim_despite_model_pass():
@@ -466,12 +485,13 @@ def test_agent_revises_false_scoring_claim_despite_model_pass():
     c, facts, _ = _score_case()
     ctx = ChatContext(customer=c, scoring_facts=facts, customer_text=_scoring_facts_section(facts))
     adapter = ScriptedAdapter(["SVC-05当前4分为最低档。", '{"issues":[]}',
-                               "SVC-05当前4分，最低档为1分，当前为次低档。", '{"issues":[]}'])
+                               patch_one("SVC-05当前4分，最低档为1分，当前为次低档。", source_id="scoring",
+                                         evidence="当前映射分4"), '{"issues":[]}'])
     result = AssessmentStrategyAgent(adapter=adapter, tools_enabled=False).run(
         "assessment", ctx, c, None, retrieve_enabled=False)
     assert result.iterations == 2 and result.timings["refine_rounds"] == 1
     assert [row["status"] for row in result.timings["verification"]] == ["issues", "passed"]
-    assert "次低档" in result.text and not result.warnings
+    assert "次低档" in result.text and result.warnings == ["已修正或移除部分依据不足的结论，保留已核实的分析。"]
     assert "当前映射分高于配置最低分" in adapter.calls[2][0][-1].content
 
 

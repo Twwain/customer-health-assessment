@@ -18,7 +18,7 @@
 | references | 有知识引用时   | items |
 | warning    | 生成中断等     | message |
 | done       | 结束           | message（落库后的完整消息）/ tokens_used / latency_ms / degraded |
-| error      | 不可恢复错误   | message |
+| error      | 不可恢复错误   | message / retained_message_id（重新生成失败时保留的原回复） |
 """
 
 from __future__ import annotations
@@ -44,7 +44,8 @@ from services.scoring import get_scoring_strategy
 from . import guardrails, metrics as chat_metrics
 from .context_builder import ChatContext, build_context
 from .answer_presentation import (
-    ReadableOutputStream, clean_review_notes, present_answer, present_strategies, present_warning,
+    ReadableOutputStream, present_answer, present_history_answer,
+    present_strategies, present_warning, unverified_history,
 )
 from .fallback import build_degraded_reply
 from .llm_adapter import (
@@ -244,7 +245,7 @@ def _history_messages(db: Session, session: ChatSession, exclude_id: int | None 
         LLMMessage(
             role=r.role,
             content=guardrails.sanitize_for_outbound(
-                clean_review_notes(r.content or "") if r.role == "assistant" else r.content or ""
+                present_history_answer(r.content or "") if r.role == "assistant" else r.content or ""
             )[0],
         )
         for r in picked
@@ -321,9 +322,10 @@ def _message_payload(message: ChatMessage) -> dict:
         "id": message.id,
         "session_id": message.session_id,
         "role": message.role,
-        "content": present_answer(message.content) if message.role == "assistant" else message.content,
+        "content": present_history_answer(message.content) if message.role == "assistant" else message.content,
         "references": message.references or [],
-        "strategy_items": present_strategies(message.strategy_items or []) if message.role == "assistant" else message.strategy_items or [],
+        "strategy_items": ([] if unverified_history(message.content) else present_strategies(message.strategy_items or []))
+        if message.role == "assistant" else message.strategy_items or [],
         "tokens_used": message.tokens_used,
         "feedback": message.feedback or "",
         "degraded": bool(message.degraded),
@@ -754,6 +756,7 @@ def run_turn(
                         )
                     timings["llm_calls"].append({
                         "phase": "direct" if tool_rounds == 0 else "tool_followup",
+                        "finish_reason": round_usage.get("finish_reason"),
                         "ttft_ms": call_ttft_ms,
                         "duration_ms": duration_ms,
                         "message_count": len(messages),
@@ -865,6 +868,7 @@ def run_turn(
                             )
                         timings["llm_calls"].append({
                             "phase": "budget_final" if budget_exhausted else "tool_final", "ttft_ms": call_ttft_ms,
+                            "finish_reason": round_usage.get("finish_reason"),
                             "duration_ms": duration_ms,
                             "message_count": len(messages),
                             "prompt_chars": _message_chars(messages),
@@ -918,6 +922,31 @@ def run_turn(
     timings["generation_ms"] = int((time.monotonic() - generation_started) * 1000)
     timings["llm_call_count"] = len(timings["llm_calls"])
     raw_text = "".join(chunks)
+    # 重新生成的草稿只有完整成功才可替代原答复。降级、残文、空答和截断
+    # 都作为失败结束；旧消息及下一轮上下文仍指向原来的完整答案。
+    generation_calls = [
+        call for call in timings["llm_calls"]
+        if call.get("phase") not in ("verify", "verification")
+    ]
+    truncated = bool(generation_calls and generation_calls[-1].get("finish_reason") == "length")
+    usable_output = True
+    if supersede_message_id:
+        generated_body, generated_items = split_strategy_payload(guardrails.sanitize_output(raw_text))
+        usable_output = bool(present_answer(generated_body).strip() or generated_items)
+    if supersede_message_id and (incomplete or degraded or truncated or not usable_output):
+        timings["total_ms"] = int((time.monotonic() - started) * 1000)
+        yield _regeneration_error(TurnEvent("error", {
+            "message": (
+                "AI 生成超过总时限，已取消" if time.monotonic() >= deadline
+                else "本次生成已降级" if degraded
+                else "本次输出被截断" if truncated
+                else "本次输出不完整" if incomplete
+                else "本次生成返回空内容"
+            ),
+            "tokens_used": used_tokens,
+            "timings": timings,
+        }), supersede_message_id)
+        return
     if warnings:
         raw_text = f"{raw_text}\n\n" + "\n\n".join(f"> ⚠️ {w}" for w in warnings)
     summary_hint = _SCENARIO_SUMMARY_HINTS.get(scenario)
@@ -936,7 +965,7 @@ def run_turn(
     if items:
         yield TurnEvent("strategy", {"items": items})
         if customer is not None:
-            assessment_history.attach_strategy_snapshot(db, customer.id, items)
+            assessment_history.attach_strategy_snapshot(db, customer.id, items, commit=False)
 
     # 知识溯源：agent 场景用其检索结果，其余用上下文注入的引用
     base_refs = agent_refs if agent_refs is not None else ctx.references
@@ -1035,6 +1064,17 @@ def sse(event: TurnEvent) -> str:
     return f"event: {event.type}\ndata: {payload}\n\n"
 
 
+def _regeneration_error(event: TurnEvent, retained_message_id: int | None) -> TurnEvent:
+    """错误不提交草稿；向客户端明确指出仍然有效的原回复。"""
+    if event.type != "error" or retained_message_id is None:
+        return event
+    data = dict(event.data)
+    data["retained_message_id"] = retained_message_id
+    if "已保留原答案" not in str(data.get("message") or ""):
+        data["message"] = "重新生成未完成，已保留原答案。" + str(data.get("message") or "")
+    return TurnEvent("error", data)
+
+
 def stream_sse(
     session_id: int,
     *,
@@ -1052,6 +1092,7 @@ def stream_sse(
     session: ChatSession | None = None
     claimed = False
     observer: chat_metrics.TurnMetricObserver | None = None
+    exclude_id: int | None = None
     try:
         session = db.get(ChatSession, session_id)
         if session is None:
@@ -1083,14 +1124,20 @@ def stream_sse(
             supersede_message_id=exclude_id if regenerate else None,
             progress_callback=observer.consume_usage,
         ):
+            event = _regeneration_error(event, exclude_id if regenerate else None)
             observer.consume(event)
             yield sse(event)
     except Exception as exc:  # noqa: BLE001
-        event = TurnEvent("error", {"message": str(exc)})
+        event = _regeneration_error(
+            TurnEvent("error", {"message": str(exc)}), exclude_id if regenerate else None,
+        )
         if observer is not None:
             observer.consume(event)
         yield sse(event)
     finally:
+        # 流式取消或异常可能发生在策略/引用事件之后。指标使用独立提交，
+        # 因此先撤销尚未随完整消息提交的业务变更，避免指标顺带保存草稿策略。
+        db.rollback()
         if observer is not None:
             observer.persist(db)
         if claimed:
@@ -1104,8 +1151,8 @@ def prepare_regenerate(
     """定位待替换回复与原提问；旧回复保持不可变，直到新回复成功。
 
     仅当最后一条 assistant 回复晚于最后一条用户提问（即它是对该提问的应答）时
-    才删除；若上一轮在持久化 assistant 前失败，last_assistant 属于更早的轮次，
-    删除会造成历史消息丢失。快捷场景（评估/策略/预警）历史上可能没有用户提问，
+    才选择为替换目标；若上一轮在持久化 assistant 前失败，last_assistant 属于更早的轮次，
+    替换会造成历史消息丢失。快捷场景（评估/策略/预警）历史上可能没有用户提问，
     此时按场景兜底一个默认提问用于重放。
     """
     messages = (
@@ -1177,6 +1224,7 @@ def complete_turn(
             supersede_message_id=supersede_message_id,
             progress_callback=observer.consume_usage,
         ):
+            event = _regeneration_error(event, supersede_message_id)
             observer.consume(event)
             if event.type == "context":
                 result["assessment"] = event.data.get("assessment")
@@ -1196,9 +1244,13 @@ def complete_turn(
                 result["latency_ms"] = event.data.get("latency_ms", 0)
                 result["timings"] = event.data.get("timings") or {}
     except Exception as exc:
-        observer.consume(TurnEvent("error", {"message": str(exc)}))
-        raise
+        event = _regeneration_error(TurnEvent("error", {"message": str(exc)}), supersede_message_id)
+        observer.consume(event)
+        if supersede_message_id is None:
+            raise
+        result["error"] = event.data["message"]
     finally:
+        db.rollback()
         observer.persist(db)
         _release_streaming(session.id)
 
