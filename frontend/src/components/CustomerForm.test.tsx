@@ -89,7 +89,8 @@ describe("CustomerForm 二级维度分组", () => {
     help.focus();
     await user.keyboard("{Enter}");
     expect(screen.getByText(/教练级＝持续提供内部信息/)).toBeInTheDocument();
-    expect(screen.getByText(/AR：客户经理/)).toBeInTheDocument();
+    expect(screen.queryByText(/AR：客户经理/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/KCR：/)).not.toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(help).toHaveAttribute("aria-expanded", "false");
     expect(onChange).not.toHaveBeenCalled();

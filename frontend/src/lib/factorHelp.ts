@@ -1,30 +1,17 @@
 import type { FactorConfigItem } from "../types";
 
-// 代码前缀属于维度编号，说明中文含义即可，避免臆造英文全称。
+// 仅解释因子内容中的专业术语，不解释维度编号、负责角色或基础单位。
 const TERMS: [string, string][] = [
-  ["KCR", "关键客户关系的维度代码，关注决策链关键人的关系深度。"],
-  ["ER", "普遍客户关系的维度代码，关注基层执行团队的关系质量。"],
-  ["OR", "组织客户关系的维度代码，关注双方公司及部门层面的合作。"],
-  ["CI", "客户洞察与业务理解的维度代码。"],
-  ["HIS", "历史合作与经营结果的维度代码。"],
-  ["RISK", "竞争态势与风险信号的维度代码。"],
-  ["SVC", "服务与支持健康度的维度代码。"],
-  ["AR", "客户经理／销售角色，负责客户经营与商务关系。"],
-  ["SR", "解决方案角色，负责技术方案与客户需求匹配。"],
-  ["FR", "交付与服务角色，负责项目交付及服务支持。"],
   ["Champion", "内部支持者：在客户内部主动推动我方方案，并愿意协调资源或影响决策的人。"],
   ["CXO", "首席高管的统称，例如首席执行官、首席财务官、首席信息官。"],
   ["EB", "Economic Buyer，经济决策人：对预算支出拥有最终批准权的人。"],
   ["VP", "Vice President，副总裁，通常指公司或业务部门的高层管理者。"],
-  ["IT", "Information Technology，信息技术，包含信息系统、软件、硬件及相关服务。"],
   ["ROI", "Return on Investment，投资回报率，通常按（收益－投入成本）÷投入成本计算。"],
   ["Wallet Share", "钱包份额：客户相关采购支出中，我司获得的采购金额占比。"],
   ["NPS", "Net Promoter Score，净推荐值：推荐者比例减去贬损者比例，标准范围为－100至100；本表按现有选项填报，负值落入最低档，也可填第三方满意度调研结果。"],
   ["POC", "Proof of Concept，概念验证：在正式采购前，通过小规模测试验证方案是否可行。"],
   ["CES", "Customer Effort Score，客户费力度，衡量客户为解决问题付出的精力；本因子使用一次解决率等服务记录判断，越省力越好。"],
   ["SLA", "Service Level Agreement，服务等级协议，约定响应或解决时限等服务目标；达标率是满足约定目标的记录占比。"],
-  ["min", "minute，分钟，例如15min表示15分钟。"],
-  ["h", "hour，小时，例如4h表示4小时。"],
 ];
 
 const FACTOR_NOTES: Record<string, string> = {
@@ -59,7 +46,7 @@ const FACTOR_NOTES: Record<string, string> = {
 };
 
 export function factorHelpNotes(factor: FactorConfigItem): string[] {
-  const text = [factor.label, factor.description, factor.source_role, ...factor.input.options].join(" ");
+  const text = [factor.label, factor.description, ...factor.input.options].join(" ");
   const terms = TERMS.filter(([term]) =>
     new RegExp(`(?<![A-Za-z])${term}(?![A-Za-z])`).test(text),
   ).map(([term, explanation]) => `${term}：${explanation}`);
