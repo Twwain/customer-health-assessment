@@ -148,7 +148,8 @@ LLM_REPORT_REASONING_EFFORT = os.getenv("LLM_REPORT_REASONING_EFFORT", "high").s
 if LLM_REPORT_REASONING_EFFORT not in {"low", "high", "max"}:
     raise ValueError("LLM_REPORT_REASONING_EFFORT 必须是 low / high / max")
 LLM_REPORT_MAX_TOKENS = max(1024, _env_int("LLM_REPORT_MAX_TOKENS", 32768))
-REPORT_TURN_TOKEN_BUDGET = max(LLM_REPORT_MAX_TOKENS, _env_int("REPORT_TURN_TOKEN_BUDGET", 65536))
+# 防极端滥用的探索软上限；正常报告保留充分核对/修订余量，先采集真实消耗再优化。
+REPORT_TURN_TOKEN_BUDGET = max(LLM_REPORT_MAX_TOKENS, _env_int("REPORT_TURN_TOKEN_BUDGET", 512_000))
 REPORT_GENERATION_TIMEOUT_SECONDS = max(30.0, _env_float("REPORT_GENERATION_TIMEOUT_SECONDS", 300.0))
 # 进程内 Chat LLM 全局并发上限。所有同步/流式调用（含报告 AI）共用该额度。
 CHAT_LLM_GLOBAL_CONCURRENCY = max(1, _env_int("CHAT_LLM_GLOBAL_CONCURRENCY", 8))
@@ -205,8 +206,9 @@ CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 120
 CHAT_AGENT_CANCEL_GRACE_SECONDS = max(
     0.1, _env_float("CHAT_AGENT_CANCEL_GRACE_SECONDS", 1.0)
 )
-# 整轮探索软预算（含输入/输出）；耗尽后仍允许一次按场景输出上限生成最终回答。
-CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 32_000))
+# 防极端滥用的探索软上限（含输入/输出），不是正常请求的成本目标。
+# 保留有限收尾、总时限、并发、输入/工具边界，并记录真实用量供后续优化。
+CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 256_000))
 # 工具预算同时限制模型单轮并行调用、整轮累计调用和回填到 Prompt 的总字符数。
 CHAT_TOOL_CALLS_PER_ROUND = max(1, _env_int("CHAT_TOOL_CALLS_PER_ROUND", 4))
 CHAT_TOOL_CALLS_PER_TURN = max(
@@ -222,7 +224,8 @@ CHAT_TOOL_ARGUMENT_CHARS_PER_TURN = max(
 CHAT_AGENT_MAX_ITERATIONS = min(2, max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 2)))
 REPORT_AGENT_MAX_ITERATIONS = min(2, max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 2)))
 AI_FACT_CHECK_TIMEOUT_SECONDS = max(1.0, _env_float("AI_FACT_CHECK_TIMEOUT_SECONDS", 30.0))
-AI_FACT_CHECK_MAX_TOKENS = max(256, _env_int("AI_FACT_CHECK_MAX_TOKENS", 2000))
+# 完整目标与原文锚点可能较长，避免正常核对因2000 token输出不足被截断。
+AI_FACT_CHECK_MAX_TOKENS = max(256, _env_int("AI_FACT_CHECK_MAX_TOKENS", 8000))
 AI_FACT_CHECK_MAX_DRAFT_CHARS = max(1000, _env_int("AI_FACT_CHECK_MAX_DRAFT_CHARS", 24000))
 # 运行指标只用于近期容量观察，超过保留期的数据在写入新指标时自动清理。
 CHAT_METRICS_RETENTION_DAYS = max(1, _env_int("CHAT_METRICS_RETENTION_DAYS", 90))

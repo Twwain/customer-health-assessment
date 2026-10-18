@@ -180,6 +180,8 @@ def test_report_generation_budget_is_independent_from_chat(db, customer, fake_ll
 
     monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(config, "LLM_MAX_TOKENS", 500)
+    monkeypatch.setattr(config, "CHAT_TURN_TOKEN_BUDGET", 1000)
+    monkeypatch.setattr(config, "REPORT_TURN_TOKEN_BUDGET", 123456)
     monkeypatch.setattr(config, "REPORT_GENERATION_TIMEOUT_SECONDS", 300)
     started = time.monotonic()
     observed = {}
@@ -194,7 +196,7 @@ def test_report_generation_budget_is_independent_from_chat(db, customer, fake_ll
     assert report.strategy_items and not report.degraded
     assert observed["deadline"] >= started + 299
     assert observed["output_token_limit"] == 32768
-    assert observed["token_budget"] == 65536
+    assert observed["token_budget"] == 123456
     assert observed["thinking_enabled"] is True
     assert observed["reasoning_effort"] == "high"
 

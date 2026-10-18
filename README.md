@@ -76,7 +76,9 @@ DEPLOY_SERVER=root@203.0.113.10 bash deploy.sh  # 替换为实际服务器地址
 
 评估、策略和风险分析会生成正文并独立核对事实，有问题时最多修订一次。代码中的 `CHAT_AGENT_MAX_ITERATIONS` / `REPORT_AGENT_MAX_ITERATIONS` 均默认 2（含首稿）；**示例配置将对话设为 1**，关闭修订但保留核对。未完成核对会明确提示。
 
-聊天默认关闭思考，报告默认开启；报告单次生成上限为 32768 token，总生成时限为 300 秒。`CHAT_TURN_TOKEN_BUDGET` / `REPORT_TURN_TOKEN_BUDGET` 是探索软预算，耗尽后可另用一次生成额度收尾，总时限仍有效。`PDF_JOB_TTL` 应大于报告生成时限并预留排版时间。
+聊天默认关闭思考，报告默认开启；报告单次生成上限为 32768 token，总生成时限为 300 秒。`CHAT_TURN_TOKEN_BUDGET` / `REPORT_TURN_TOKEN_BUDGET` 默认为 256000 / 512000，是探索软预算；耗尽后可另用一次生成额度收尾，并非整轮消耗硬上限。核对单次输出上限 `AI_FACT_CHECK_MAX_TOKENS` 默认为 8000。总时限、并发、输入和工具调用限制同时生效。`PDF_JOB_TTL` 应大于报告生成时限并预留排版时间。
+
+`GET /api/chat/metrics` 提供按场景的 token、耗时、修订和降级分布，运行指标默认保留 90 天，不记录业务正文。
 
 ## 评分模型
 

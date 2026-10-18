@@ -60,7 +60,7 @@ def _error_code(message: str) -> str:
 class TurnMetricObserver:
     """从现有 SSE/非流式事件中提取一轮指标。"""
 
-    session_id: int
+    session_id: int | None
     scenario: str
     started: float = 0.0
     model: str = ""
@@ -70,6 +70,7 @@ class TurnMetricObserver:
     warning_count: int = 0
     error_code: str = ""
     persisted: bool = False
+    token_budget: int | None = None
 
     def __post_init__(self) -> None:
         self.started = time.monotonic()
@@ -130,7 +131,7 @@ class TurnMetricObserver:
             self.status = "cancelled"
             self.error_code = self.error_code or "client_cancelled"
         latency_ms = int(timings.get("total_ms") or ((time.monotonic() - self.started) * 1000))
-        budget = int(config.CHAT_TURN_TOKEN_BUDGET)
+        budget = int(config.CHAT_TURN_TOKEN_BUDGET if self.token_budget is None else self.token_budget)
         metric = ChatTurnMetric(
             session_id=self.session_id,
             scenario=self.scenario,
@@ -158,6 +159,49 @@ class TurnMetricObserver:
         except Exception as exc:  # 指标故障绝不能影响主对话
             db.rollback()
             logger.warning("chat_turn_metric 写入失败：%s", exc)
+
+
+def record_report_metric(db: Any, report: Any, *, elapsed_ms: int) -> None:
+    """在报告调用方完成业务提交后记录成本；不保存正文、客户或核对证据。"""
+    try:
+        if not report.has_ai:
+            return
+        from services.ai.llm_adapter import get_chat_adapter
+
+        def count(value: Any) -> int:
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        timings = report.timings if isinstance(report.timings, dict) else {}
+        calls = timings.get("llm_calls")
+        calls = calls if isinstance(calls, list) else []
+        verification = timings.get("verification")
+        verification = verification if isinstance(verification, list) else []
+        last_check = verification[-1] if verification and isinstance(verification[-1], dict) else {}
+        verified = last_check.get("status") == "passed" and not last_check.get("reason")
+        degraded = bool(report.degraded)
+        observer = TurnMetricObserver(
+            session_id=None,
+            scenario="report",
+            model=str(getattr(get_chat_adapter(), "model", "") or "")[:100],
+            status="degraded" if degraded else "success" if verified else "partial",
+            tokens_used=sum(count(call.get("total_tokens")) for call in calls if isinstance(call, dict)),
+            timings={
+                "total_ms": count(elapsed_ms),
+                "llm_call_count": len(calls),
+                "tool_rounds": count(timings.get("tool_rounds")),
+                "refine_rounds": count(timings.get("refine_rounds")),
+            },
+            warning_count=len(report.warnings) if isinstance(report.warnings, list) else 0,
+            error_code=("report_degraded" if degraded else "" if verified else
+                        "fact_check_issues" if last_check.get("status") == "issues" else "fact_check_unverified"),
+            token_budget=config.REPORT_TURN_TOKEN_BUDGET,
+        )
+        observer.persist(db)
+    except Exception:  # 元数据格式或指标设施故障不影响报告/PDF
+        logger.warning("report_metric 采集失败", exc_info=True)
 
 
 def summarize(db: Any, *, hours: int = 168) -> dict[str, Any]:
@@ -201,6 +245,7 @@ def summarize(db: Any, *, hours: int = 168) -> dict[str, Any]:
         "since": since.isoformat() + "Z",
         "generated_at": utcnow().isoformat() + "Z",
         "configured_token_budget": config.CHAT_TURN_TOKEN_BUDGET,
+        "configured_report_token_budget": config.REPORT_TURN_TOKEN_BUDGET,
         "configured_timeout_seconds": config.CHAT_TURN_TIMEOUT_SECONDS,
         "configured_chat_concurrency": config.CHAT_LLM_GLOBAL_CONCURRENCY,
         "overall": summarize_rows(rows),

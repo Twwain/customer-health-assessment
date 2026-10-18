@@ -23,6 +23,7 @@ from schemas import (
 from services import assessment_history
 from services.scoring import get_scoring_strategy
 from services.pdf_report import PdfReportGenerator
+from services.ai.metrics import record_report_metric
 
 router = APIRouter(prefix="/assessment", tags=["健康度评估"])
 
@@ -90,6 +91,7 @@ def _run_pdf_job(
         customer = db.query(Customer).filter(Customer.id == customer_id).first()
         if customer is None:
             raise HTTPException(status_code=404, detail="客户不存在")
+        report_started = time.monotonic()
         report = build_report_data(
             db,
             customer,
@@ -98,6 +100,7 @@ def _run_pdf_job(
             deadline=deadline,
         )
         db.commit()  # 模型生成结束后再写入累计的知识命中计数
+        record_report_metric(db, report, elapsed_ms=int((time.monotonic() - report_started) * 1000))
         pdf_bytes = pdf_gen.generate(
             report.assessment,
             strategy_items=report.strategy_items,
@@ -223,6 +226,7 @@ def download_pdf(
     try:
         from services.report_builder import build_report_data
 
+        report_started = time.monotonic()
         report = build_report_data(
             db,
             customer,
@@ -231,6 +235,7 @@ def download_pdf(
             deadline=time.monotonic() + config.REPORT_GENERATION_TIMEOUT_SECONDS,
         )
         db.commit()  # 模型生成结束后再写入累计的知识命中计数
+        record_report_metric(db, report, elapsed_ms=int((time.monotonic() - report_started) * 1000))
         pdf_bytes = pdf_gen.generate(
             report.assessment,
             strategy_items=report.strategy_items,

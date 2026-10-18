@@ -242,6 +242,34 @@ def test_budget_final_covers_checks_and_refinement_after_iteration_limit(exhaust
     assert len(adapter.calls) == exhaust_at + 1
     assert result.timings["llm_calls"][-1]["phase"] == "budget_final"
     assert adapter.calls[-1][1]["max_tokens"] > 1000
+
+
+@pytest.mark.parametrize("report,usage", [
+    (False, [13657, 15143, 17778, 17046]),
+    (True, [24400, 16120, 21722, 17046]),
+])
+def test_observed_normal_usage_keeps_revision_and_final_verification(report, usage):
+    import config
+    class Adapter(ScriptedAdapter):
+        def stream_chat_completion(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            index = len(self.calls) - 1
+            yield self.replies[index]
+            kwargs["on_usage"]({"total_tokens": usage[index], "finish_reason": "stop"})
+    adapter = Adapter([])
+    adapter.replies = [BAD, CONFLICT, GOOD, '{"issues":[]}']
+    ctx = ChatContext(references=[{"id": "1:0", "title": "回款制度",
+        "_model_content": "36小时内完成单据核验，72小时内取得付款排期。"}])
+    result = AssessmentStrategyAgent(
+        adapter=adapter, tools_enabled=False,
+        token_budget=config.REPORT_TURN_TOKEN_BUDGET if report else config.CHAT_TURN_TOKEN_BUDGET,
+        output_token_limit=config.LLM_REPORT_MAX_TOKENS if report else None,
+    ).run("assessment", ctx, None, None, retrieve_enabled=False)
+    assert result.text == GOOD and not result.degraded and result.warnings == []
+    assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "refine", "verification"]
+    assert result.timings["verification"][-1]["status"] == "passed"
+    assert sum(call["total_tokens"] for call in result.timings["llm_calls"]) == sum(usage)
+    assert all(kwargs["max_tokens"] >= 4000 for _, kwargs in adapter.calls)
     assert adapter.calls[-1][1]["tools"] is None
 
 
