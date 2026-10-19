@@ -19,6 +19,8 @@ class FactCheckResult:
     status: str  # passed / issues / unverified
     issues: list[dict[str, str]] = field(default_factory=list)
     reason: str = ""
+    verified_projections: list[dict] = field(default_factory=list)
+    recheck_recommended: bool = False
 
     def feedback(self) -> str:
         return "\n".join(
@@ -83,12 +85,18 @@ def _draft_segments(text: str) -> dict[str, str]:
     return {str(index): part for index, part in enumerate(parts)}
 
 
-def messages_for_check(draft: str, sources: dict[str, str]) -> list[LLMMessage]:
-    data = json.dumps({
+def messages_for_check(draft: str, sources: dict[str, str], *, previous_check=None) -> list[LLMMessage]:
+    payload = {
         "sources": [{"id": source_id, "segments": _segments(text)} for source_id, text in sources.items()],
         "draft_segments": _draft_segments(draft),
-    }, ensure_ascii=False)
-    return [LLMMessage(role="system", content=get_internal_prompt("fact_check")),
+    }
+    system = get_internal_prompt("fact_check")
+    if previous_check is not None:
+        payload["previous_check"] = {"status": previous_check.status, "issues": previous_check.issues,
+                                     "reason": previous_check.reason}
+        system += "\n\n" + get_internal_prompt("fact_recheck")
+    data = json.dumps(payload, ensure_ascii=False)
+    return [LLMMessage(role="system", content=system),
             LLMMessage(role="user", content=guardrails.wrap_untrusted(data, "tool"))]
 
 
@@ -142,26 +150,49 @@ def _historical_delta_is_observation(draft: str, match) -> bool:
     return re.fullmatch(r'(?:[，,]\s*(?:回升|上升|下降|回落|改善|恶化)(?:明显|显著)?)?[）)」』”]*', suffix) is not None
 
 
-def _score_expressions(draft: str, facts: dict) -> list[dict]:
-    """只识别显式维度/总分推算，不将次数、日期或单人等级箭头当作总分。"""
-    aliases = {"总分": "total", "综合评分": "total", "综合客情分": "total"}
+def _score_aliases(facts):
+    aliases = {"总分": "total", "综合评分": "total", "综合客情分": "total", "总增分": "total"}
     for dimension in facts["dimensions"]:
         aliases[dimension["key"].upper()] = dimension["key"]
         aliases[dimension["name"]] = dimension["key"]
+    return aliases
+
+
+def _projection_tail_is_complete(draft: str, end: int) -> bool:
+    """未知单位/数量级/范围不属于已验证数字；空白和闭引号不截断它们。"""
+    if re.match(r"[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*#{1,6}[ \t]+", draft[end:]):
+        return True  # 下一 Markdown 章节是明确的结构边界，不是跨行单位。
+    tail = draft[end:].lstrip()
+    # JSON/Markdown 的闭合字符只在随后确实结束该数值项时充当边界。
+    while tail and tail[0] in '\")]}）】》」』”’`':
+        tail = tail[1:].lstrip()
+    if not tail:
+        return True
+    # 逗号接数字可能是千位分隔或范围延续，不能当作独立句界。
+    if re.match(r"[,，]\s*\d", tail):
+        return False
+    return tail[0] in '，,。；;！？!?'
+
+
+def _score_expressions(draft: str, facts: dict) -> list[dict]:
+    """只识别显式维度/总分推算，不将次数、日期或单人等级箭头当作总分。"""
+    aliases = _score_aliases(facts)
     names = "|".join(re.escape(name) for name in sorted(aliases, key=len, reverse=True))
     subject = rf"(?<![A-Za-z0-9_\-])(?:{names})(?![A-Za-z_\-])"
     # 一个推算只归属于最近的计分主体；遇到“总分/另一维度”必须重新起算。
     prefix = rf"(?<![A-Za-z0-9_\-])(?P<name>{names})(?![A-Za-z_\-])(?:(?!{subject})[^\n。；;]){{0,28}}?"
     number = r"-?\d+(?:\.\d+)?"
-    arrow = re.compile(prefix + rf"(?P<before>{number})(?:\s*/\s*(?P<before_max>{number}))?\s*(?:分)?\s*(?:→|->|⇒|提升至|提升到|提高至|提高到|升至|升到|到|至)\s*(?P<after>{number})(?![\d.%％])(?:\s*/\s*(?P<after_max>{number}))?"
+    arrow = re.compile(prefix + rf"(?P<before>{number})(?:\s*/\s*(?P<before_max>{number}))?\s*(?:分)?\s*(?:→|->|⇒|提升至|提升到|提高至|提高到|升至|升到|到|至)\s*(?P<after>{number})(?![\d.%％])(?:\s*/\s*(?P<after_max>{number}))?(?:\s*分)?"
                        + r"(?:\s*[（(]\s*(?P<delta>[+-]?\d+(?:\.\d+)?)\s*(?:分)?\s*[）)])?", re.I)
     delta = re.compile(prefix + rf"(?:提升|提高|增加|增分|收益)(?:约|为|可达)?\s*\+?(?P<delta>{number})\s*分", re.I)
     signed_delta = re.compile(prefix + rf"\+\s*(?P<delta>\d+(?:\.\d+)?)\s*分", re.I)
     target = re.compile(prefix + rf"(?:可达|将达到|预计为|预计达到|目标为)\s*(?P<after>{number})\s*分", re.I)
+    total_gain = re.compile(rf"(?<![A-Za-z0-9_\-])(?P<name>总增分)(?:约|为|[:：])?\s*\+?"
+                            rf"(?P<delta>{number})(?![\d.%％])(?:\s*分)?", re.I)
     historical = re.compile(r"(?:(?:较|比)(?:上次(?:评估)?|上期|上月|上季度|去年同期)|环比|同比)"
                             r"\s*(?:提升|提高|增加|上升|变化)?\s*\+?\s*" + number + r"\s*分")
     results = []
-    for pattern in (arrow, delta, signed_delta, target):
+    for pattern in (arrow, delta, signed_delta, target, total_gain):
         for match in pattern.finditer(draft):
             # Historical changes are verified against source history, not future factor targets.
             # Future/conditional language still requires an engine projection, even with a comparator.
@@ -172,7 +203,20 @@ def _score_expressions(draft: str, facts: dict) -> list[dict]:
                 continue
             name = match["name"]
             key = next(value for alias, value in aliases.items() if alias.casefold() == name.casefold())
+            # 原有宽松提取用于发现问题；正向裁决只允许纯数值语法，不让
+            # “不应/制度要求/最低”等语义混进可放行的表达式范围。
+            field = "before" if pattern is arrow else ("after" if pattern is target else "delta")
+            leading = _compact(draft[match.end("name"):match.start(field)])
+            pure_prefix = (
+                r"(?:维度|得分|评分|加权分)?(?:由|从)?" if pattern is arrow else
+                r"(?:维度|得分|评分)?(?:可达|将达到|预计为|预计达到|目标为)" if pattern is target else
+                r"(?:约|为|[:：])?\+?" if pattern is total_gain else
+                r"(?:维度|得分|评分)?\+" if pattern is signed_delta else
+                r"(?:维度|得分|评分)?(?:提升|提高|增加|增分|收益)(?:约|为|可达)?\+?"
+            )
             results.append({"claim": match.group(0), "dimension": key, "start": match.start(), "end": match.end(),
+                            "numeric_only": re.fullmatch(pure_prefix, leading) is not None,
+                            "complete_tail": _projection_tail_is_complete(draft, match.end()),
                             **{field: float(value) for field, value in match.groupdict().items() if field != "name" and value is not None}})
     return results
 
@@ -252,6 +296,7 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
         if _compact(entry["claim"]) not in _compact(draft):
             raise ValueError("评分推算引用无法定位")
     issues = []
+    verified = []
     missing = False
     for expression in expressions:
         # 计分对象取草稿实际表达式，不信模型dimension标签；同一目标集可核对同句的维度和总分。
@@ -294,7 +339,9 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
             before = next(row["score"] for row in projection["before"]["dimensions"] if row["key"] == key)
             after = next(row["score"] for row in projection["after"]["dimensions"] if row["key"] == key)
             maximum = next(row["max_score"] for row in facts["dimensions"] if row["key"] == key)
-        expected = {"before": before, "after": after, "delta": after - before,
+        # 展示总分保留一位小数，真实增量使用引擎的未舍入总分差。
+        change = projection["delta"]["total_score"] if key == "total" else projection["delta"]["dimensions"][key]
+        expected = {"before": before, "after": after, "delta": change,
                     "before_max": maximum, "after_max": maximum}
         if any(not math.isclose(expression[field], expected[field], rel_tol=0, abs_tol=0.051)
                for field in expected if field in expression):
@@ -303,9 +350,23 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
             evidence = json.dumps(projection, ensure_ascii=False)
             sources[source_id] = evidence
             issues.append({"claim": expression["claim"], "source_id": source_id, "evidence": evidence,
-                           "reason": f"按完整目标因子重算，{key}应从{before:g}变为{after:g}，变化{after-before:+g}；不得把目标分数或自行估算当作引擎收益。"})
+                           "reason": f"按完整目标因子重算，{key}应从{before:g}变为{after:g}，变化{change:+g}；不得把目标分数或自行估算当作引擎收益。"})
+        elif not expression["complete_tail"]:
+            missing = True  # 引擎只识别到前缀，不能把未覆盖的完整数值项当作通过。
+        elif expression["numeric_only"]:
+            verified.append({key: expression[key] for key in ("claim", "start", "end")})
     return FactCheckResult("issues" if issues else ("unverified" if missing else "passed"), issues=issues,
-                           reason="评分推算缺少可核验的完整合法目标或目标原文锚点，未标记通过" if missing else "")
+                           reason="评分推算缺少可核验的完整合法目标或目标原文锚点，未标记通过" if missing else "",
+                           verified_projections=verified)
+
+
+def _engine_covers_issue(issue, draft, verified):
+    """仅裁决精确数值引用；全部同文出现位置都须各自通过完整重算。"""
+    if issue["source_id"] != "scoring" or "claim_id" in issue:
+        return False
+    claim = _compact(issue["claim"])
+    proofs = [item for item in verified if _compact(item["claim"]) == claim]
+    return bool(proofs) and len(proofs) == _compact(draft).count(claim)
 
 
 def merge_local_checks(result: FactCheckResult, draft: str, *, customer=None, scoring_facts=None):
@@ -315,7 +376,9 @@ def merge_local_checks(result: FactCheckResult, draft: str, *, customer=None, sc
         return result
     issues = check_scoring_claims(draft, customer, facts)
     issues.extend(issue for issue in result.issues if issue not in issues)
-    return FactCheckResult("issues" if issues else result.status, issues=issues[:8], reason=result.reason)
+    return FactCheckResult("issues" if issues else result.status, issues=issues[:8], reason=result.reason,
+                           verified_projections=result.verified_projections,
+                           recheck_recommended=result.recheck_recommended)
 
 
 def parse_result(text: str, draft: str, sources: dict[str, str], *, customer=None, scoring_facts=None) -> FactCheckResult:
@@ -357,16 +420,34 @@ def parse_result(text: str, draft: str, sources: dict[str, str], *, customer=Non
             # 只统一这两个字符和空白，不合并比较方向或放宽数值/来源校验。
             if _compact(issue["claim"]) not in _compact(draft) or not source or _compact(issue["evidence"]) not in _compact(source):
                 raise ValueError("核对引用无法定位到草稿或原文")
-        # 模型偶发把“一致/不构成矛盾”的核对过程放进issues；它不是错误报告。
-        # 本地硬校验和引擎投影的问题始终保留，不凭“没有查出”反推正确。
+        # 来源和JSON协议先校验。只撤销引擎完整覆盖的精确数值争议，整卡及
+        # 其他事实仍需模型核对；局部证明不能覆盖别处缺失目标或确定性错误。
+        issues = [issue for issue in issues if not _engine_covers_issue(
+            issue, draft, projections.verified_projections,
+        )]
+        # issues 同时宣称“正确/不报告”时，整份模型核对结果不可信。
+        # 不将其升级为强制删除依据，也不靠过滤条目反推通过；交给独立单元
+        # 复核和最终整答核对。混合真实错误的说明同样保持未完成状态。
         nonissue_conclusion = (
-            r"(?:经核对[，,:：\s]*)?"
-            r"(?:(?:本项|此项|该项|草稿与原文|表述|评分|两者)?(?:完全)?"
-            r"(?:不构成矛盾|不属于事实错误|不应报错|不报错|不报|一致|正确|无误)[，,。；;.!！\s]*)+"
+            r"不构成(?:事实)?(?:矛盾|错误)|不属于事实错误|不应报错|不报(?:告|错)?|"
+            r"(?<![不未非])(?:一致|正确|相符)|无误|"
+            r"(?:未发现|不存在|没有|无)(?:实质|事实|任何|明显)?(?:错误|矛盾|冲突|问题)"
         )
-        issues = [issue for issue in issues if not re.fullmatch(nonissue_conclusion, issue["reason"])]
+        if any(re.search(nonissue_conclusion, issue["reason"]) for issue in issues):
+            deterministic = (local_issues + projection_issues)[:8]
+            return FactCheckResult(
+                "issues" if deterministic else "unverified", issues=deterministic,
+                reason="核对响应包含自我撤销或相互矛盾的问题结论，需重新核实",
+                verified_projections=projections.verified_projections,
+                recheck_recommended=True,
+            )
         merged = local_issues + projections.issues + issues
-        return FactCheckResult("issues" if merged else projections.status, issues=merged[:8], reason=projections.reason)
+        return FactCheckResult("issues" if merged else projections.status, issues=merged[:8], reason=projections.reason,
+                               verified_projections=projections.verified_projections,
+                               recheck_recommended=any(re.search(
+                                   r"未(?:提及|包含|要求|限定|规定|明确|支持)|没有(?:提到|规定|要求)|不(?:包含|支持)",
+                                   issue["reason"],
+                               ) for issue in issues))
     except (ValueError, TypeError, KeyError):
         deterministic = (local_issues + projection_issues)[:8]
         return FactCheckResult("issues" if deterministic else "unverified", issues=deterministic,

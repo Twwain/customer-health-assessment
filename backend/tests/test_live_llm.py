@@ -325,8 +325,11 @@ def test_live_business_agent(live_chat, live_business_data, scenario, limits, re
     record(record_property, scenario=scenario, agent_seconds=time.monotonic() - started,
            llm_calls=len(result.timings["llm_calls"]), refine_rounds=result.timings["refine_rounds"])
     assert not result.degraded and result.text.strip()
-    assert not result.warnings, result.warnings
+    assert all(warning == "已修正或移除部分依据不足的结论，保留已核实的分析。"
+               for warning in result.warnings), result.warnings
     assert result.timings["verification"][-1]["status"] == "passed"
+    assert not result.timings["verification"][-1]["issues"]
+    assert not result.timings["verification"][-1]["reason"]
     assert any(r["document_id"] == doc.id for r in result.references)
     expected = get_scoring_strategy().evaluate(customer)
     assert ctx.assessment.total_score == expected.total_score
@@ -367,9 +370,10 @@ def test_live_stream_tool_roundtrip(live_chat, live_business_data, limits, recor
     assert facts["reference"] == "合成回款制度"
 
 
-def test_live_report_ai(live_chat, live_business_data, record_property, tmp_path):
+def test_live_report_ai(live_chat, live_business_data, record_property, tmp_path, monkeypatch):
     from services.report_builder import build_report_data
     from seed_factors import RISKY_FACTORS
+    from scripts.quality_evidence import QualityEvidence
 
     db, customer, doc = live_business_data
     # 引用验收需要制度实际适用：原夹具为满分、零合同的新客户，
@@ -380,7 +384,10 @@ def test_live_report_ai(live_chat, live_business_data, record_property, tmp_path
     customer.notes = "当前已有一笔合同应收款逾期，尚未完成单据核验与付款排期确认。"
     db.commit()
     started = time.monotonic()
-    report = build_report_data(db, customer, include_ai=True)
+    recorder = QualityEvidence(tmp_path / 'quality-trace', secrets=[config.LLM_API_KEY, config.EMBEDDING_API_KEY])
+    monkeypatch.setattr(llm_adapter, '_chat_adapter', recorder.adapter(live_chat))
+    with recorder.parsers():
+        report = build_report_data(db, customer, include_ai=True)
     evidence = tmp_path / "report-ai-evidence.json"
     evidence.write_text(json.dumps({
         "customer_notes": customer.notes,
@@ -390,9 +397,36 @@ def test_live_report_ai(live_chat, live_business_data, record_property, tmp_path
     record(record_property, report_seconds=time.monotonic() - started,
            report_llm_calls=len(report.timings.get("llm_calls", [])), report_artifact=str(evidence))
     assert report.has_ai and not report.degraded, report.error
-    assert not report.warnings, report.warnings
+    assert report.error is None, report.error
+    # 成功局部修复是合法恢复；仍拒绝降级、未核实和其他异常提示。
+    assert all(warning == "已修正或移除部分依据不足的结论，保留已核实的分析。"
+               for warning in report.warnings), report.warnings
     assert report.strategy_items and all(i["title"] and i["action"] for i in report.strategy_items)
     assert any(r["document_id"] == doc.id for r in report.references)
     assert any("合成回款制度" in i.get("reference", "") for i in report.strategy_items), f"策略引用缺失，详见 {evidence}"
     assert report.timings["verification"][-1]["status"] == "passed"
+    assert not report.timings["verification"][-1]["issues"]
+    assert not report.timings["verification"][-1]["reason"]
     assert report.timings["llm_calls"][0]["max_tokens"] == config.LLM_REPORT_MAX_TOKENS
+
+
+@pytest.mark.parametrize('draft,has_issue', [
+    ('账款逾期后，财务负责人36小时内完成单据核验、72小时内取得付款排期。', False),
+    ('按制度，财务负责人必须在72小时内取得客户书面付款排期。', True),
+    ('按制度72小时内取得付款排期；建议另行取得客户书面确认。', False),
+    ('该制度仅要求72小时内取得付款排期，无需单据核验。', True),
+    ('账款逾期后36小时核验、72小时取得排期，本策略15个工作日内完成上述核验和排期。', True),
+    ('账款逾期后36小时核验、72小时取得排期；客户经理另在15个工作日内完成风险复盘。', False),
+])
+def test_live_policy_requirement_and_recommendation_pairs(live_chat, limits, draft, has_issue):
+    from services.ai.fact_check import messages_for_check, parse_result
+
+    sources = {'knowledge': '账款逾期后，财务负责人应在36小时内完成单据核验，在72小时内取得付款排期。'}
+    raw = ''.join(live_chat.stream_chat_completion(
+        messages_for_check(draft, sources), temperature=0, max_tokens=config.AI_FACT_CHECK_MAX_TOKENS,
+        extra={'thinking': {'type': 'disabled'}}, deadline=time.monotonic() + limits[1],
+    ))
+    payload = json.loads(raw.removeprefix('```json').removesuffix('```').strip())
+    assert bool(payload['issues']) == has_issue, raw
+    checked = parse_result(raw, draft, sources)
+    assert checked.status == ('issues' if has_issue else 'passed'), (checked, raw)

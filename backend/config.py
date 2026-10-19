@@ -220,7 +220,7 @@ CHAT_TOOL_RESULT_CHARS_PER_TURN = max(
 CHAT_TOOL_ARGUMENT_CHARS_PER_TURN = max(
     1000, _env_int("CHAT_TOOL_ARGUMENT_CHARS_PER_TURN", 8_000)
 )
-# 默认生成一次，独立核对后有问题才修订，最多修订一次。
+# 以下限制常规生成/修订次数；最终选择后新问题另有一次局部修复机会，仍共用预算和总时限。
 CHAT_AGENT_MAX_ITERATIONS = min(2, max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 2)))
 REPORT_AGENT_MAX_ITERATIONS = min(2, max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 2)))
 AI_FACT_CHECK_TIMEOUT_SECONDS = max(1.0, _env_float("AI_FACT_CHECK_TIMEOUT_SECONDS", 30.0))

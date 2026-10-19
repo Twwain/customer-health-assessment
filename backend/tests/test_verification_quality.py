@@ -26,7 +26,7 @@ def test_segment_ids_resolve_original_text_and_reject_unknown_anchors():
         assert parse_result(json.dumps(invalid), draft, sources).status == 'unverified'
 
 
-def test_explicit_nonissues_do_not_trigger_revision_but_engine_errors_remain():
+def test_self_retracted_issues_require_recheck_but_engine_errors_remain():
     c, facts, sources = _score_case()
     claim = 'SVC-05当前4分为最低档。'
     payload = {'issues': [{'claim': claim, 'source_id': 'scoring', 'evidence': sources['scoring'],
@@ -37,9 +37,10 @@ def test_explicit_nonissues_do_not_trigger_revision_but_engine_errors_remain():
     correct = '36小时核验。'
     payload['issues'][0].update(claim=correct, source_id='rag:1', evidence=correct)
     result = parse_result(json.dumps(payload), correct, {'rag:1': correct})
-    assert result.status == 'passed' and not result.issues
+    assert result.status == 'unverified' and not result.issues and result.reason
     payload['issues'][0]['reason'] = '一项一致，但是另一个时限不一致。'
-    assert parse_result(json.dumps(payload), correct, {'rag:1': correct}).status == 'issues'
+    mixed = parse_result(json.dumps(payload), correct, {'rag:1': correct})
+    assert mixed.status == 'unverified' and not mixed.issues and mixed.reason
 
 
 def structured_strategy(changes=None, *, action=None, outcome='KCR由24→29（+5.0），总分由78.9提升至83.9。'):
@@ -138,11 +139,12 @@ def test_lowest_group_wording_is_not_an_absolute_lowest_claim():
                         customer=c, scoring_facts=facts).status == 'issues'
 
 
-def test_model_explicit_no_issue_conclusion_does_not_trigger_false_revision():
+def test_model_explicit_no_issue_conclusion_requires_independent_recheck():
     text = '36小时内核验。'
     payload = {'issues': [{'claim_id': '0', 'source_id': 'rag:1', 'evidence_id': '0',
                           'reason': '两者一致。此项无误，不报。'}], 'score_projections': []}
-    assert parse_result(json.dumps(payload), text, {'rag:1': text}).status == 'passed'
+    result = parse_result(json.dumps(payload), text, {'rag:1': text})
+    assert result.status == 'unverified' and not result.issues and result.reason
 
 
 @pytest.mark.parametrize('reason', [
@@ -157,8 +159,98 @@ def test_mixed_reason_cannot_hide_a_real_contradiction(reason):
     payload = {'issues': [{'claim_id': '0', 'source_id': 'rag:1', 'evidence_id': '0', 'reason': reason}],
                'score_projections': []}
     result = parse_result(json.dumps(payload), draft, sources)
-    assert result.status == 'issues' and result.issues[0]['reason'] == reason
-    assert '48小时' in result.feedback() and '36小时' in result.feedback()
+    assert result.status == 'unverified' and not result.issues and result.reason
+
+
+@pytest.mark.parametrize('reason', [
+    '制度要求财务负责人在36小时内完成单据核验、在72小时内取得付款排期；草稿动作与预期结果均按36小时核验、72小时排期表述，与来源一致，不报告。',
+    '草稿合计+4.8、总分14.9，与来源一致，不报告。',
+    '草稿把该项增分写成+1.5，而来源为1.5，二者一致。经复核，该条不报告。',
+    '草稿与原文完全一致。',
+    '正确。',
+    '草稿称OR-02由0次提升至1次，维度增分为1.4。合计应为3.2，数值一致。'
+    'OR当前0.466667四舍五入为0.47，目标1.866667四舍五入为1.87，数值一致。'
+    'CI维度合计1.8，数值一致。未发现实质错误。',
+    '未发现实质错误。',
+    '经核对，该项与制度相符。',
+    '没有事实矛盾。',
+])
+def test_explanatory_self_retractions_never_pass_or_become_known_bad(reason):
+    text = '财务负责人36小时内完成单据核验，72小时内取得付款排期。'
+    payload = {'issues': [{'claim_id': '0', 'source_id': 'rag:1', 'evidence_id': '0',
+                          'reason': reason}]}
+    checked = parse_result(json.dumps(payload), text, {'rag:1': text})
+    assert checked.status == 'unverified' and checked.reason
+    assert checked.issues == []
+
+
+@pytest.mark.parametrize('reason', [
+    '草稿与来源不一致，核验时限应为36小时。',
+    '核验时限不正确，应为36小时。',
+    '核验时限与来源不相符，应为36小时。',
+])
+def test_unambiguous_inconsistency_still_is_an_issue(reason):
+    payload = {'issues': [{'claim': '48小时核验', 'source_id': 'rag:1',
+                          'evidence': '36小时核验', 'reason': reason}]}
+    checked = parse_result(json.dumps(payload), '48小时核验', {'rag:1': '36小时核验'})
+    assert checked.status == 'issues' and checked.issues == payload['issues']
+
+
+@pytest.mark.parametrize('final_passes', [True, False])
+def test_retracted_issue_keeps_policy_card_only_after_independent_and_final_checks(final_passes):
+    from services.ai.local_quality import parse_answer
+
+    policy = '财务负责人36小时内完成单据核验，72小时内取得付款排期。'
+    card = {'priority': 'recommended', 'urgency': 'high', 'title': '逾期应收款闭环',
+            'reason': '客户存在逾期应收款', 'action': policy,
+            'expected_outcome': '取得书面付款排期', 'reference': '合成回款制度', 'score_targets': {}}
+    draft = '```json\n' + json.dumps({'strategies': [card]}, ensure_ascii=False) + '\n```'
+    answer = parse_answer(draft)
+    contradictory = json.dumps({'issues': [{
+        'claim': answer.units[0].text, 'source_id': 'rag:1:0', 'evidence': policy,
+        'reason': '制度要求36小时核验、72小时排期；草稿动作与预期结果均按此表述，与来源一致，不报告。',
+    }]}, ensure_ascii=False)
+    review = json.dumps({'units': [{
+        'id': unit.id, 'decision': 'keep', 'depends_on': [],
+        'sources': [{'source_id': 'rag:1:0', 'evidence': policy}],
+    } for unit in answer.units]}, ensure_ascii=False)
+    adapter = ScriptedAdapter([draft, contradictory, contradictory, review,
+                               '{"issues":[]}' if final_passes else contradictory])
+    ctx = ChatContext(references=[{'id': '1:0', 'title': '合成回款制度', '_model_content': policy}])
+    result = AssessmentStrategyAgent(adapter=adapter, tools_enabled=False, max_iterations=1).run(
+        'strategy', ctx, None, None, retrieve_enabled=False,
+    )
+    assert len(adapter.calls) == 5
+    assert [v['status'] for v in result.timings['verification']] == [
+        'unverified', 'unverified', 'passed' if final_passes else 'unverified',
+    ]
+    assert '"known_bad": []' in adapter.calls[3][0][-1].content
+    assert result.timings['fact_rechecks'] == 1
+    if final_passes:
+        assert not result.degraded
+        _, cards = split_strategy_payload(result.text)
+        assert cards[0]['action'] == policy and cards[0]['reference'] == '合成回款制度'
+        assert result.timings['local_repairs'][-1]['removed'] == []
+    else:
+        assert result.degraded and card['title'] not in result.text
+
+
+def test_mixed_retraction_cannot_silently_pass_an_actual_policy_error():
+    from test_fact_check import run_checked, GOOD
+
+    bad = '制度规定48小时核验。'
+    source = '36小时内完成单据核验'
+    issue = {'claim': bad, 'source_id': 'rag:1:0', 'evidence': source,
+             'reason': '核验时限错误，应为36小时；另一部分与来源一致，不报告。'}
+    review = json.dumps({'units': [{'id': 'u0', 'decision': 'keep', 'depends_on': [],
+                                  'sources': [{'source_id': 'rag:1:0', 'evidence': source}]}]})
+    confirmed = {**issue, 'reason': '核验时限错误，应为36小时。'}
+    result, adapter, _ = run_checked([
+        bad, json.dumps({'issues': [issue]}), json.dumps({'issues': [confirmed]}), review,
+    ], max_iterations=1)
+    assert len(adapter.calls) == 4
+    assert [v['status'] for v in result.timings['verification']] == ['unverified', 'issues']
+    assert result.degraded and bad not in result.text and GOOD not in result.text
 
 
 @pytest.mark.parametrize('draft,has_issue', [

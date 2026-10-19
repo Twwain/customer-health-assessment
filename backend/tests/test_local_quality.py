@@ -152,9 +152,9 @@ def test_new_problem_in_final_retained_answer_never_leaks():
     answer = quality.parse_answer(draft)
     final_issue = json.dumps({"issues": [{"claim": SAFE, "source_id": "knowledge", "evidence": SOURCE,
                                          "reason": "该建议仍依赖此前错误的优先级"}], "score_projections": []}, ensure_ascii=False)
-    result, adapter, _ = run([draft, ISSUE, review(answer), final_issue])
+    result, adapter, _ = run([draft, ISSUE, review(answer), final_issue, LLMUnavailableError("最终修订不可用")])
     assert result.degraded and BAD not in result.text and SAFE not in result.text
-    assert len(adapter.calls) == 4
+    assert len(adapter.calls) == 5 and result.timings['final_repairs'] == 1
     assert result.timings["local_repairs"][-1]["operation"] == "final_check"
 
 

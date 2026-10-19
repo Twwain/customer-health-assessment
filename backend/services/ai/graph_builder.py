@@ -4,7 +4,7 @@
 - reason：基于量化事实 + 知识检索，调用 LLM 生成评估结论 / 策略
 - retrieve：RAG 工具召回知识（Agent 自带检索能力，而非仅依赖上下文注入）
 - critique：本地格式检查 + 独立模型对照原文核对关键事实
-- refine：只在发现问题时修订一次，修订后再核对，不继续循环
+- refine：常规阶段最多修订一次；最终选择后新发现的问题可再局部修订一次，之后完整核对且不循环
 - 任意一步 LLM 不可用 → 降级为规则引擎兜底，不中断对话
 
 知识溯源：retrieve 命中的切片经 ``tools.to_reference`` 转为引用，随结论返回，
@@ -81,6 +81,16 @@ def _display_references(references: list[dict]) -> list[dict]:
     return [{k: v for k, v in ref.items() if not k.startswith("_")} for ref in references]
 
 
+def _issue_identity(issue):
+    claim = issue["claim"]
+    try:
+        claim = json.dumps(json.loads(claim), ensure_ascii=False, sort_keys=True)
+    except (ValueError, TypeError):
+        pass
+    # 改写reason、证据摘录或JSON键顺序不创造新的修复机会。
+    return issue["source_id"], fact_check._compact(claim)
+
+
 class AssessmentStrategyAgent:
     """评估 / 策略 Agent：检索增强 + 自批判精炼。"""
 
@@ -114,6 +124,8 @@ class AssessmentStrategyAgent:
         self._budget_finalized = False
         self._tool_budget = tools.ToolBudget()
         self._local_repairs: list[dict] = []
+        self._recheck_used = False
+        self._final_repairs = 0
 
     def _check_cancelled(self) -> None:
         if self._cancel_event is not None and self._cancel_event.is_set():
@@ -233,7 +245,7 @@ class AssessmentStrategyAgent:
         self._budget_finalized = self._token_budget_exceeded
         return text
 
-    def _verify(self, draft, ctx, references) -> fact_check.FactCheckResult:
+    def _verify(self, draft, ctx, references, *, previous_check=None) -> fact_check.FactCheckResult:
         if self._token_budget_exceeded:
             result = fact_check.FactCheckResult("unverified", reason="本次模型调用预算已用尽")
         elif len(draft) > config.AI_FACT_CHECK_MAX_DRAFT_CHARS:
@@ -248,7 +260,7 @@ class AssessmentStrategyAgent:
             if self._deadline is not None:
                 deadline = min(deadline, self._deadline - 0.5)
             try:
-                messages = fact_check.messages_for_check(draft, sources)
+                messages = fact_check.messages_for_check(draft, sources, previous_check=previous_check)
                 stream = stream_chat_completion_controlled(
                     self._adapter, messages, temperature=0, max_tokens=limit,
                     tools=None, extra=_thinking_extra(False),
@@ -267,7 +279,19 @@ class AssessmentStrategyAgent:
                 result = fact_check.FactCheckResult("unverified", reason=str(exc))
         result = fact_check.merge_local_checks(result, draft, customer=ctx.customer,
                                               scoring_facts=ctx.scoring_facts or None)
-        self._verification.append({"status": result.status, "issues": result.issues, "reason": result.reason})
+        self._verification.append({"status": result.status, "issues": result.issues, "reason": result.reason,
+                                   "engine_verified_projections": result.verified_projections,
+                                   "recheck": previous_check is not None})
+        return result
+
+    def _verify_reliably(self, draft, ctx, references):
+        result = self._verify(draft, ctx, references)
+        if (result.recheck_recommended and not self._recheck_used and not self._token_budget_exceeded
+                and (self._deadline is None or time.monotonic() < self._deadline - 0.5)
+                and not (self._cancel_event is not None and self._cancel_event.is_set())):
+            # 一轮共享一个机会，调用失败也消耗；同一来源重新完整核对，不直接撤销问题。
+            self._recheck_used = True
+            result = self._verify(draft, ctx, references, previous_check=result)
         return result
 
     def _call_llm(self, messages: list[LLMMessage], template) -> str:
@@ -388,19 +412,19 @@ class AssessmentStrategyAgent:
             raise LLMError("局部核验时间或输出预算已耗尽")
         return result
 
-    def _repair_locally(self, ctx, references, draft, verification) -> str:
+    def _repair_locally(self, ctx, references, draft, verification, *, phase="local_repair") -> str:
         if len(draft) > config.AI_FACT_CHECK_MAX_DRAFT_CHARS:
             raise ValueError("正文超过局部核验长度上限")
         answer = local_quality.parse_answer(draft)
         bad = answer.locate(verification.issues)
         sources = fact_check.build_sources(ctx, references)
         messages = local_quality.messages_for_patch(answer, bad, verification.issues, sources)
-        response = self._quality_call(messages, phase="local_repair")
+        response = self._quality_call(messages, phase=phase)
         text, diagnostic = local_quality.apply_patches(response, answer, bad, sources)
         if any(fact_check._compact(issue["claim"]) in fact_check._compact(text)
                for issue in verification.issues):
             raise ValueError("局部修订仍保留已确认错误的原文")
-        self._local_repairs.append({"operation": "patch", "status": "applied", **diagnostic})
+        self._local_repairs.append({"operation": "patch", "status": "applied", "phase": phase, **diagnostic})
         return text
 
     def _select_reliable(self, ctx, references, draft, verification):
@@ -491,6 +515,8 @@ class AssessmentStrategyAgent:
         self._tool_budget = tools.ToolBudget()
         self._verification = []
         self._local_repairs = []
+        self._recheck_used = False
+        self._final_repairs = 0
         max_iter = min(2, max(1, max_iterations or self._max))
         iterations = 1
         today = datetime.date.today().isoformat()
@@ -534,7 +560,7 @@ class AssessmentStrategyAgent:
             if not draft.strip() and not self._token_budget_exceeded and max_iter > 1:
                 # 空草稿重试一次（不带工具）：避免模型偶发空响应直接带崩整个流程
                 self._tool_warning = "首次生成返回为空，已自动重试"
-                iterations = 2  # 空答重试也占用唯一修订机会。
+                iterations = 2  # 空答重试占用常规修订机会，最终局部恢复单独受限。
                 retry_draft, retry_refs = self._reason(
                     ctx,
                     references,
@@ -567,7 +593,7 @@ class AssessmentStrategyAgent:
         # 检查项按场景裁剪：仅 strategy 要求 json 策略块；仅检索有命中时要求知识引用
         has_knowledge = bool(references)
         text = draft
-        verification = self._verify(text, ctx, references)
+        verification = self._verify_reliably(text, ctx, references)
         critique_text = "\n".join(filter(None, [
             tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
             verification.feedback(),
@@ -589,7 +615,7 @@ class AssessmentStrategyAgent:
                 if not refined.strip():
                     raise ValueError("修订返回空正文")
                 text = refined
-                verification = self._verify(text, ctx, references)
+                verification = self._verify_reliably(text, ctx, references)
             except Exception as exc:
                 # A failed edit must not erase previously generated independent analysis.
                 self._local_repairs.append({"operation": "patch", "status": "failed", "reason": str(exc)})
@@ -599,12 +625,26 @@ class AssessmentStrategyAgent:
                 verification.feedback(),
             ]))
 
-        # One selection and one final whole-answer check are the last recovery path.
+        # 单次选择后，只给最终新发现的已定位问题一次局部修复机会。
         # Unknown/unverified content is not automatically discarded or accepted.
         if verification.status != "passed" or verification.reason:
             try:
+                known = {_issue_identity(issue) for issue in verification.issues}
                 selected = self._select_reliable(ctx, references, text, verification)
-                selected_check = self._verify(selected, ctx, references)
+                selected_check = self._verify_reliably(selected, ctx, references)
+                if (selected_check.status == "issues" and not selected_check.reason
+                        and any(_issue_identity(issue) not in known for issue in selected_check.issues)
+                        and not self._token_budget_exceeded and not self._budget_finalized):
+                    self._final_repairs += 1
+                    self._refine_rounds += 1
+                    iterations += 1
+                    try:
+                        repaired = self._repair_locally(ctx, references, selected, selected_check, phase="final_repair")
+                        selected_check = self._verify_reliably(repaired, ctx, references)
+                        selected = repaired
+                    except Exception as exc:
+                        self._local_repairs.append({"operation": "final_patch", "status": "failed", "reason": str(exc)})
+                        self._check_cancelled()
                 if selected_check.status == "passed" and not selected_check.reason:
                     text, verification = selected, selected_check
                     critique_text = tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge)
@@ -680,6 +720,7 @@ class AssessmentStrategyAgent:
 
     def _timings(self) -> dict[str, Any]:
         return {
+            "fact_rechecks": int(self._recheck_used), "final_repairs": self._final_repairs,
             "rag_ms": self._retrieve_ms,
             **self._rag_timings,
             "llm_calls": list(self._llm_calls),

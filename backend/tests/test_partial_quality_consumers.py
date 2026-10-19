@@ -108,6 +108,63 @@ def test_report_and_pdf_preserve_verified_ai_cards_and_local_notice(db, customer
     assert pdf.startswith(b"%PDF")
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_final_policy_patch_persists_only_verified_cards_and_updates_snapshot(
+    client, customer, db, fake_llm, monkeypatch, stream,
+):
+    from test_chat import FakeAdapter
+
+    source = '账款逾期后，财务负责人应在36小时内完成单据核验，在72小时内取得付款排期。'
+    bad_action = '按制度72小时内取得客户书面付款排期。'
+    fixed_action = '按制度72小时内取得付款排期；建议另行取得书面确认。'
+    wrong = {**SAFE_ITEM, 'title': '回款制度动作', 'action': bad_action}
+    fixed = {**wrong, 'action': fixed_action}
+    draft = '```json\n' + json.dumps({'strategies': [wrong, SAFE_ITEM]}, ensure_ascii=False) + '\n```'
+    answer = local_quality.parse_answer(draft)
+    anchors = [{'source_id': 'knowledge', 'evidence': source}]
+    review = json.dumps({'units': [{'id': u.id, 'decision': 'keep', 'depends_on': [], 'sources': anchors}
+                                   for u in answer.units]})
+    found = json.dumps({'issues': [{'claim': bad_action, 'source_id': 'knowledge', 'evidence': source,
+                                   'reason': '将书面误作制度硬要求，应改为独立建议。'}]})
+    patch = json.dumps({'dependencies': [{'id': u.id, 'depends_on': []} for u in answer.units],
+                        'patches': [{'id': 'u0', 'item': fixed, 'sources': anchors}]})
+
+    def generate(scenario, ctx, customer, db, **kwargs):
+        adapter = ScriptedAdapter([draft, 'not-json', review, found, patch, '{"issues":[]}'])
+        ctx = replace(ctx, knowledge_text=source, references=[])
+        result = AssessmentStrategyAgent(adapter=adapter, max_iterations=1, tools_enabled=False,
+                                         on_event=kwargs.get('on_event')).run(
+            scenario, ctx, customer, db, retrieve_enabled=False)
+        assert len(adapter.calls) == 6 and result.timings['final_repairs'] == 1
+        assert result.timings['verification'][-1]['status'] == 'passed'
+        return result
+
+    snapshot = assessment_history.record_assessment(db, customer, strategy_snapshot=[])
+    monkeypatch.setattr(chat_engine, 'generate', generate)
+    sid = client.post('/api/chat/sessions', json={'customer_id': customer.id}).json()['id']
+    response = client.post(f'/api/chat/sessions/{sid}/messages',
+                           json={'content': '生成策略', 'scenario': 'strategy', 'stream': stream})
+    assert response.status_code == 200
+    done = _parse_sse(response.text)[-1][1] if stream else response.json()
+    final = done['message']
+    assert not final['degraded']
+    assert bad_action not in json.dumps(final, ensure_ascii=False)
+    assert [i['action'] for i in final['strategy_items']] == [fixed_action, SAFE_ITEM['action']]
+    db.expire_all()
+    assert db.get(ChatMessage, final['id']).strategy_items == final['strategy_items']
+    assert db.get(AssessmentHistory, snapshot.id).strategy_snapshot == final['strategy_items']
+    history = client.get(f'/api/chat/sessions/{sid}').json()['messages']
+    assert bad_action not in json.dumps(history, ensure_ascii=False)
+
+    next_adapter = FakeAdapter(chunks=['后续完整答复'])
+    llm_adapter.set_chat_adapter(next_adapter)
+    client.post(f'/api/chat/sessions/{sid}/messages',
+                json={'content': '继续', 'scenario': 'free_qa', 'stream': False})
+    assert next_adapter.calls
+    sent = [m.content for m in next_adapter.calls[0] if m.role == 'assistant']
+    assert all(bad_action not in text for text in sent)
+
+
 VERIFIED_OVERVIEW = "已核实客户当前仍有沟通基础，可继续了解需求。"
 CONTROLLED_SOURCE = VERIFIED_OVERVIEW + "制度规定36小时内核验。建议开展需求访谈。"
 BAD_ACTION = "制度规定72小时内核验。"
