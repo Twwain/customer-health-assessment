@@ -167,6 +167,15 @@ def migrate_add_chat_message_superseded_column(target_engine: Engine = engine) -
     return added
 
 
+def migrate_add_quality_diagnostics(target_engine: Engine = engine) -> None:
+    inspector = inspect(target_engine)
+    if "chat_turn_metrics" in inspector.get_table_names() and "quality_diagnostics" not in {
+        column["name"] for column in inspector.get_columns("chat_turn_metrics")
+    }:
+        with target_engine.begin() as connection:
+            connection.exec_driver_sql("ALTER TABLE chat_turn_metrics ADD COLUMN quality_diagnostics JSON NOT NULL DEFAULT '{}'")
+
+
 def get_db():
     db = SessionLocal()
     try:

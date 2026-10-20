@@ -271,7 +271,7 @@ def build_alert_context(
         if omitted:
             lines.append(f"- 其余 {omitted} 项预警未展开，请优先解读以上高等级预警")
     else:
-        lines.append("- 当前无触发的预警规则，请说明客户整体处于可控状态，并指出需要持续观察的指标。")
+        lines.append("- 当前未触发特定预警规则，不代表没有风险。请结合总分等级、低分因子和数据缺失解读；区分已确认风险、待核实原因与新增建议，不得据此断言整体可控。")
 
     if trend and trend.points:
         low = min(p.total_score for p in trend.points)

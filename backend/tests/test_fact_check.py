@@ -75,22 +75,28 @@ def test_conflict_is_revised_once_then_checked_again():
     assert result.timings["llm_calls"][2]["phase"] == "local_repair"
 
 
-def test_unresolved_conflict_never_causes_second_revision():
-    result, adapter, _ = run_checked([BAD, CONFLICT, BAD, CONFLICT], max_iterations=99)
-    assert result.iterations == 2 and len(adapter.calls) == 4
+def test_unresolved_conflict_stops_after_two_business_repairs():
+    middle = BAD.replace("72", "48")
+    last = BAD.replace("72", "24")
+    conflict_middle = CONFLICT.replace("72", "48")
+    conflict_last = CONFLICT.replace("72", "24")
+    remove = '{"units":[{"id":"u0","decision":"remove","depends_on":[],"sources":[]}]}'
+    result, adapter, _ = run_checked([BAD, CONFLICT, patch_one(middle), conflict_middle,
+                                     patch_one(last), conflict_last, remove], max_iterations=99)
+    assert result.iterations == 3 and len(adapter.calls) == 7
     assert result.timings["verification"][-1]["status"] == "issues"
     assert result.degraded and BAD not in result.text
-    assert "规则" in result.text and any("未通过完整核实" in warning for warning in result.warnings)
+    assert "规则" in result.text and any("尚未修正" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize("reply", ['{"issues":', LLMUnavailableError("核对超时")])
 def test_failed_check_returns_rules_without_claiming_verification_passed(reply):
-    result, adapter, _ = run_checked([GOOD, reply, '{"units":[]}'])
+    result, adapter, _ = run_checked([GOOD, reply, reply, '{"units":[]}'])
     assert result.degraded and result.text != GOOD
-    assert len(adapter.calls) == 3
-    assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "unit_review"]
+    assert len(adapter.calls) == 4
+    assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "verification", "unit_review"]
     assert result.timings["verification"][-1]["status"] == "unverified"
-    assert any("未通过完整核实" in warning for warning in result.warnings)
+    assert any("核对流程未能完成" in warning for warning in result.warnings)
 
 
 def test_fact_check_uses_cancellation_and_remaining_deadline(monkeypatch):

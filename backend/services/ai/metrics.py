@@ -20,6 +20,31 @@ from models import ChatTurnMetric
 logger = logging.getLogger(__name__)
 
 
+def quality_reason(reason):
+    """Persist failure categories, never model quotes, customer content or exception text."""
+    if not reason:
+        return ""
+    for fragment, code in (("自我撤销", "checker_conflict"), ("评分推算", "projection_incomplete"),
+                           ("响应", "checker_protocol"), ("协议", "format_invalid"),
+                           ("格式", "format_invalid"), ("预算", "budget_exhausted"),
+                           ("时限", "timeout"), ("超时", "timeout")):
+        if fragment in str(reason):
+            return code
+    return "verification_incomplete"
+
+
+def quality_diagnostics(timings):
+    return {
+        "checks": [{"status": row.get("status"), "reason": quality_reason(row.get("reason")),
+                    "issues_count": len(row.get("issues") or []), "recheck": bool(row.get("recheck"))}
+                   for row in timings.get("verification", []) if isinstance(row, dict)],
+        "repairs": [{"operation": row.get("operation"), "status": row.get("status"),
+                     "reason": quality_reason(row.get("reason"))}
+                    for row in timings.get("local_repairs", []) if isinstance(row, dict)],
+        "answer_source": timings.get("answer_source", ""),
+    }
+
+
 def _percentile(values: list[int], percentile: float) -> int:
     """返回 nearest-rank 分位数；空样本返回 0。"""
     if not values:
@@ -148,6 +173,7 @@ class TurnMetricObserver:
             queue_high_watermark=int(timings.get("event_queue_high_watermark") or 0),
             warning_count=self.warning_count,
             error_code=self.error_code,
+            quality_diagnostics=quality_diagnostics(timings),
         )
         try:
             cutoff = utcnow() - datetime.timedelta(
@@ -193,6 +219,9 @@ def record_report_metric(db: Any, report: Any, *, elapsed_ms: int) -> None:
                 "llm_call_count": len(calls),
                 "tool_rounds": count(timings.get("tool_rounds")),
                 "refine_rounds": count(timings.get("refine_rounds")),
+                "verification": verification,
+                "local_repairs": timings.get("local_repairs", []),
+                "answer_source": timings.get("answer_source", ""),
             },
             warning_count=len(report.warnings) if isinstance(report.warnings, list) else 0,
             error_code=("report_degraded" if degraded else "" if verified else

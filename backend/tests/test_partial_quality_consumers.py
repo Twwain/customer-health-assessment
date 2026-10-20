@@ -130,12 +130,12 @@ def test_final_policy_patch_persists_only_verified_cards_and_updates_snapshot(
                         'patches': [{'id': 'u0', 'item': fixed, 'sources': anchors}]})
 
     def generate(scenario, ctx, customer, db, **kwargs):
-        adapter = ScriptedAdapter([draft, 'not-json', review, found, patch, '{"issues":[]}'])
+        adapter = ScriptedAdapter([draft, 'not-json', 'not-json', review, found, patch, '{"issues":[]}'])
         ctx = replace(ctx, knowledge_text=source, references=[])
         result = AssessmentStrategyAgent(adapter=adapter, max_iterations=1, tools_enabled=False,
                                          on_event=kwargs.get('on_event')).run(
             scenario, ctx, customer, db, retrieve_enabled=False)
-        assert len(adapter.calls) == 6 and result.timings['final_repairs'] == 1
+        assert len(adapter.calls) == 7 and result.timings['final_repairs'] == 1
         assert result.timings['verification'][-1]['status'] == 'passed'
         return result
 

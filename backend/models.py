@@ -173,6 +173,7 @@ class ChatTurnMetric(Base):
     queue_high_watermark: Mapped[int] = mapped_column(Integer, default=0)
     warning_count: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str] = mapped_column(String(50), default="")
+    quality_diagnostics: Mapped[dict] = mapped_column(JSON, default=dict, comment="核对与修订的非敏感状态记录")
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=utcnow, server_default=func.now(), index=True
     )

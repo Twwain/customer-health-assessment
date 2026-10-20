@@ -222,6 +222,28 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
             }
         )
 
+    if not items and assessment.level in {level.name for level in config.levels[2:]}:
+        for dimension in sorted(assessment.dimensions, key=lambda d: d.score / d.max_score if d.max_score else 1):
+            low = sorted((f for f in dimension.factors if f.score <= 4), key=lambda f: f.score)
+            if not low:
+                continue
+            labels = "、".join(f.label for f in low[:3])
+            items.append({
+                "priority": "recommended", "urgency": "high",
+                "title": f"核实并改善{dimension.name}短板",
+                "reason": f"当前总分{assessment.total_score}，等级「{assessment.level}」；{labels}评分偏低，未命中特定预警不代表没有风险",
+                "action": f"由客户经理核实{labels}的原始资料，区分未填写与实际薄弱项，结合客户反馈制定改善计划并复评",
+                "expected_outcome": "补齐资料并落实短板改善，效果以客户反馈和重新评估为准",
+                "reference": "评分结果与规则建议",
+            })
+            if len(items) >= 3:
+                break
+        if not items:
+            items.append({"priority": "recommended", "urgency": "high", "title": "复盘低分原因并制定改善计划",
+                          "reason": f"当前总分{assessment.total_score}，等级「{assessment.level}」",
+                          "action": "由客户经理核实评分资料、客户反馈与合作变化，确定优先改善事项后重新评估",
+                          "expected_outcome": "明确低分原因与责任分工，按实际改善情况复评", "reference": "评分结果与规则建议"})
+
     if not items:
         items.append(
             {

@@ -94,3 +94,47 @@ def test_invented_segment_prefix_remains_unverified():
         '72小时核验。', {'knowledge': '36小时核验。'},
     )
     assert result.status == 'unverified'
+
+
+def test_format_repair_caller_uses_hot_loaded_internal_task(tmp_path, monkeypatch):
+    from test_local_quality import SAFE, SOURCE, review
+    raw = yaml.safe_load(Path(config.PROMPT_TEMPLATE_PATH).read_text(encoding='utf-8'))
+    path = tmp_path / 'prompts.yaml'
+    monkeypatch.setattr(config, 'PROMPT_TEMPLATE_PATH', str(path))
+    answer = local_quality.parse_answer(SAFE)
+    import json
+    valid = review(answer)
+    invalid = json.loads(valid)
+    invalid['note'] = 'extra'
+    calls = []
+    for marker in ('格式修复版本一', '格式修复版本二'):
+        raw['internal_tasks']['format_repair']['system'] = marker
+        path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding='utf-8')
+        os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 2))
+        adapter = ScriptedAdapter([valid])
+        agent = AssessmentStrategyAgent(adapter=adapter)
+        agent._apply_quality(json.dumps(invalid), [],
+            lambda value: local_quality.apply_review(value, answer, set(), {'knowledge': SOURCE}),
+            phase='unit_review', answer=answer)
+        calls.append(adapter.calls[0][0][-1].content)
+    assert calls == ['格式修复版本一', '格式修复版本二']
+
+
+def test_missing_format_repair_template_does_not_call_model(tmp_path, monkeypatch):
+    import json
+    from test_local_quality import SAFE, SOURCE, review
+    raw = yaml.safe_load(Path(config.PROMPT_TEMPLATE_PATH).read_text(encoding='utf-8'))
+    del raw['internal_tasks']['format_repair']
+    path = tmp_path / 'prompts.yaml'
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding='utf-8')
+    monkeypatch.setattr(config, 'PROMPT_TEMPLATE_PATH', str(path))
+    answer = local_quality.parse_answer(SAFE)
+    invalid = json.loads(review(answer))
+    invalid['note'] = 'extra'
+    adapter = ScriptedAdapter([])
+    agent = AssessmentStrategyAgent(adapter=adapter)
+    with pytest.raises(PromptTemplateError, match='format_repair'):
+        agent._apply_quality(json.dumps(invalid), [],
+            lambda value: local_quality.apply_review(value, answer, set(), {'knowledge': SOURCE}),
+            phase='unit_review', answer=answer)
+    assert not adapter.calls

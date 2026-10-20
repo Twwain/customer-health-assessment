@@ -4,7 +4,7 @@
 - reason：基于量化事实 + 知识检索，调用 LLM 生成评估结论 / 策略
 - retrieve：RAG 工具召回知识（Agent 自带检索能力，而非仅依赖上下文注入）
 - critique：本地格式检查 + 独立模型对照原文核对关键事实
-- refine：常规阶段最多修订一次；最终选择后新发现的问题可再局部修订一次，之后完整核对且不循环
+- refine：常规阶段最多修订两次；每次修订后完整核对，格式恢复单独计数
 - 任意一步 LLM 不可用 → 降级为规则引擎兜底，不中断对话
 
 知识溯源：retrieve 命中的切片经 ``tools.to_reference`` 转为引用，随结论返回，
@@ -102,7 +102,7 @@ class AssessmentStrategyAgent:
         token_budget: int | None = None,
     ) -> None:
         self._adapter = adapter or get_chat_adapter()
-        self._max = min(2, max(1, max_iterations))
+        self._max = min(3, max(1, max_iterations))
         self._tools_enabled = tools_enabled
         self._on_event = on_event
         self._thinking_enabled = thinking_enabled
@@ -286,7 +286,9 @@ class AssessmentStrategyAgent:
 
     def _verify_reliably(self, draft, ctx, references):
         result = self._verify(draft, ctx, references)
-        if (result.recheck_recommended and not self._recheck_used and not self._token_budget_exceeded
+        retry_check = result.recheck_recommended or (result.status == "unverified" and not result.issues
+                      and "评分推算" not in result.reason)
+        if (retry_check and not self._recheck_used and not self._token_budget_exceeded
                 and (self._deadline is None or time.monotonic() < self._deadline - 0.5)
                 and not (self._cancel_event is not None and self._cancel_event.is_set())):
             # 一轮共享一个机会，调用失败也消耗；同一来源重新完整核对，不直接撤销问题。
@@ -412,15 +414,59 @@ class AssessmentStrategyAgent:
             raise LLMError("局部核验时间或输出预算已耗尽")
         return result
 
+    def _apply_quality(self, response, messages, apply, *, phase, answer):
+        try:
+            return apply(response)
+        except ValueError as exc:
+            # Semantic/evidence failures require business repair, never format-only retries.
+            if not any(word in str(exc) for word in ("协议", "字段", "JSON", "Expecting", "delimiter")):
+                raise
+            original_error = exc
+        if phase == "unit_review":
+            try:
+                repaired = local_quality.repair_review_format(response, answer)
+            except ValueError:
+                repaired = None
+            if repaired is not None:
+                result = apply(repaired)
+                self._local_repairs.append({"operation": "format_repair", "status": "applied", "phase": phase})
+                return result
+        # One bounded protocol repair. All source/field/scope validators run again.
+        repair_messages = list(messages) + [LLMMessage(role="user", content=tools.guardrails.wrap_untrusted(
+            json.dumps({"invalid_response": response, "format_error": str(original_error)}, ensure_ascii=False), "tool")),
+            LLMMessage(role="user", content=get_internal_prompt("format_repair"))]
+        repaired = self._quality_call(repair_messages, phase="format_repair")
+        try:
+            original = local_quality._decode(response)
+        except ValueError:
+            original = None
+        if original is not None:
+            candidate = local_quality._decode(repaired)
+            # Compare every consumed semantic field, then run the original strict validator.
+            if local_quality.protocol_semantics(original, review=phase == "unit_review") != local_quality.protocol_semantics(
+                candidate, review=phase == "unit_review"
+            ):
+                raise ValueError("格式修复改变了业务内容")
+        result = apply(repaired)
+        self._local_repairs.append({"operation": "format_repair", "status": "applied", "phase": phase})
+        return result
+
     def _repair_locally(self, ctx, references, draft, verification, *, phase="local_repair") -> str:
         if len(draft) > config.AI_FACT_CHECK_MAX_DRAFT_CHARS:
             raise ValueError("正文超过局部核验长度上限")
         answer = local_quality.parse_answer(draft)
-        bad = answer.locate(verification.issues)
         sources = fact_check.build_sources(ctx, references)
-        messages = local_quality.messages_for_patch(answer, bad, verification.issues, sources)
+        issues = list(verification.issues)
+        if not issues and "评分推算" in verification.reason and ctx.scoring_facts:
+            for expression in fact_check._score_expressions(draft, ctx.scoring_facts):
+                issues.append({"claim": expression["claim"], "source_id": "scoring",
+                               "evidence": sources["scoring"],
+                               "reason": "该评分推算尚未完整核算；补齐合法目标并重算，无法核算则只移除增分数字，保留有依据的行动与事实。"})
+        bad = answer.locate(issues)
+        messages = local_quality.messages_for_patch(answer, bad, issues, sources)
         response = self._quality_call(messages, phase=phase)
-        text, diagnostic = local_quality.apply_patches(response, answer, bad, sources)
+        text, diagnostic = self._apply_quality(response, messages,
+            lambda value: local_quality.apply_patches(value, answer, bad, sources), phase=phase, answer=answer)
         if any(fact_check._compact(issue["claim"]) in fact_check._compact(text)
                for issue in verification.issues):
             raise ValueError("局部修订仍保留已确认错误的原文")
@@ -455,13 +501,15 @@ class AssessmentStrategyAgent:
         messages = local_quality.messages_for_review(answer, bad, verification.issues, sources,
                                                     unverified_units=unverified_units)
         response = self._quality_call(messages, phase="unit_review")
-        text, diagnostic = local_quality.apply_review(response, answer, bad | set(unverified_units), sources)
+        text, diagnostic = self._apply_quality(response, messages,
+            lambda value: local_quality.apply_review(value, answer, bad | set(unverified_units), sources),
+            phase="unit_review", answer=answer)
         self._local_repairs.append({"operation": "selection", "status": "applied", **diagnostic})
         return text
 
     def _refine(self, ctx, references, draft, critique_text, question, today, template, scenario: str = "strategy",
                 verification=None) -> str:
-        if verification is not None and verification.issues:
+        if verification is not None and (verification.issues or "评分推算" in verification.reason):
             return self._repair_locally(ctx, references, draft, verification)
         system_text = template.render_system(today=today)
         knowledge = _format_retrievals(references) or ctx.knowledge_text
@@ -517,7 +565,7 @@ class AssessmentStrategyAgent:
         self._local_repairs = []
         self._recheck_used = False
         self._final_repairs = 0
-        max_iter = min(2, max(1, max_iterations or self._max))
+        max_iter = min(3, max(1, max_iterations or self._max))
         iterations = 1
         today = datetime.date.today().isoformat()
         template = get_template(scenario)
@@ -592,15 +640,17 @@ class AssessmentStrategyAgent:
         # ③ critique → ④ refine 循环（带死循环检测）
         # 检查项按场景裁剪：仅 strategy 要求 json 策略块；仅检索有命中时要求知识引用
         has_knowledge = bool(references)
-        text = draft
+        from .score_preparation import prepare_strategy_scores
+        text, score_repairs = prepare_strategy_scores(draft, customer, ctx.scoring_facts)
+        self._local_repairs.extend(score_repairs)
         verification = self._verify_reliably(text, ctx, references)
         critique_text = "\n".join(filter(None, [
             tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
             verification.feedback(),
         ]))
-        if (
+        while (
             not self._budget_finalized
-            and tools.needs_refine(critique_text)
+            and (tools.needs_refine(critique_text) or "评分推算" in verification.reason)
             and iterations < max_iter
         ):
             iterations += 1
@@ -609,12 +659,13 @@ class AssessmentStrategyAgent:
                 self._on_event("replace", {"text": "", "reason": "refine"})
             try:
                 refined = self._refine(
-                    ctx, references, draft, critique_text, question, today, template, scenario=scenario,
+                    ctx, references, text, critique_text, question, today, template, scenario=scenario,
                     verification=verification,
                 )
                 if not refined.strip():
                     raise ValueError("修订返回空正文")
-                text = refined
+                text, score_repairs = prepare_strategy_scores(refined, customer, ctx.scoring_facts)
+                self._local_repairs.extend(score_repairs)
                 verification = self._verify_reliably(text, ctx, references)
             except Exception as exc:
                 # A failed edit must not erase previously generated independent analysis.
@@ -673,7 +724,8 @@ class AssessmentStrategyAgent:
             return AgentResult(
                 text=safe_text, references=_display_references(references), degraded=True,
                 degraded_items=safe_items,
-                warnings=["AI 关键结论未通过完整核实，已使用评分结果与规则建议。"],
+                warnings=["AI 内容存在尚未修正的问题，已使用评分结果与规则建议。" if verification.issues
+                          else "AI 核对流程未能完成，已使用评分结果与规则建议。"],
                 iterations=iterations, model=getattr(self._adapter, "model", ""),
                 timings={**self._timings(), "answer_source": "rules_after_quality_check"},
             )

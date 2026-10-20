@@ -16,6 +16,7 @@ from database import (
     SessionLocal,
     engine,
     migrate_add_chat_message_superseded_column,
+    migrate_add_quality_diagnostics,
     migrate_drop_legacy_customer_columns,
 )
 import config
@@ -129,6 +130,7 @@ async def lifespan(_: FastAPI):
     # 结构迁移是当前模型契约的一部分，失败时必须阻止服务启动，不能带病运行。
     migrate_drop_legacy_customer_columns()
     migrate_add_chat_message_superseded_column()
+    migrate_add_quality_diagnostics()
     _migrate_required_schema()
     _migrate_legacy_data()
     from services.rag.knowledge_base import (

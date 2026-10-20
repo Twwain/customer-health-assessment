@@ -134,10 +134,10 @@ def test_patch_cannot_keep_known_wrong_quote_even_if_next_model_might_pass(repla
 
 
 def test_incomplete_fact_check_can_recover_only_after_selection_and_full_verification():
-    result, adapter, _ = run([SAFE, '{"issues":', review(quality.parse_answer(SAFE)), CLEAN])
+    result, adapter, _ = run([SAFE, '{"issues":', '{"issues":', review(quality.parse_answer(SAFE)), CLEAN])
     assert not result.degraded and result.text == SAFE
-    assert [item["status"] for item in result.timings["verification"]] == ["unverified", "passed"]
-    assert len(adapter.calls) == 4
+    assert [item["status"] for item in result.timings["verification"]] == ["unverified", "unverified", "passed"]
+    assert len(adapter.calls) == 5
 
 
 def test_all_wrong_or_dependent_content_uses_whole_answer_fallback():
@@ -160,8 +160,9 @@ def test_new_problem_in_final_retained_answer_never_leaks():
 
 def test_final_check_exception_never_marks_selected_content_verified():
     draft = BAD + "\n\n" + SAFE
-    result, adapter, _ = run([draft, ISSUE, review(quality.parse_answer(draft)), LLMUnavailableError("核对不可用")])
-    assert result.degraded and SAFE not in result.text and len(adapter.calls) == 4
+    result, adapter, _ = run([draft, ISSUE, review(quality.parse_answer(draft)),
+                              LLMUnavailableError("核对不可用"), LLMUnavailableError("核对仍不可用")])
+    assert result.degraded and SAFE not in result.text and len(adapter.calls) == 5
     assert result.timings["verification"][-1]["status"] == "unverified"
 
 

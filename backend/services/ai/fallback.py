@@ -45,7 +45,12 @@ def _alert_lines(ctx: ChatContext) -> list[str]:
         for alert in a.alerts:
             lines.append(f"- [{_LEVEL_CN.get(alert.level, alert.level)}] {alert.message}")
     else:
-        lines.append("- 未触发预警规则")
+        lines.append("- 未触发特定预警规则，不代表没有风险；需结合总分等级和低分因子判断。")
+        if a.total_score < 60:
+            for dimension in a.dimensions:
+                low = [factor.label for factor in dimension.factors if factor.score <= 3]
+                if low:
+                    lines.append(f"- 需核实与改善：{'、'.join(low[:3])}。低分可能涉及实际薄弱项或资料缺失，请核实原值。")
     return lines
 
 

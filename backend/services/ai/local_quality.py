@@ -318,3 +318,39 @@ def apply_review(text, answer, known_bad, sources):
         raise ValueError("没有可靠独立分析可保留")
     return answer.render(selected), {"removed": sorted(removed), "kept": sorted(selected),
                                      "dependencies": {key: sorted(value) for key, value in dependencies.items()}}
+
+
+def protocol_semantics(payload, *, review):
+    """Compare server-consumed content; extra fields never become business content."""
+    fields = {"units": {"id", "decision", "depends_on", "sources"}} if review else {
+        "dependencies": {"id", "depends_on"}, "patches": {"id", "text", "item", "sources"},
+    }
+    result = {}
+    for name, allowed in fields.items():
+        if name not in payload:
+            continue
+        entries = payload[name]
+        result[name] = ([{key: value for key, value in entry.items() if key in allowed}
+                         if isinstance(entry, dict) else entry for entry in entries]
+                        if isinstance(entries, list) else entries)
+    return result
+
+
+def repair_review_format(text, answer):
+    """Remove only redundant server-owned kind fields; never alter decisions or evidence."""
+    payload = _decode(text)
+    if set(payload) != {"units"} or not isinstance(payload["units"], list):
+        raise ValueError("无法无损修复审查格式")
+    kinds = {unit.id: unit.kind for unit in answer.units}
+    changed = False
+    for entry in payload["units"]:
+        if not isinstance(entry, dict):
+            raise ValueError("非法审查单元")
+        if "kind" in entry:
+            if entry["kind"] != kinds.get(entry.get("id")):
+                raise ValueError("单元类型与原文不一致")
+            del entry["kind"]
+            changed = True
+    if not changed:
+        raise ValueError("没有可无损修复的字段")
+    return json.dumps(payload, ensure_ascii=False)

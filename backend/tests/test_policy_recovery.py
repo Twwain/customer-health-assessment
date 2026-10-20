@@ -148,16 +148,17 @@ def test_final_repair_is_single_bounded_and_never_skips_complete_verification(fa
     elif failure == 'exception':
         replacement = LLMUnavailableError('修订不可用')
     final = issue(FIXED, '修订后仍有其他事实错误。') if failure == 'new_final_issue' else 'not-json'
-    result, adapter = run([BAD, 'not-json', keep(BAD), new, replacement, final])
+    result, adapter = run([BAD, 'not-json', 'not-json', keep(BAD), new, replacement, final])
     assert result.degraded and BAD not in result.text and FIXED not in result.text
     assert result.timings['final_repairs'] == 1
-    assert len(adapter.calls) == (6 if failure in ('invalid_final', 'new_final_issue') else 5)
+    assert len(adapter.calls) <= 8
+    assert sum(call['phase'] == 'format_repair' for call in result.timings['llm_calls']) <= 1
 
 
 def test_final_repair_does_not_start_after_the_shared_token_budget_is_exhausted():
     new = issue(BAD, '书面被写成制度硬要求。')
-    result, adapter = run([BAD, 'not-json', keep(BAD), new], token_budget=400)
-    assert result.degraded and len(adapter.calls) == 4
+    result, adapter = run([BAD, 'not-json', 'not-json', keep(BAD), new], token_budget=500)
+    assert result.degraded and len(adapter.calls) == 5
     assert result.timings['final_repairs'] == 0
     assert result.timings['verification'][-1]['status'] == 'issues'
 

@@ -21,6 +21,7 @@ class FactCheckResult:
     reason: str = ""
     verified_projections: list[dict] = field(default_factory=list)
     recheck_recommended: bool = False
+    protocol_response: str = ""
 
     def feedback(self) -> str:
         return "\n".join(
@@ -93,7 +94,8 @@ def messages_for_check(draft: str, sources: dict[str, str], *, previous_check=No
     system = get_internal_prompt("fact_check")
     if previous_check is not None:
         payload["previous_check"] = {"status": previous_check.status, "issues": previous_check.issues,
-                                     "reason": previous_check.reason}
+                                     "reason": previous_check.reason,
+                                     "invalid_response": previous_check.protocol_response}
         system += "\n\n" + get_internal_prompt("fact_recheck")
     data = json.dumps(payload, ensure_ascii=False)
     return [LLMMessage(role="system", content=system),
@@ -266,7 +268,7 @@ def _projection_target_evidence(draft, expression, changes, facts, *, scope_over
     if not required or not required.issubset(changes):
         return None
     evidence = {}
-    for index, (start, _, field) in enumerate(references):
+    for index, (start, field_end, field) in enumerate(references):
         if field not in changes:
             continue
         end = references[index + 1][0] if index + 1 < len(references) else len(scope)
@@ -275,6 +277,16 @@ def _projection_target_evidence(draft, expression, changes, facts, *, scope_over
         target = re.escape(_target_anchor_text(changes[field]))
         cue = r"(?:→|->|⇒|提升到|提升至|升级至|改为|达到|升到|升至|到|至|目标(?:值)?(?:为|是|[:：])?|维持(?:不变)?(?:为)?|保持(?:不变)?(?:为)?)"
         normalized = _target_anchor_text(fragment)
+        if "维持原值" in normalized:
+            # Only an explicit, complete unchanged instruction is evidence. Negation,
+            # alternatives and another target in the same fragment remain unverified.
+            instruction = _target_anchor_text(scope[field_end:end])
+            if (changes[field] != facts["factors"][field]["current_value"] or not re.fullmatch(
+                r"[:：]?维持原值[，,。；;、.!！]*", instruction
+            )):
+                return None
+            evidence[field] = fragment
+            continue
         direction = re.search(cue, normalized)
         if scope_override is not None and direction and not re.match(
             r"[\"'‘’“”「」『』\\]*" + target + r"(?![\d.])", normalized[direction.end():],
@@ -308,7 +320,7 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
             if isinstance(strategy, dict) and "score_targets" in strategy:
                 has_declared = True
                 declared = strategy["score_targets"]
-                scope = json.dumps({key: value for key, value in strategy.items() if key != "score_targets"}, ensure_ascii=False)
+                scope = str(strategy.get("action", ""))
         except ValueError:
             has_declared = '"score_targets"' in scope
         matches = ([{"changes": declared}] if has_declared else
@@ -378,7 +390,8 @@ def merge_local_checks(result: FactCheckResult, draft: str, *, customer=None, sc
     issues.extend(issue for issue in result.issues if issue not in issues)
     return FactCheckResult("issues" if issues else result.status, issues=issues[:8], reason=result.reason,
                            verified_projections=result.verified_projections,
-                           recheck_recommended=result.recheck_recommended)
+                           recheck_recommended=result.recheck_recommended,
+                           protocol_response=result.protocol_response)
 
 
 def parse_result(text: str, draft: str, sources: dict[str, str], *, customer=None, scoring_facts=None) -> FactCheckResult:
@@ -440,6 +453,7 @@ def parse_result(text: str, draft: str, sources: dict[str, str], *, customer=Non
                 reason="核对响应包含自我撤销或相互矛盾的问题结论，需重新核实",
                 verified_projections=projections.verified_projections,
                 recheck_recommended=True,
+                protocol_response=text[:32000],
             )
         merged = local_issues + projections.issues + issues
         return FactCheckResult("issues" if merged else projections.status, issues=merged[:8], reason=projections.reason,
