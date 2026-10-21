@@ -222,7 +222,29 @@ def build_degraded_strategies(assessment: AssessmentResponse | None) -> list[dic
             }
         )
 
-    if not items and assessment.level in {level.name for level in config.levels[2:]}:
+    low_total = assessment.level in {level.name for level in config.levels[2:]}
+    # 总分健康、机会建议或已有预警，都不能掩盖明显的维度短板。
+    # 维度按得分率与配置中的亚健康下限比较，不另设固定分值阈值。
+    shortfall_floor = config.levels[1].min_score if len(config.levels) > 1 else 0
+    shortfall_count = 0
+    for dimension in sorted(assessment.dimensions, key=lambda d: d.score / d.max_score if d.max_score else 1):
+        if dimension.max_score <= 0 or dimension.score / dimension.max_score * 100 >= shortfall_floor:
+            continue
+        low = sorted((f for f in dimension.factors if f.score <= 4), key=lambda f: f.score)
+        labels = "、".join(f.label for f in low[:3]) or dimension.name
+        items.append({
+            "priority": "recommended", "urgency": "high" if low_total else "medium",
+            "title": f"核实并改善{dimension.name}短板",
+            "reason": f"当前总分{assessment.total_score}，等级「{assessment.level}」；{dimension.name}得分{dimension.score}/{dimension.max_score}，得分率低于{shortfall_floor:g}%；低分可能来自资料缺失或实际薄弱，需先核实",
+            "action": f"由客户经理核实{labels}的原始资料，区分未填写与实际薄弱项，结合客户反馈制定改善计划并复评",
+            "expected_outcome": "补齐资料并落实短板改善，效果以客户反馈和重新评估为准",
+            "reference": "评分规则建议",
+        })
+        shortfall_count += 1
+        if shortfall_count >= 3:
+            break
+
+    if not items and low_total:
         for dimension in sorted(assessment.dimensions, key=lambda d: d.score / d.max_score if d.max_score else 1):
             low = sorted((f for f in dimension.factors if f.score <= 4), key=lambda f: f.score)
             if not low:

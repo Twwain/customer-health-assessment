@@ -185,6 +185,41 @@ def test_low_score_without_alerts_still_produces_urgent_shortfall_actions():
     assert "可控状态" not in build_alert_context(assessment, None)
 
 
+def _healthy_with_dimensions(*ratios, suggestions=()):
+    from datetime import datetime
+    from schemas import AssessmentResponse, DimensionScore, FactorScoreItem
+    return AssessmentResponse(customer_id=999, customer_name="合成健康客户", total_score=83.7,
+        level="健康", level_color="#22c55e", assessed_at=datetime(2026, 10, 20),
+        risk_alerts=[], alerts=[], suggestions=list(suggestions), dimensions=[
+            DimensionScore(key=f"d{i}", name=f"维度{i}", score=ratio * 14, max_score=14,
+                details=[], factors=[FactorScoreItem(field=f"f{i}", label=f"因子{i}",
+                    score=ratio * 10, detail="资料待核实")]) for i, ratio in enumerate(ratios)])
+
+
+def test_healthy_customer_shortfall_is_recommended_even_with_opportunities():
+    assessment = _healthy_with_dimensions(.9, .3, suggestions=["扩大合作范围"])
+    items = build_degraded_strategies(assessment)
+    assert items[0]["priority"] == "recommended" and "维度1" in items[0]["title"]
+    assert items[0]["urgency"] == "medium"
+    assert "区分未填写与实际薄弱项" in items[0]["action"]
+    assert "预警" not in items[0]["reason"] and "增分" not in str(items)
+    assert any(item["action"] == "扩大合作范围" for item in items)
+    assert assessment.alerts == []
+
+
+def test_shortfalls_rank_by_normalized_score_and_are_limited():
+    assessment = _healthy_with_dimensions(.5, .2, .4, .3)
+    items = build_degraded_strategies(assessment)
+    assert [item["title"] for item in items] == [
+        f"核实并改善维度{i}短板" for i in (1, 3, 2)]
+
+
+def test_healthy_customer_without_obvious_shortfall_keeps_maintenance():
+    items = build_degraded_strategies(_healthy_with_dimensions(.6, .9))
+    assert len(items) == 1 and items[0]["priority"] == "long_term"
+    assert "保持现有服务节奏" in items[0]["title"]
+
+
 def test_quality_diagnostics_keep_categories_without_customer_or_exception_text():
     data = quality_diagnostics({"verification": [{"status": "unverified", "reason": "客户张三：核对响应不完整",
                                                    "issues": [{"claim": "客户私密资料"}]}],
