@@ -123,9 +123,11 @@ def test_risk_factors_worst_case_lowers_score():
 
 def test_ppt_alerts_trigger():
     """V3.0 原始字段与评分阈值预警全部触发。"""
+    from seed_factors import RISKY_FACTORS
     c = base_customer(
         custom_fields={
-            "kcr_02": "[3,2,-1,1]",
+            **RISKY_FACTORS,
+            "kcr_02": "[3,2,-1,1,0]",
             "risk_05": "≥2人变动",
             "risk_06": "下降≥20%",
             "risk_07": "是且进展顺利",

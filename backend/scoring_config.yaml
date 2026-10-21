@@ -28,6 +28,8 @@ dimensions:
         description: 已识别决策链人数 / 应识别决策链人数（%）
         example: "87.5%"
         input:
+          min: 0
+          max: 100
           type: select
           unit: "%"
           options: ["100%", "80-99%", "60-79%", "40-59%", "0-39%"]
@@ -70,7 +72,7 @@ dimensions:
         frequency: 月度
         description: 90天内客户主动分享非公开信息次数
         example: "2次"
-        input: {type: select, options: ["≥3次", "2次", "1次", "0次"]}
+        input: {type: select, min: 0, step: 1, options: ["≥3次", "2次", "1次", "0次"]}
         rule:
           type: threshold
           parser: number
@@ -161,7 +163,7 @@ dimensions:
         frequency: 月度
         description: 有稳定对接的基层岗位数 / 应覆盖基层岗位数（%）
         example: "80%"
-        input: {type: select, unit: "%", options: ["100%", "80-99%", "60-79%", "40-59%", "0-39%"]}
+        input: {type: select, min: 0, max: 100, unit: "%", options: ["100%", "80-99%", "60-79%", "40-59%", "0-39%"]}
         rule:
           type: threshold
           parser: percent
@@ -195,7 +197,7 @@ dimensions:
         frequency: 月度
         description: 半年内对客户基层团队培训/赋能次数
         example: "3次"
-        input: {type: select, options: ["≥4次", "2-3次", "1次", "0次"]}
+        input: {type: select, min: 0, step: 1, options: ["≥4次", "2-3次", "1次", "0次"]}
         rule:
           type: threshold
           parser: number
@@ -214,7 +216,7 @@ dimensions:
         frequency: 月度
         description: 基层问题/需求响应及时率（%）
         example: "83%"
-        input: {type: select, unit: "%", options: ["100%", "80-99%", "60-79%", "0-59%"]}
+        input: {type: select, min: 0, max: 100, unit: "%", options: ["100%", "80-99%", "60-79%", "0-59%"]}
         rule:
           type: threshold
           parser: percent
@@ -253,7 +255,7 @@ dimensions:
         frequency: 季度
         description: 12个月内VP及以上正式互访/会晤次数
         example: "3次"
-        input: {type: select, options: ["≥4次", "2-3次", "1次", "0次"]}
+        input: {type: select, min: 0, step: 1, options: ["≥4次", "2-3次", "1次", "0次"]}
         rule:
           type: threshold
           parser: number
@@ -272,7 +274,7 @@ dimensions:
         frequency: 季度
         description: 生态伙伴计划 + 人才交流 + 联合营销开展项数
         example: "2项"
-        input: {type: select, options: ["≥3项", "2项", "1项", "0项"]}
+        input: {type: select, min: 0, step: 1, options: ["≥3项", "2项", "1项", "0项"]}
         rule:
           type: threshold
           parser: number
@@ -297,7 +299,7 @@ dimensions:
         frequency: 月度
         description: 业务战略与IT规划、行业挑战、痛点地图及方案映射三项完成数
         example: 3项全部完成
-        input: {type: select, options: ["3项全部完成", "2项完成", "1项完成", "0项完成"]}
+        input: {type: select, min: 0, max: 3, step: 1, options: ["3项全部完成", "2项完成", "1项完成", "0项完成"]}
         rule:
           type: threshold
           parser: number
@@ -316,7 +318,7 @@ dimensions:
         frequency: 月度
         description: 核心评估标准、方案对齐、预算与决策周期三项掌握数
         example: 3项全部掌握
-        input: {type: select, options: ["3项全部掌握", "2项掌握", "1项掌握", "0项掌握"]}
+        input: {type: select, min: 0, max: 3, step: 1, options: ["3项全部掌握", "2项掌握", "1项掌握", "0项掌握"]}
         rule:
           type: threshold
           parser: number
@@ -371,7 +373,7 @@ dimensions:
         frequency: 实时
         description: 我司订单 / 客户年度IT总采购额（%）
         example: "33%"
-        input: {type: select, unit: "%", options: ["≥50%", "30-49%", "15-29%", "5-14%", "0-4%"]}
+        input: {type: select, min: 0, max: 100, unit: "%", options: ["≥50%", "30-49%", "15-29%", "5-14%", "0-4%"]}
         rule:
           type: threshold
           parser: percent
@@ -556,7 +558,7 @@ dimensions:
         frequency: 月度
         description: 半年内主动巡检/预警/优化建议次数
         example: 4-5次
-        input: {type: select, options: ["≥6次", "4-5次", "2-3次", "0-1次"]}
+        input: {type: select, min: 0, step: 1, options: ["≥6次", "4-5次", "2-3次", "0-1次"]}
         rule:
           type: threshold
           parser: number
@@ -614,6 +616,231 @@ score_alerts:
     value: 4
     message: "RISK-08C客户自身经营风险得分 {value}，低于4"
     suggestion: "复核行业与财务风险，调整授信、项目节奏和资源投入。"
+
+  - id: kcr_01_low
+    level: medium
+    target: factor
+    key: kcr_01
+    op: lte
+    value: 4
+    message: "KCR-01 决策链识别完整度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对KCR-01 决策链识别完整度核实成因，确定改善行动、责任人与复查时间。"
+  - id: kcr_02_low
+    level: medium
+    target: factor
+    key: kcr_02
+    op: lte
+    value: 4
+    message: "KCR-02 关键人客情等级分布映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对KCR-02 关键人客情等级分布核实成因，确定改善行动、责任人与复查时间。"
+  - id: kcr_04_low
+    level: medium
+    target: factor
+    key: kcr_04
+    op: lte
+    value: 4
+    message: "KCR-04 信息共享度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对KCR-04 信息共享度核实成因，确定改善行动、责任人与复查时间。"
+  - id: kcr_07_low
+    level: medium
+    target: factor
+    key: kcr_07
+    op: lte
+    value: 4
+    message: "KCR-07 关键人支持度分布映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对KCR-07 关键人支持度分布核实成因，确定改善行动、责任人与复查时间。"
+  - id: kcr_08_low
+    level: medium
+    target: factor
+    key: kcr_08
+    op: lte
+    value: 4
+    message: "KCR-08 内部Champion存在度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对KCR-08 内部Champion存在度核实成因，确定改善行动、责任人与复查时间。"
+  - id: kcr_10b_low
+    level: medium
+    target: factor
+    key: kcr_10b
+    op: lte
+    value: 4
+    message: "KCR-10B 决策流程影响力映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对KCR-10B 决策流程影响力核实成因，确定改善行动、责任人与复查时间。"
+  - id: er_01_low
+    level: medium
+    target: factor
+    key: er_01
+    op: lte
+    value: 4
+    message: "ER-01 基层触点覆盖度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对ER-01 基层触点覆盖度核实成因，确定改善行动、责任人与复查时间。"
+  - id: er_05_low
+    level: medium
+    target: factor
+    key: er_05
+    op: lte
+    value: 4
+    message: "ER-05 技术认可度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对ER-05 技术认可度核实成因，确定改善行动、责任人与复查时间。"
+  - id: er_07_low
+    level: medium
+    target: factor
+    key: er_07
+    op: lte
+    value: 4
+    message: "ER-07 培训赋能频次映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对ER-07 培训赋能频次核实成因，确定改善行动、责任人与复查时间。"
+  - id: er_08_low
+    level: medium
+    target: factor
+    key: er_08
+    op: lte
+    value: 4
+    message: "ER-08 问题响应满意度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对ER-08 问题响应满意度核实成因，确定改善行动、责任人与复查时间。"
+  - id: or_01_low
+    level: medium
+    target: factor
+    key: or_01
+    op: lte
+    value: 4
+    message: "OR-01 战略协议层级映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对OR-01 战略协议层级核实成因，确定改善行动、责任人与复查时间。"
+  - id: or_02_low
+    level: medium
+    target: factor
+    key: or_02
+    op: lte
+    value: 4
+    message: "OR-02 高层互访频次映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对OR-02 高层互访频次核实成因，确定改善行动、责任人与复查时间。"
+  - id: or_06_low
+    level: medium
+    target: factor
+    key: or_06
+    op: lte
+    value: 4
+    message: "OR-06 生态合作嵌入度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对OR-06 生态合作嵌入度核实成因，确定改善行动、责任人与复查时间。"
+  - id: ci_01_low
+    level: medium
+    target: factor
+    key: ci_01
+    op: lte
+    value: 4
+    message: "CI-01 客户业务战略理解度（含痛点映射）映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对CI-01 客户业务战略理解度（含痛点映射）核实成因，确定改善行动、责任人与复查时间。"
+  - id: ci_03_low
+    level: medium
+    target: factor
+    key: ci_03
+    op: lte
+    value: 4
+    message: "CI-03 决策标准掌握度（含预算与周期）映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对CI-03 决策标准掌握度（含预算与周期）核实成因，确定改善行动、责任人与复查时间。"
+  - id: ci_05_low
+    level: medium
+    target: factor
+    key: ci_05
+    op: lte
+    value: 4
+    message: "CI-05 价值量化与ROI呈现映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对CI-05 价值量化与ROI呈现核实成因，确定改善行动、责任人与复查时间。"
+  - id: his_02_low
+    level: medium
+    target: factor
+    key: his_02
+    op: lte
+    value: 4
+    message: "HIS-02 年均合作金额趋势映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对HIS-02 年均合作金额趋势核实成因，确定改善行动、责任人与复查时间。"
+  - id: his_04_low
+    level: medium
+    target: factor
+    key: his_04
+    op: lte
+    value: 4
+    message: "HIS-04 钱包份额(Wallet Share)映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对HIS-04 钱包份额(Wallet Share)核实成因，确定改善行动、责任人与复查时间。"
+  - id: his_06_low
+    level: medium
+    target: factor
+    key: his_06
+    op: lte
+    value: 4
+    message: "HIS-06 续约与增购映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对HIS-06 续约与增购核实成因，确定改善行动、责任人与复查时间。"
+  - id: his_09_low
+    level: medium
+    target: factor
+    key: his_09
+    op: lte
+    value: 4
+    message: "HIS-09 NPS/客户满意度映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对HIS-09 NPS/客户满意度核实成因，确定改善行动、责任人与复查时间。"
+  - id: risk_05_low
+    level: medium
+    target: factor
+    key: risk_05
+    op: lte
+    value: 4
+    message: "RISK-05 关键人变动预警映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对RISK-05 关键人变动预警核实成因，确定改善行动、责任人与复查时间。"
+  - id: risk_06_low
+    level: medium
+    target: factor
+    key: risk_06
+    op: lte
+    value: 4
+    message: "RISK-06 互动频次下降映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对RISK-06 互动频次下降核实成因，确定改善行动、责任人与复查时间。"
+  - id: risk_07_low
+    level: medium
+    target: factor
+    key: risk_07
+    op: lte
+    value: 4
+    message: "RISK-07 竞品POC/试点映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对RISK-07 竞品POC/试点核实成因，确定改善行动、责任人与复查时间。"
+  - id: risk_08b_low
+    level: medium
+    target: factor
+    key: risk_08b
+    op: lte
+    value: 4
+    message: "RISK-08B 客户费力度CES映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对RISK-08B 客户费力度CES核实成因，确定改善行动、责任人与复查时间。"
+  - id: risk_08c_low
+    level: medium
+    target: factor
+    key: risk_08c
+    op: lte
+    value: 4
+    message: "RISK-08C 客户自身经营风险映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对RISK-08C 客户自身经营风险核实成因，确定改善行动、责任人与复查时间。"
+  - id: svc_03_low
+    level: medium
+    target: factor
+    key: svc_03
+    op: lte
+    value: 4
+    message: "SVC-03 故障响应时效映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对SVC-03 故障响应时效核实成因，确定改善行动、责任人与复查时间。"
+  - id: svc_04_low
+    level: medium
+    target: factor
+    key: svc_04
+    op: lte
+    value: 4
+    message: "SVC-04 故障解决效率映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对SVC-04 故障解决效率核实成因，确定改善行动、责任人与复查时间。"
+  - id: svc_05_low
+    level: medium
+    target: factor
+    key: svc_05
+    op: lte
+    value: 4
+    message: "SVC-05 主动服务频次映射分 {value}/10，不高于4分，存在明确短板"
+    suggestion: "针对SVC-05 主动服务频次核实成因，确定改善行动、责任人与复查时间。"
 
 trend_alerts:
   - id: consecutive_two_quarter_decline

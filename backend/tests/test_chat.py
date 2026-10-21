@@ -498,7 +498,8 @@ def test_person_scale_without_complete_individual_values_requires_verification(c
 def test_alert_context_lists_alerts(db, customer):
     ctx = context_builder.build_context(db, customer)
     assert "待解读的预警" in ctx.alert_text
-    assert "RISK维度" in ctx.alert_text
+    assert "规则 id：risk_dimension_low" in ctx.alert_text
+    assert "不能据此确认业务风险" in ctx.alert_text
 
 
 # ══════════════════════════ 策略解析与降级 ══════════════════════════════════
@@ -599,7 +600,7 @@ def test_degraded_strategies_from_rule_engine(db, customer):
 
 def test_alert_consumers_include_complete_v3_set(db, customer):
     customer.custom_fields = {
-        "kcr_02": "[3,2,-1,1]",
+        "kcr_02": "[3,2,-1,1,0]",
         "risk_08b": "高(<60%)",
         "risk_08c": "危机",
         "risk_07": "是且进展顺利",
@@ -614,7 +615,7 @@ def test_alert_consumers_include_complete_v3_set(db, customer):
     db.commit()
 
     assessment = tools.score_query(customer)
-    assert {alert.id for alert in assessment.alerts} == {
+    assert {alert.id for alert in assessment.alerts} >= {
         "key_person_opposition",
         "kcr_dimension_low",
         "risk_dimension_low",
@@ -624,8 +625,10 @@ def test_alert_consumers_include_complete_v3_set(db, customer):
     }
 
     ctx = context_builder.build_context(db, customer, assessment=assessment)
-    assert ctx.alert_text.count("（规则 id：") == 6
-    assert "预警未展开" not in ctx.alert_text
+    assert ctx.alert_text.count("（规则 id：") == context_builder.MAX_ALERTS_IN_AI_CONTEXT
+    assert "预警未展开" in ctx.alert_text
+    assert "svc_03_data_gap" in {alert.id for alert in assessment.alerts}
+    assert "risk_07_low" in {alert.id for alert in assessment.alerts}
 
     items = strategy.build_degraded_strategies(assessment)
     assert len(items) <= strategy.MAX_DEGRADED_STRATEGIES

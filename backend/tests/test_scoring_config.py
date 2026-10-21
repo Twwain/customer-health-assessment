@@ -12,6 +12,7 @@ import pytest
 
 from models import Customer
 from factories import MAX_FACTORS
+from seed_factors import RISKY_FACTORS
 from services.health_score import HealthScoreEngine
 from services.scoring.config_driven import ConfigDrivenStrategy
 from services.scoring.config_loader import (
@@ -224,7 +225,8 @@ def test_risk_factors_worst_case_lower_score():
 def test_v3_alerts_cover_raw_and_score_triggers():
     c = make_customer(
         custom_fields={
-            "kcr_02": "[3,2,-1,1]",
+            **RISKY_FACTORS,
+            "kcr_02": "[3,2,-1,1,0]",
             "risk_05": "≥2人变动",
             "risk_06": "下降≥20%",
             "risk_07": "是且进展顺利",
@@ -253,7 +255,7 @@ def test_v3_trend_alert_matches_latest_docx_rule():
 
 @pytest.mark.parametrize(("value", "expected"), [
     ([3, 2, -1, 0, 0], True),
-    ("[3,2,-1,1]", True),
+    ("[3,2,-1,1]", False),
     (["3", "2", "-1", "0", "0"], True),
     ([2, 1, 0, 0, 0], False),
     ("1.5-1.9", False),
@@ -262,7 +264,7 @@ def test_v3_trend_alert_matches_latest_docx_rule():
     ("[-10,3,0,0,0]", False),
     ([3, 2, -1.001, 0, 0], False),
     ("[3,2,-1.001,0,0]", False),
-    ([3, 2, -1.0, 0, 0], True),
+    ([3, 2, -1.0, 0, 0], False),
     ("[3,2,-1,1", False),
     (None, False),
 ])

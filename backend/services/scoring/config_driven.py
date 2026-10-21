@@ -8,13 +8,15 @@
 from __future__ import annotations
 
 import datetime
+import json
+import math
 
 from database import utcnow
 from models import Customer
 from schemas import AlertItem, AssessmentResponse, DimensionScore, FactorScoreItem
 
 from .base import ScoringStrategy
-from .config_loader import ScoringConfig, load_scoring_config, sub_dimension_of
+from .config_loader import KEY_PERSON_COUNT, ScoringConfig, load_scoring_config, sub_dimension_of
 from .rules import (
     DimensionResult,
     evaluate_condition,
@@ -22,7 +24,53 @@ from .rules import (
     first_condition_field,
     render_detail,
     resolve_field,
+    resolve_value,
 )
+
+
+def _valid_alert_value(factor, value) -> bool:
+    """缺失及非法填报不能凭默认计分确认为业务风险。兼容历史数值填报。"""
+    if value is None or isinstance(value, str) and not value.strip():
+        return False
+    spec = factor.input
+    if spec.type == "key_person_levels":
+        try:
+            items = json.loads(value) if isinstance(value, str) else value
+        except (ValueError, TypeError):
+            return False
+        return (isinstance(items, (list, tuple)) and len(items) == KEY_PERSON_COUNT
+                and all(not isinstance(item, bool) and str(item) in spec.options for item in items))
+    if spec.options and value in spec.options and not isinstance(value, bool):
+        return True
+    if spec.type in ("number", "slider") or factor.rule.type == "threshold":
+        # 旧数据允许原始数字；不从任意非法字符串中截取数字来制造已确认预警。
+        try:
+            number = float(value)
+        except (ValueError, TypeError):
+            return False
+        return (not isinstance(value, bool) and math.isfinite(number)
+                and (spec.min is None or number >= spec.min)
+                and (spec.max is None or number <= spec.max)
+                and (not spec.step or math.isclose((number - (spec.min or 0)) / spec.step,
+                     round((number - (spec.min or 0)) / spec.step), abs_tol=1e-8)))
+    if spec.type == "bool":
+        return isinstance(value, bool)
+    if spec.type == "date":
+        try:
+            datetime.date.fromisoformat(str(value))
+            return True
+        except ValueError:
+            return False
+    return not spec.options and isinstance(value, str) and bool(value.strip())
+
+
+def _condition_fields(condition):
+    """遍历全部条件叶子，避免复合条件绕过因子资料合法性检查。"""
+    if condition.field:
+        yield condition.field, condition.source
+    for child in condition.children:
+        yield from _condition_fields(child)
+
 
 class ConfigDrivenStrategy(ScoringStrategy):
     """读取 scoring_config.yaml 计算基础客情分。"""
@@ -80,13 +128,22 @@ class ConfigDrivenStrategy(ScoringStrategy):
         """按配置生成风险预警与建议（顺序即配置顺序）。"""
         alerts: list[AlertItem] = []
         suggestions: list[str] = []
+        alert_suggestions: dict[str, str] = {}
+        related_fields: dict[str, str] = {}
+        definitions = {f.field: f for dim in config.enabled_dimensions for f in dim.enabled_factors}
+        gaps = {field for field, factor in definitions.items()
+                if not _valid_alert_value(factor, resolve_value(c, factor))}
 
         for rule in config.alerts:
+            if any(field in gaps and definitions[field].source == source
+                   for field, source in _condition_fields(rule.when)):
+                continue
             if not evaluate_condition(rule.when, c, today):
                 continue
             # 复合条件（all/any）顶层无 field，向下取第一个叶子字段供 {value} 渲染
             field_name, source = first_condition_field(rule.when)
             value = resolve_field(c, field_name, source) if field_name else None
+            related_fields[rule.id] = field_name
             alerts.append(
                 AlertItem(
                     id=rule.id,
@@ -95,7 +152,7 @@ class ConfigDrivenStrategy(ScoringStrategy):
                 )
             )
             if rule.suggestion:
-                suggestions.append(rule.suggestion)
+                alert_suggestions[rule.id] = rule.suggestion
 
         dimensions = {result.key: result for result in results}
         factors = {
@@ -122,23 +179,50 @@ class ConfigDrivenStrategy(ScoringStrategy):
                 factor = factors.get(rule.key)
                 if factor is None:
                     continue
+                if rule.key in gaps:
+                    continue
                 value = factor.score
 
             if not comparisons[rule.op](value, rule.value):
                 continue
+            message = render_detail(rule.message, value=round(value, 1))
+            level = rule.level
+            if rule.target == "dimension":
+                dim = next(dim for dim in config.enabled_dimensions if dim.key == rule.key)
+                if any(f.field in gaps for f in dim.enabled_factors):
+                    level = "low"
+                    message = (f"{dim.name}得分率 {round(value, 1)}%，包含缺失或非法资料的默认计分；"
+                               "需先核实资料，不能据此确认业务风险")
+            if rule.target == "factor":
+                related_fields[rule.id] = rule.key
             alerts.append(
                 AlertItem(
                     id=rule.id,
-                    level=rule.level,
-                    message=render_detail(rule.message, value=round(value, 1)),
+                    level=level,
+                    message=message,
                 )
             )
             if rule.suggestion:
-                suggestions.append(rule.suggestion)
+                alert_suggestions[rule.id] = rule.suggestion
 
         for opportunity in config.opportunities:
             if evaluate_condition(opportunity.when, c, today):
                 suggestions.append(opportunity.suggestion)
+
+        # 同因子专项严重预警覆盖通用低分预警，维度/趋势预警保持独立。
+        priorities = {"low": 0, "medium": 1, "high": 2}
+        best = {}
+        for alert in alerts:
+            field = related_fields.get(alert.id)
+            if field and (field not in best or priorities[alert.level] > priorities[best[field].level]):
+                best[field] = alert
+        alerts = [a for a in alerts if not related_fields.get(a.id)
+                  or best[related_fields[a.id]] is a]
+        suggestions = [alert_suggestions[a.id] for a in alerts if a.id in alert_suggestions] + suggestions
+        for field in sorted(gaps):
+            factor = definitions[field]
+            alerts.append(AlertItem(id=f"{field}_data_gap", level="low",
+                message=f"{factor.label}资料缺失或取值非法，当前计分仅作默认参考，需核实后判断"))
 
         return alerts, suggestions
 
