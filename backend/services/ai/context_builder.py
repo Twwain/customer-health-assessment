@@ -228,6 +228,10 @@ def _assessment_section(a: AssessmentResponse) -> str:
     else:
         lines.append("- 规则引擎预警：无")
 
+    low_score_note = _low_score_without_detail(a)
+    if low_score_note:
+        lines.append(low_score_note)
+
     if a.suggestions:
         lines.append("- 规则引擎建议（供参考，可在此基础上深化）：")
         suggestions, omitted = _suggestions_for_ai(a, selected_alerts)
@@ -254,6 +258,18 @@ def _trend_section(t: AssessmentTrendResponse | None) -> str:
     return "\n".join(lines)
 
 
+def _low_score_without_detail(assessment: AssessmentResponse) -> str:
+    scoring = load_scoring_config()
+    factor_rule_ids = {rule.id for rule in scoring.score_alerts if rule.target == "factor"}
+    factor_rule_ids.update(rule.id for rule in scoring.alerts)
+    if (assessment.total_score < scoring.levels[0].min_score
+            and not any(alert.id in factor_rule_ids for alert in assessment.alerts)):
+        return ("- 低分分析状态：总分低于健康档门槛，但没有因子明细业务预警；"
+                "维度/趋势预警和资料待核实提示不等于已查明业务原因。"
+                "现有数据可用于分析中档因子累积、维度失衡或资料缺口，原因尚待核实。")
+    return ""
+
+
 def build_alert_context(
     assessment: AssessmentResponse | None,
     trend: AssessmentTrendResponse | None,
@@ -272,6 +288,10 @@ def build_alert_context(
             lines.append(f"- 其余 {omitted} 项预警未展开，请优先解读以上高等级预警")
     else:
         lines.append("- 当前未触发特定预警规则，不代表没有风险。请结合总分等级、低分因子和数据缺失解读；区分已确认风险、待核实原因与新增建议，不得据此断言整体可控。")
+
+    low_score_note = _low_score_without_detail(assessment)
+    if low_score_note:
+        lines.append(low_score_note)
 
     if trend and trend.points:
         low = min(p.total_score for p in trend.points)
