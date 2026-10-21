@@ -4,7 +4,7 @@
 - reason：基于量化事实 + 知识检索，调用 LLM 生成评估结论 / 策略
 - retrieve：RAG 工具召回知识（Agent 自带检索能力，而非仅依赖上下文注入）
 - critique：本地格式检查 + 独立模型对照原文核对关键事实
-- refine：常规阶段最多修订两次；每次修订后完整核对，格式恢复单独计数
+- refine：按配置限定恢复轮数；业务错误修订后完整核对，核对异常只重试核对
 - 任意一步 LLM 不可用 → 降级为规则引擎兜底，不中断对话
 
 知识溯源：retrieve 命中的切片经 ``tools.to_reference`` 转为引用，随结论返回，
@@ -102,7 +102,7 @@ class AssessmentStrategyAgent:
         token_budget: int | None = None,
     ) -> None:
         self._adapter = adapter or get_chat_adapter()
-        self._max = min(3, max(1, max_iterations))
+        self._max = min(21, max(1, max_iterations))
         self._tools_enabled = tools_enabled
         self._on_event = on_event
         self._thinking_enabled = thinking_enabled
@@ -252,7 +252,7 @@ class AssessmentStrategyAgent:
             result = fact_check.FactCheckResult("unverified", reason="正文超过核对长度上限，未截断后冒充完整核对")
         else:
             if self._on_event:
-                self._on_event("stage", {"stage": "verification", "message": "正在依据原文核对关键事实"})
+                self._on_event("stage", {"stage": "verification", "message": f"正在第 {len(self._verification) + 1} 次核对关键事实"})
             sources = fact_check.build_sources(ctx, references)
             usage = {}
             limit = max(1, min(config.AI_FACT_CHECK_MAX_TOKENS, self._token_budget - self._total_tokens))
@@ -280,6 +280,8 @@ class AssessmentStrategyAgent:
         result = fact_check.merge_local_checks(result, draft, customer=ctx.customer,
                                               scoring_facts=ctx.scoring_facts or None)
         self._verification.append({"status": result.status, "issues": result.issues, "reason": result.reason,
+                                   "unverified_projections": result.unverified_projections,
+                                   "disputed_issues": result.disputed_issues,
                                    "engine_verified_projections": result.verified_projections,
                                    "recheck": previous_check is not None})
         return result
@@ -456,7 +458,7 @@ class AssessmentStrategyAgent:
             raise ValueError("正文超过局部核验长度上限")
         answer = local_quality.parse_answer(draft)
         sources = fact_check.build_sources(ctx, references)
-        issues = list(verification.issues)
+        issues = list(verification.issues) + list(verification.unverified_projections)
         if not issues and "评分推算" in verification.reason and ctx.scoring_facts:
             for expression in fact_check._score_expressions(draft, ctx.scoring_facts):
                 issues.append({"claim": expression["claim"], "source_id": "scoring",
@@ -470,11 +472,13 @@ class AssessmentStrategyAgent:
         if any(fact_check._compact(issue["claim"]) in fact_check._compact(text)
                for issue in verification.issues):
             raise ValueError("局部修订仍保留已确认错误的原文")
+        if fact_check._compact(text) == fact_check._compact(draft):
+            raise ValueError("局部修订没有改变正文，切换可靠内容选择")
         self._local_repairs.append({"operation": "patch", "status": "applied", "phase": phase, **diagnostic})
         return text
 
     def _select_reliable(self, ctx, references, draft, verification):
-        """Select existing independent units once; never generate business text here."""
+        """Select existing independent units; never generate business text here."""
         if len(draft) > config.AI_FACT_CHECK_MAX_DRAFT_CHARS:
             raise ValueError("正文超过局部核验长度上限")
         answer = local_quality.parse_answer(draft)
@@ -483,7 +487,7 @@ class AssessmentStrategyAgent:
         unverified_units = {}
         unit_checks = []
         for unit in answer.units:
-            if unit.kind == "heading":
+            if unit.kind in {"heading", "label"}:
                 continue
             checked = fact_check.parse_result(
                 '{"issues":[],"score_projections":[]}', unit.text, dict(sources), customer=ctx.customer,
@@ -509,7 +513,7 @@ class AssessmentStrategyAgent:
 
     def _refine(self, ctx, references, draft, critique_text, question, today, template, scenario: str = "strategy",
                 verification=None) -> str:
-        if verification is not None and (verification.issues or "评分推算" in verification.reason):
+        if verification is not None and (verification.issues or verification.unverified_projections or "评分推算" in verification.reason):
             return self._repair_locally(ctx, references, draft, verification)
         system_text = template.render_system(today=today)
         knowledge = _format_retrievals(references) or ctx.knowledge_text
@@ -565,7 +569,7 @@ class AssessmentStrategyAgent:
         self._local_repairs = []
         self._recheck_used = False
         self._final_repairs = 0
-        max_iter = min(3, max(1, max_iterations or self._max))
+        max_iter = min(21, max(1, max_iterations or self._max))
         iterations = 1
         today = datetime.date.today().isoformat()
         template = get_template(scenario)
@@ -648,12 +652,34 @@ class AssessmentStrategyAgent:
             tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
             verification.feedback(),
         ]))
+        seen_drafts = {fact_check._compact(text)}
+        unchanged_repairs = 0
+        disputed_checks = 0
         while (
             not self._budget_finalized
-            and (tools.needs_refine(critique_text) or "评分推算" in verification.reason)
+            and not self._token_budget_exceeded
+            and (verification.status != "passed" or verification.reason or tools.needs_refine(critique_text))
             and iterations < max_iter
         ):
             iterations += 1
+            self._check_cancelled()
+            if self._on_event:
+                self._on_event("stage", {"stage": "verification", "message": f"正在第 {iterations - 1} 轮修订与复核"})
+            if (verification.status == "unverified" and not verification.issues
+                    and not verification.unverified_projections and "评分推算" not in verification.reason):
+                # A broken checker is not evidence that the answer is wrong. Retry the
+                # checker on the same text before spending any business repair round.
+                verification = self._verify(text, ctx, references, previous_check=verification)
+                disputed_checks = disputed_checks + 1 if verification.disputed_issues else 0
+                if disputed_checks >= 2:
+                    self._local_repairs.append({"operation": "recovery_switch", "status": "completed",
+                                                "reason": "争议核对连续自我撤销，切换独立单元选择"})
+                    break
+                critique_text = "\n".join(filter(None, [
+                    tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
+                    verification.feedback(),
+                ]))
+                continue
             self._refine_rounds += 1
             if not verification.issues and self._on_event:
                 self._on_event("replace", {"text": "", "reason": "refine"})
@@ -664,38 +690,85 @@ class AssessmentStrategyAgent:
                 )
                 if not refined.strip():
                     raise ValueError("修订返回空正文")
-                text, score_repairs = prepare_strategy_scores(refined, customer, ctx.scoring_facts)
+                candidate, score_repairs = prepare_strategy_scores(refined, customer, ctx.scoring_facts)
                 self._local_repairs.extend(score_repairs)
+                fingerprint = fact_check._compact(candidate)
+                if fingerprint in seen_drafts:
+                    self._local_repairs.append({"operation": "recovery_switch", "status": "completed",
+                                                "reason": "修订返回相同或循环正文，切换可靠内容选择"})
+                    break
+                seen_drafts.add(fingerprint)
+                unchanged_repairs = 0
+                text = candidate
                 verification = self._verify_reliably(text, ctx, references)
             except Exception as exc:
                 # A failed edit must not erase previously generated independent analysis.
                 self._local_repairs.append({"operation": "patch", "status": "failed", "reason": str(exc)})
                 self._check_cancelled()
+                unchanged_repairs += 1
+                if "没有改变正文" in str(exc) or unchanged_repairs >= 2:
+                    self._local_repairs.append({"operation": "recovery_switch", "status": "completed",
+                                                "reason": "连续局部修复未产生有效正文，切换可靠内容选择"})
+                    break
             critique_text = "\n".join(filter(None, [
                 tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge),
                 verification.feedback(),
             ]))
 
-        # 单次选择后，只给最终新发现的已定位问题一次局部修复机会。
-        # Unknown/unverified content is not automatically discarded or accepted.
+        # Selection changes the answer, not the shared recovery budget. Continue
+        # repairing/rechecking surviving content while ordinary rounds remain.
+        # Retain the existing one-off safety repair for a newly discovered issue
+        # when the ordinary allowance was already exhausted.
         if verification.status != "passed" or verification.reason:
             try:
                 known = {_issue_identity(issue) for issue in verification.issues}
                 selected = self._select_reliable(ctx, references, text, verification)
                 selected_check = self._verify_reliably(selected, ctx, references)
-                if (selected_check.status == "issues" and not selected_check.reason
-                        and any(_issue_identity(issue) not in known for issue in selected_check.issues)
-                        and not self._token_budget_exceeded and not self._budget_finalized):
-                    self._final_repairs += 1
-                    self._refine_rounds += 1
+                final_attempts = 0
+                final_seen = {fact_check._compact(selected)}
+                select_again = False
+                disputed_checks = 0
+                while ((selected_check.status != "passed" or selected_check.reason)
+                       and not self._token_budget_exceeded and not self._budget_finalized
+                       and (iterations < max_iter or (
+                           final_attempts == 0 and selected_check.status == "issues" and not selected_check.reason
+                           and any(_issue_identity(issue) not in known for issue in selected_check.issues)))):
+                    self._check_cancelled()
+                    final_attempts += 1
                     iterations += 1
+                    if self._on_event:
+                        self._on_event("stage", {"stage": "verification",
+                            "message": f"正在第 {iterations - 1} 轮修订与复核"})
                     try:
-                        repaired = self._repair_locally(ctx, references, selected, selected_check, phase="final_repair")
-                        selected_check = self._verify_reliably(repaired, ctx, references)
-                        selected = repaired
+                        if select_again:
+                            candidate = self._select_reliable(ctx, references, selected, selected_check)
+                            if fact_check._compact(candidate) in final_seen:
+                                raise ValueError("可靠内容筛选未产生新的可核对正文")
+                            select_again = False
+                        elif (selected_check.status == "unverified" and not selected_check.issues
+                              and not selected_check.unverified_projections and "评分推算" not in selected_check.reason):
+                            selected_check = self._verify(selected, ctx, references, previous_check=selected_check)
+                            disputed_checks = disputed_checks + 1 if selected_check.disputed_issues else 0
+                            select_again = disputed_checks >= 2
+                            continue
+                        else:
+                            self._final_repairs += 1
+                            self._refine_rounds += 1
+                            candidate = self._repair_locally(ctx, references, selected, selected_check, phase="final_repair")
+                            candidate, score_repairs = prepare_strategy_scores(candidate, customer, ctx.scoring_facts)
+                            self._local_repairs.extend(score_repairs)
+                            if fact_check._compact(candidate) in final_seen:
+                                raise ValueError("最终修订返回相同或循环正文")
+                        final_seen.add(fact_check._compact(candidate))
+                        selected_check = self._verify_reliably(candidate, ctx, references)
+                        selected = candidate
+                        disputed_checks = 0
                     except Exception as exc:
                         self._local_repairs.append({"operation": "final_patch", "status": "failed", "reason": str(exc)})
                         self._check_cancelled()
+                        if select_again:
+                            break
+                        select_again = True
                 if selected_check.status == "passed" and not selected_check.reason:
                     text, verification = selected, selected_check
                     critique_text = tools.critique(text, ctx, scenario=scenario, has_knowledge=has_knowledge)

@@ -22,11 +22,13 @@ class FactCheckResult:
     verified_projections: list[dict] = field(default_factory=list)
     recheck_recommended: bool = False
     protocol_response: str = ""
+    unverified_projections: list[dict] = field(default_factory=list)
+    disputed_issues: list[dict] = field(default_factory=list)
 
     def feedback(self) -> str:
         return "\n".join(
             f"事实核对：草稿『{i['claim']}』；原文[{i['source_id']}]『{i['evidence']}』；{i['reason']}"
-            for i in self.issues
+            for i in self.issues + self.unverified_projections
         )
 
 
@@ -96,6 +98,7 @@ def messages_for_check(draft: str, sources: dict[str, str], *, previous_check=No
         payload["previous_check"] = {"status": previous_check.status, "issues": previous_check.issues,
                                      "reason": previous_check.reason,
                                      "invalid_response": previous_check.protocol_response}
+        payload["previous_check"]["disputed_issues"] = previous_check.disputed_issues
         system += "\n\n" + get_internal_prompt("fact_recheck")
     data = json.dumps(payload, ensure_ascii=False)
     return [LLMMessage(role="system", content=system),
@@ -252,7 +255,7 @@ def _target_anchor_text(value):
     return _compact(unicodedata.normalize("NFKC", str(value))).casefold()
 
 
-def _projection_target_evidence(draft, expression, changes, facts, *, scope_override=None):
+def _projection_target_evidence(draft, expression, changes, facts, *, scope_override=None, diagnostics=None):
     """覆盖相关段落的因子，目标值须锚定到对应因子原文；不确定则未完成。"""
     scope = _projection_scope(draft, expression) if scope_override is None else scope_override
     references = []
@@ -266,6 +269,9 @@ def _projection_target_evidence(draft, expression, changes, facts, *, scope_over
     required = {field for _, _, field in references
                 if expression["dimension"] == "total" or facts["factors"][field]["dimension_key"] == expression["dimension"]}
     if not required or not required.issubset(changes):
+        if diagnostics is not None:
+            diagnostics.append("该段未定位到相关因子" if not required else
+                               "遗漏目标因子：" + ", ".join(sorted(required - set(changes))))
         return None
     evidence = {}
     for index, (start, field_end, field) in enumerate(references):
@@ -284,6 +290,8 @@ def _projection_target_evidence(draft, expression, changes, facts, *, scope_over
             if (changes[field] != facts["factors"][field]["current_value"] or not re.fullmatch(
                 r"[:：]?维持原值[，,。；;、.!！]*", instruction
             )):
+                if diagnostics is not None:
+                    diagnostics.append(field + "的维持原值指令存在否定、冲突或目标不符")
                 return None
             evidence[field] = fragment
             continue
@@ -291,9 +299,13 @@ def _projection_target_evidence(draft, expression, changes, facts, *, scope_over
         if scope_override is not None and direction and not re.match(
             r"[\"'‘’“”「」『』\\]*" + target + r"(?![\d.])", normalized[direction.end():],
         ):
+            if diagnostics is not None:
+                diagnostics.append(field + "的声明目标与原文首个目标方向冲突")
             return None  # 同一因子的冲突目标不能由另一次匹配掩盖。
         if re.search(cue + r"[\"'‘’“”「」『』\\]*" + target + r"(?![\d.])", normalized):
             evidence[field] = fragment
+    if set(evidence) != set(changes) and diagnostics is not None:
+        diagnostics.append("以下目标缺少对应因子的明确原文锚点：" + ", ".join(sorted(set(changes) - set(evidence))))
     return evidence if set(evidence) == set(changes) else None
 
 
@@ -310,6 +322,11 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
     issues = []
     verified = []
     missing = False
+    unresolved = []
+    def incomplete(expression, detail):
+        unresolved.append({"claim": expression["claim"], "source_id": "scoring",
+                           "evidence": sources.get("scoring", ""),
+                           "reason": detail + "；补齐该段每个相关因子的合法目标及明确目标原文并重新计算。无法补齐时，移除收益数字及依赖该收益的排序，保留有依据的行动。"})
     for expression in expressions:
         # 计分对象取草稿实际表达式，不信模型dimension标签；同一目标集可核对同句的维度和总分。
         scope = _projection_scope(draft, expression)
@@ -327,21 +344,28 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
                    [entry for entry in entries if _compact(expression["claim"]) in _compact(entry["claim"])])
         if not matches or not isinstance(matches[0].get("changes"), dict) or not matches[0]["changes"]:
             missing = True
+            incomplete(expression, "评分推算未提供完整changes目标因子表")
             continue
         if customer is None:
             missing = True
+            incomplete(expression, "缺少当前客户，无法调用评分引擎重算")
             continue
+        anchor_details = []
         target_evidence = _projection_target_evidence(
             draft, expression, matches[0]["changes"], facts,
             scope_override=scope if has_declared else None,
+            diagnostics=anchor_details,
         )
         if target_evidence is None:
             missing = True
+            incomplete(expression, "；".join(anchor_details) + "；已提交目标："
+                       + json.dumps(matches[0]["changes"], ensure_ascii=False))
             continue
         try:
             projection = project_scores(customer, matches[0]["changes"])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
             missing = True
+            incomplete(expression, "评分引擎拒绝目标：" + str(exc))
             continue
         key = expression["dimension"]
         if key == "total":
@@ -365,11 +389,12 @@ def _check_projections(payload, draft, sources, customer, facts) -> FactCheckRes
                            "reason": f"按完整目标因子重算，{key}应从{before:g}变为{after:g}，变化{change:+g}；不得把目标分数或自行估算当作引擎收益。"})
         elif not expression["complete_tail"]:
             missing = True  # 引擎只识别到前缀，不能把未覆盖的完整数值项当作通过。
+            incomplete(expression, "评分表达式含未覆盖的数值尾项，需写成完整且可核算的单一表达式")
         elif expression["numeric_only"]:
             verified.append({key: expression[key] for key in ("claim", "start", "end")})
     return FactCheckResult("issues" if issues else ("unverified" if missing else "passed"), issues=issues,
                            reason="评分推算缺少可核验的完整合法目标或目标原文锚点，未标记通过" if missing else "",
-                           verified_projections=verified)
+                           verified_projections=verified, unverified_projections=unresolved)
 
 
 def _engine_covers_issue(issue, draft, verified):
@@ -391,7 +416,9 @@ def merge_local_checks(result: FactCheckResult, draft: str, *, customer=None, sc
     return FactCheckResult("issues" if issues else result.status, issues=issues[:8], reason=result.reason,
                            verified_projections=result.verified_projections,
                            recheck_recommended=result.recheck_recommended,
-                           protocol_response=result.protocol_response)
+                           protocol_response=result.protocol_response,
+                           unverified_projections=result.unverified_projections,
+                           disputed_issues=result.disputed_issues)
 
 
 def parse_result(text: str, draft: str, sources: dict[str, str], *, customer=None, scoring_facts=None) -> FactCheckResult:
@@ -454,10 +481,13 @@ def parse_result(text: str, draft: str, sources: dict[str, str], *, customer=Non
                 verified_projections=projections.verified_projections,
                 recheck_recommended=True,
                 protocol_response=text[:32000],
+                unverified_projections=projections.unverified_projections,
+                disputed_issues=issues,
             )
         merged = local_issues + projections.issues + issues
         return FactCheckResult("issues" if merged else projections.status, issues=merged[:8], reason=projections.reason,
                                verified_projections=projections.verified_projections,
+                               unverified_projections=projections.unverified_projections,
                                recheck_recommended=any(re.search(
                                    r"未(?:提及|包含|要求|限定|规定|明确|支持)|没有(?:提到|规定|要求)|不(?:包含|支持)",
                                    issue["reason"],

@@ -97,13 +97,13 @@ class Answer:
             if original.id not in selected:
                 continue
             unit = replacements.get(original.id, original)
-            if unit.kind == "heading":
+            if unit.kind in ("heading", "label"):
                 following = []
                 for other in self.units[index + 1:]:
-                    if other.kind == "heading":
+                    if other.kind == "heading" or (unit.kind == "label" and other.kind == "label"):
                         break
                     following.append(other)
-                if not any(other.id in selected and other.kind != "heading" for other in following):
+                if not any(other.id in selected and other.kind not in ("heading", "label") for other in following):
                     continue
             if unit.item is not None:
                 items.append(unit.item)
@@ -115,6 +115,21 @@ class Answer:
 
 
 _SUMMARY = re.compile(r"总览|总体|综合(?:结论|判断)|摘要|综上|总结")
+
+# Only fixed navigation labels are evidence-free. Formatting alone must never
+# turn a customer claim, score or priority into a structural label.
+_LABELS = {
+    "已确认的成因（数据可直接支撑）",
+    "待核实的可能原因（不能直接认定为因果）",
+    "已确认的成因", "待核实的可能原因", "止损动作", "趋势判断",
+}
+
+
+def _is_label(text):
+    value = text.strip().rstrip("：:")
+    if value.startswith("**") and value.endswith("**"):
+        value = value[2:-2].strip().rstrip("：:")
+    return value in _LABELS
 
 
 def parse_answer(draft: str) -> Answer:
@@ -135,7 +150,7 @@ def parse_answer(draft: str) -> Answer:
             nonlocal pending_start, pending_end
             if pending_start is not None:
                 text = draft[pending_start:pending_end]
-                add("markdown", text, pending_start, pending_end,
+                add("label" if _is_label(text) else "markdown", text, pending_start, pending_end,
                     summary=summary_section or bool(_SUMMARY.match(text.strip().lstrip("*> "))))
                 pending_start = pending_end = None
 
@@ -302,21 +317,28 @@ def apply_review(text, answer, known_bad, sources):
         raise ValueError("单元审查协议字段错误")
     dependencies = _dependencies(payload["units"], answer)
     removed = set(known_bad)
+    unsupported = {}
     for entry in payload["units"]:
         if set(entry) != {"id", "decision", "depends_on", "sources"} or entry["decision"] not in ("keep", "remove"):
             raise ValueError("非法保留/移除协议")
         if entry["decision"] == "remove":
             removed.add(entry["id"])
-        elif next(u for u in answer.units if u.id == entry["id"]).kind != "heading":
-            _anchors(entry, sources)
+        elif next(u for u in answer.units if u.id == entry["id"]).kind not in ("heading", "label"):
+            try:
+                _anchors(entry, sources)
+            except ValueError as exc:
+                # Evidence failure disqualifies this unit and its dependants,
+                # rather than invalidating unrelated supported analysis.
+                removed.add(entry["id"])
+                unsupported[entry["id"]] = str(exc)
     removed = closure(removed, dependencies)
     if removed:
         removed |= {unit.id for unit in answer.units if unit.summary}
         removed = closure(removed, dependencies)
     selected = {u.id for u in answer.units} - removed
-    if not any(u.id in selected and u.kind != "heading" for u in answer.units):
+    if not any(u.id in selected and u.kind not in ("heading", "label") for u in answer.units):
         raise ValueError("没有可靠独立分析可保留")
-    return answer.render(selected), {"removed": sorted(removed), "kept": sorted(selected),
+    return answer.render(selected), {"removed": sorted(removed), "kept": sorted(selected), "unsupported": unsupported,
                                      "dependencies": {key: sorted(value) for key, value in dependencies.items()}}
 
 

@@ -149,8 +149,8 @@ if LLM_REPORT_REASONING_EFFORT not in {"low", "high", "max"}:
     raise ValueError("LLM_REPORT_REASONING_EFFORT 必须是 low / high / max")
 LLM_REPORT_MAX_TOKENS = max(1024, _env_int("LLM_REPORT_MAX_TOKENS", 32768))
 # 防极端滥用的探索软上限；正常报告保留充分核对/修订余量，先采集真实消耗再优化。
-REPORT_TURN_TOKEN_BUDGET = max(LLM_REPORT_MAX_TOKENS, _env_int("REPORT_TURN_TOKEN_BUDGET", 512_000))
-REPORT_GENERATION_TIMEOUT_SECONDS = max(30.0, _env_float("REPORT_GENERATION_TIMEOUT_SECONDS", 300.0))
+REPORT_TURN_TOKEN_BUDGET = max(LLM_REPORT_MAX_TOKENS, _env_int("REPORT_TURN_TOKEN_BUDGET", 1_000_000))
+REPORT_GENERATION_TIMEOUT_SECONDS = max(30.0, _env_float("REPORT_GENERATION_TIMEOUT_SECONDS", 600.0))
 # 进程内 Chat LLM 全局并发上限。所有同步/流式调用（含报告 AI）共用该额度。
 CHAT_LLM_GLOBAL_CONCURRENCY = max(1, _env_int("CHAT_LLM_GLOBAL_CONCURRENCY", 8))
 # 公网匿名部署的轻量突发保护：按客户端 IP 汇总 AI 重型接口请求。
@@ -202,13 +202,13 @@ CHAT_TREND_POINTS = _env_int("CHAT_TREND_POINTS", 6)
 CHAT_DEGRADED_CHUNK_SIZE = _env_int("CHAT_DEGRADED_CHUNK_SIZE", 24)
 # Agent 线程/事件队列硬边界，防止断线或慢客户端造成无界内存与后台调用堆积。
 CHAT_AGENT_EVENT_QUEUE_MAX = max(8, _env_int("CHAT_AGENT_EVENT_QUEUE_MAX", 128))
-CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 120.0))
+CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 600.0))
 CHAT_AGENT_CANCEL_GRACE_SECONDS = max(
     0.1, _env_float("CHAT_AGENT_CANCEL_GRACE_SECONDS", 1.0)
 )
 # 防极端滥用的探索软上限（含输入/输出），不是正常请求的成本目标。
 # 保留有限收尾、总时限、并发、输入/工具边界，并记录真实用量供后续优化。
-CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 256_000))
+CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 1_000_000))
 # 工具预算同时限制模型单轮并行调用、整轮累计调用和回填到 Prompt 的总字符数。
 CHAT_TOOL_CALLS_PER_ROUND = max(1, _env_int("CHAT_TOOL_CALLS_PER_ROUND", 4))
 CHAT_TOOL_CALLS_PER_TURN = max(
@@ -220,9 +220,10 @@ CHAT_TOOL_RESULT_CHARS_PER_TURN = max(
 CHAT_TOOL_ARGUMENT_CHARS_PER_TURN = max(
     1000, _env_int("CHAT_TOOL_ARGUMENT_CHARS_PER_TURN", 8_000)
 )
-# 以下限制常规生成/修订次数；最终选择后新问题另有一次局部修复机会，仍共用预算和总时限。
-CHAT_AGENT_MAX_ITERATIONS = min(3, max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 3)))
-REPORT_AGENT_MAX_ITERATIONS = min(3, max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 3)))
+# 包含初稿；聊天与报告默认允许15轮恢复（内容修订或重做核对），预算可分别配置。
+# 最终选择后新问题另有一次局部修复，仍共享各自预算和总时限。
+CHAT_AGENT_MAX_ITERATIONS = min(21, max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 16)))
+REPORT_AGENT_MAX_ITERATIONS = min(21, max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 16)))
 AI_FACT_CHECK_TIMEOUT_SECONDS = max(1.0, _env_float("AI_FACT_CHECK_TIMEOUT_SECONDS", 30.0))
 # 完整目标与原文锚点可能较长，避免正常核对因2000 token输出不足被截断。
 AI_FACT_CHECK_MAX_TOKENS = max(256, _env_int("AI_FACT_CHECK_MAX_TOKENS", 8000))
@@ -236,7 +237,8 @@ CHAT_METRICS_RETENTION_DAYS = max(1, _env_int("CHAT_METRICS_RETENTION_DAYS", 90)
 # TTL 兜底清理疑似挂死的任务（running 超时同样回收）。均可经环境变量覆盖。
 PDF_JOB_MAX = _env_int("PDF_JOB_MAX", 50)
 PDF_JOB_MAX_CONCURRENT = max(1, _env_int("PDF_JOB_MAX_CONCURRENT", 1))
-PDF_JOB_TTL = max(60, _env_int("PDF_JOB_TTL", 3600))
+# 任务回收不能早于 AI 生成期限，并给 PDF 排版留至少60秒余量。
+PDF_JOB_TTL = max(REPORT_GENERATION_TIMEOUT_SECONDS + 60, _env_int("PDF_JOB_TTL", 3600))
 
 
 # ══════════════════════════ 知识库 RAG═══════════════════════

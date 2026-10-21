@@ -593,6 +593,18 @@ def run_turn(
         agent_thread.start()
         visible_stream = _VisibleAgentStream()
         agent_displayed_text = ""
+        preview_limit = 48
+        preview_closed = False
+
+        def preview(text: str) -> str:
+            nonlocal agent_displayed_text
+            # Keep one short preview stable while private revisions are checked.
+            if preview_closed:
+                return ""
+            piece = text[:max(0, preview_limit - len(agent_displayed_text))]
+            agent_displayed_text += piece
+            return piece
+
         agent_timed_out = False
         try:
             while True:
@@ -608,19 +620,21 @@ def run_turn(
                     break
                 event_type, data = queued
                 if event_type == "delta":
-                    text = visible_stream.feed(str(data.get("text") or ""))
+                    text = preview(visible_stream.feed(str(data.get("text") or "")))
                     if text:
                         _mark_client_delta()
-                        agent_displayed_text += text
                         yield TurnEvent("delta", {"text": text, "phase": data.get("phase")})
                 elif event_type == "replace":
+                    preview_closed = preview_closed or bool(agent_displayed_text)
                     visible_stream = _VisibleAgentStream()
-                    agent_displayed_text = ""
-                    yield TurnEvent("replace", {**data, "text": ""})
+                    # Do not clear/retype an answer for internal repairs. final_sync
+                    # below publishes the checked result once, as an atomic update.
                 elif event_type == "usage":
                     used_tokens = max(used_tokens, int(data.get("tokens_used") or 0))
                     yield TurnEvent("usage", data)
                 elif event_type == "stage":
+                    if data.get("stage") == "verification":
+                        preview_closed = True
                     yield TurnEvent("stage", data)
         finally:
             agent_cancelled.set()
@@ -670,10 +684,9 @@ def run_turn(
                 "timings": timings,
             })
             return
-        tail = visible_stream.flush()
+        tail = preview(visible_stream.flush())
         if tail:
             _mark_client_delta()
-            agent_displayed_text += tail
             yield TurnEvent("delta", {"text": tail, "phase": "final"})
         if "error" in agent_result:
             raise agent_result["error"]

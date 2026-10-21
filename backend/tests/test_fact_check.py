@@ -82,7 +82,7 @@ def test_unresolved_conflict_stops_after_two_business_repairs():
     conflict_last = CONFLICT.replace("72", "24")
     remove = '{"units":[{"id":"u0","decision":"remove","depends_on":[],"sources":[]}]}'
     result, adapter, _ = run_checked([BAD, CONFLICT, patch_one(middle), conflict_middle,
-                                     patch_one(last), conflict_last, remove], max_iterations=99)
+                                     patch_one(last), conflict_last, remove], max_iterations=3)
     assert result.iterations == 3 and len(adapter.calls) == 7
     assert result.timings["verification"][-1]["status"] == "issues"
     assert result.degraded and BAD not in result.text
@@ -91,7 +91,7 @@ def test_unresolved_conflict_stops_after_two_business_repairs():
 
 @pytest.mark.parametrize("reply", ['{"issues":', LLMUnavailableError("核对超时")])
 def test_failed_check_returns_rules_without_claiming_verification_passed(reply):
-    result, adapter, _ = run_checked([GOOD, reply, reply, '{"units":[]}'])
+    result, adapter, _ = run_checked([GOOD, reply, reply, '{"units":[]}'], max_iterations=1)
     assert result.degraded and result.text != GOOD
     assert len(adapter.calls) == 4
     assert [call["phase"] for call in result.timings["llm_calls"]] == ["reason", "verification", "verification", "unit_review"]
@@ -318,6 +318,29 @@ def _with_targets(claim):
     return ("建议KCR-01由80-99%提升到100%，KCR-04由2次提升到≥3次，"
             "KCR-08由VP级提升到CXO级且能影响EB，KCR-10B由1-2节点可控提升到全流程且≥3节点可控。"
             + claim)
+
+
+def test_projection_feedback_identifies_missing_factor_and_keeps_unverified_status():
+    customer, facts, sources = _score_case()
+    claim = 'KCR由24→27'
+    result = parse_result(_projection_response(claim, changes={'kcr_01': '100%'}),
+                          _with_targets(claim), sources, customer=customer, scoring_facts=facts)
+    assert result.status == 'unverified' and result.unverified_projections
+    assert '遗漏目标因子' in result.feedback() and 'kcr_04' in result.feedback()
+    assert '移除收益数字及依赖该收益的排序' in result.feedback()
+
+
+def test_projection_feedback_distinguishes_absent_targets_and_illegal_targets():
+    customer, facts, sources = _score_case()
+    claim = 'KCR由24→27'
+    absent = parse_result('{"issues":[]}', _with_targets(claim), sources,
+                          customer=customer, scoring_facts=facts)
+    assert absent.status == 'unverified' and '未提供完整changes' in absent.feedback()
+    draft = 'KCR-01目标为非法目标。' + claim
+    illegal = parse_result(_projection_response(claim, changes={'kcr_01': '非法目标'}), draft, sources,
+                           customer=customer, scoring_facts=facts)
+    assert illegal.status == 'unverified' and 'kcr_01' in illegal.feedback()
+    assert '目标不是合法选项' in illegal.feedback()
 
 
 @pytest.mark.parametrize('draft', [

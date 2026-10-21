@@ -173,9 +173,6 @@ def test_final_check_exception_never_marks_selected_content_verified():
     lambda p: p["units"][1].update(depends_on=["unknown"]),
     lambda p: p["units"][1].update(depends_on=["u1"]),
     lambda p: p["units"][1].update(depends_on=["u0", "u0"]),
-    lambda p: p["units"][1].update(sources=[]),
-    lambda p: p["units"][1].update(sources=[{"source_id": "unknown", "evidence": SOURCE}]),
-    lambda p: p["units"][1].update(sources=[{"source_id": "knowledge", "evidence": "虚构原文"}]),
     lambda p: p["units"][1].update(text="新生成的业务结论"),
 ])
 def test_review_protocol_rejects_unknown_duplicate_incomplete_unsupported_or_new_text(mutate):
@@ -184,6 +181,47 @@ def test_review_protocol_rejects_unknown_duplicate_incomplete_unsupported_or_new
     mutate(payload)
     with pytest.raises(ValueError):
         quality.apply_review(json.dumps(payload, ensure_ascii=False), answer, {"u0"}, SOURCES)
+
+
+@pytest.mark.parametrize("unsupported", [[], [{"source_id": "unknown", "evidence": SOURCE}],
+                                          [{"source_id": "knowledge", "evidence": "虚构原文"}]])
+def test_unsupported_unit_and_dependants_are_removed_without_losing_independent_analysis(unsupported):
+    answer = quality.parse_answer(BAD + "\n\n依赖前述结论的建议。\n\n" + SAFE)
+    payload = json.loads(review(answer, dependencies={"u1": ["u0"]}))
+    payload["units"][0]["sources"] = unsupported
+    selected, diagnostic = quality.apply_review(json.dumps(payload, ensure_ascii=False), answer, set(), SOURCES)
+    assert selected == SAFE
+    assert diagnostic["removed"] == ["u0", "u1"]
+    assert set(diagnostic["unsupported"]) == {"u0"}
+
+
+def test_fixed_group_label_requires_no_evidence_but_bold_claim_does():
+    answer = quality.parse_answer("**已确认的成因（数据可直接支撑）**\n\n**客户不存在风险，总分100分。**\n\n" + SAFE)
+    assert [u.kind for u in answer.units] == ["label", "markdown", "markdown"]
+    payload = json.loads(review(answer))
+    for entry in payload["units"][:2]:
+        entry["sources"] = []
+    selected, diagnostic = quality.apply_review(json.dumps(payload, ensure_ascii=False), answer, set(), SOURCES)
+    assert "已确认的成因" in selected and SAFE in selected and "100分" not in selected
+    assert diagnostic["removed"] == ["u1"]
+
+
+def test_labels_alone_never_count_as_reliable_analysis():
+    answer = quality.parse_answer("**已确认的成因**\n\n" + BAD)
+    with pytest.raises(ValueError, match="没有可靠"):
+        quality.apply_review(review(answer), answer, {"u1"}, SOURCES)
+
+
+def test_realistic_selection_with_empty_intro_evidence_survives_full_verification():
+    draft = BAD + "\n\n**已确认的成因**\n\n按紧急度排序，责任角色默认客户经理，需系统/交付侧配合：\n\n" + SAFE
+    answer = quality.parse_answer(draft)
+    payload = json.loads(review(answer))
+    payload["units"][1]["sources"] = []
+    payload["units"][2]["sources"] = []
+    result, _, _ = run([draft, ISSUE, json.dumps(payload, ensure_ascii=False), CLEAN])
+    assert not result.degraded and SAFE in result.text and BAD not in result.text
+    assert "责任角色" not in result.text
+    assert result.timings["verification"][-1]["status"] == "passed"
 
 
 def test_duplicate_json_fields_are_not_silently_overwritten():

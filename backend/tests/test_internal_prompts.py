@@ -73,6 +73,26 @@ def test_missing_fact_check_task_is_unverified_without_model_call(tmp_path, monk
     assert not adapter.calls
 
 
+def test_disputed_recheck_instructions_are_fully_hot_reloadable(tmp_path, monkeypatch):
+    import json
+    raw = yaml.safe_load(Path(config.PROMPT_TEMPLATE_PATH).read_text(encoding='utf-8'))
+    path = tmp_path / 'recheck.yaml'
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding='utf-8')
+    monkeypatch.setattr(config, 'PROMPT_TEMPLATE_PATH', str(path))
+    disputed = [{'claim': '原文', 'evidence': '证据', 'reason': '候选意见'}]
+    previous = fact_check.FactCheckResult('unverified', disputed_issues=disputed)
+    before = fact_check.messages_for_check('草稿', {}, previous_check=previous)
+    assert '先逐项重新判断' in before[0].content
+    raw['internal_tasks']['fact_recheck']['system'] = '独立复核热加载替换标记'
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding='utf-8')
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 2))
+    after = fact_check.messages_for_check('草稿', {}, previous_check=previous)
+    assert '独立复核热加载替换标记' in after[0].content
+    assert '先逐项重新判断' not in after[0].content
+    data = json.loads(after[1].content.split('\n', 1)[1].rsplit('\n', 1)[0])
+    assert data['previous_check']['disputed_issues'] == disputed
+
+
 def test_refinement_keeps_untrusted_draft_inside_data_boundary():
     from services.ai.prompt_templates import get_template
 
