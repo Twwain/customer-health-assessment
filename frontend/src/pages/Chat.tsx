@@ -30,6 +30,7 @@ interface StreamMsg {
 }
 
 type Scenario = "assessment" | "strategy" | "alert_analysis";
+type ReadingPosition = { answerId?: number | "stream"; scrollTop?: number };
 const EP: Record<Scenario, string> = {
   assessment: "evaluate",
   strategy: "strategy",
@@ -74,12 +75,24 @@ export default function Chat() {
   const pendingScenario = useRef<Scenario | null>(null);
   const pollRef = useRef<number | null>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
-  const followLatestRef = useRef(true);
+  const initialReading = (location.state as { chatReading?: ReadingPosition } | null)?.chatReading;
+  const followLatestRef = useRef(!initialReading);
+  const readingPositionRef = useRef<ReadingPosition | null>(initialReading ?? null);
+  const pendingReadingRef = useRef(!!initialReading);
+  const positionedScrollTopRef = useRef<number | null>(null);
+  const lastScrollTopRef = useRef(0);
   const createdIdRef = useRef<number | null>(null); // 草稿已建库的真实会话 id（待流式结束后跳转）
   const creatingRef = useRef(false); // 草稿建库中，防重复点击
   const activeRef = useRef(true);
   const generationRef = useRef(0);
   const replacementIdRef = useRef<number | null>(null);
+
+  const takeManualReadingPosition = () => {
+    pendingReadingRef.current = false;
+    if (readingPositionRef.current) {
+      readingPositionRef.current = { scrollTop: messageListRef.current?.scrollTop ?? 0 };
+    }
+  };
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
@@ -107,7 +120,10 @@ export default function Chat() {
     if (createdIdRef.current) {
       const id = createdIdRef.current;
       createdIdRef.current = null;
-      navigate(`/chat/${id}`, { replace: true });
+      const reading = readingPositionRef.current;
+      const chatReading = reading?.answerId !== undefined ? reading : (!followLatestRef.current
+        ? { scrollTop: messageListRef.current?.scrollTop ?? 0 } : undefined);
+      navigate(`/chat/${id}`, { replace: true, state: chatReading ? { chatReading } : undefined });
     }
   };
 
@@ -115,6 +131,9 @@ export default function Chat() {
   const handleEvent = (ev: ChatEvent) => {
     if (ev.type === "done") {
       const msg = ev.data.message as ChatMessageItem;
+      if (readingPositionRef.current?.answerId === "stream") {
+        readingPositionRef.current = { answerId: msg.id };
+      }
       streamRef.current = null;
       setStream(null);
       const replacedId = replacementIdRef.current;
@@ -161,6 +180,12 @@ export default function Chat() {
         next = { ...cur, stageMessage: ev.data.message as string };
         break;
       case "replace":
+        if (ev.data.reason === "final_sync" && cur.scenario && cur.scenario in EP
+            && followLatestRef.current && !readingPositionRef.current) {
+          readingPositionRef.current = { answerId: "stream" };
+          pendingReadingRef.current = true;
+          followLatestRef.current = false;
+        }
         next = { ...cur, content: (ev.data.text as string | undefined) || "" };
         break;
       case "strategy":
@@ -181,6 +206,8 @@ export default function Chat() {
     if (busyRef.current) return;
     busyRef.current = true;
     followLatestRef.current = true;
+    readingPositionRef.current = null;
+    pendingReadingRef.current = false;
     setBusy(true);
     setError(null);
     replacementIdRef.current = replacementId;
@@ -294,12 +321,35 @@ export default function Chat() {
     };
   }, []);
 
+  // Consume the one-off handoff so later reloads do not restore a stale answer.
+  useEffect(() => {
+    const state = location.state as { chatReading?: ReadingPosition; [key: string]: unknown } | null;
+    if (!state?.chatReading) return;
+    const nextState = { ...state };
+    delete nextState.chatReading;
+    navigate(location.pathname, { replace: true, state: nextState });
+  }, [location.pathname, location.state, navigate]);
+
   // 默认跟随最新消息；用户主动向上查看历史后暂停，回到底部附近时恢复。
   useEffect(() => {
-    if (!followLatestRef.current) return;
+    if (!followLatestRef.current && !pendingReadingRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       const list = messageListRef.current;
-      if (list) list.scrollTop = list.scrollHeight;
+      if (!list) return;
+      const reading = readingPositionRef.current;
+      if (pendingReadingRef.current && reading) {
+        const anchor = reading.answerId !== undefined
+          ? list.querySelector<HTMLElement>(`[data-message-anchor="${reading.answerId}"]`) : null;
+        if (reading.answerId !== undefined && !anchor) return;
+        list.scrollTop = anchor
+          ? list.scrollTop + anchor.getBoundingClientRect().top - list.getBoundingClientRect().top
+          : reading.scrollTop ?? 0;
+        positionedScrollTopRef.current = list.scrollTop;
+        pendingReadingRef.current = false;
+      } else if (followLatestRef.current && !reading) {
+        list.scrollTop = list.scrollHeight;
+      }
+      lastScrollTopRef.current = list.scrollTop;
     });
     return () => window.cancelAnimationFrame(frame);
   }, [messages, stream, resuming, busy, error]);
@@ -568,10 +618,36 @@ export default function Chat() {
         ref={messageListRef}
         data-testid="chat-message-list"
         className="min-h-0 flex-1 overflow-y-auto bg-bg"
+        onWheel={(event) => {
+          takeManualReadingPosition();
+          if (event.deltaY < 0) followLatestRef.current = false;
+        }}
+        onTouchMove={() => {
+          takeManualReadingPosition();
+          followLatestRef.current = false;
+        }}
+        onKeyDown={(event) => {
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            takeManualReadingPosition();
+            if (["ArrowUp", "PageUp", "Home"].includes(event.key)) followLatestRef.current = false;
+          }
+        }}
         onScroll={(event) => {
+          // A finalized answer owns its reading position until the next question.
+          // Programmatic scrolling must not re-enable tail following on short answers.
           const list = event.currentTarget;
+          const previousTop = lastScrollTopRef.current;
+          lastScrollTopRef.current = list.scrollTop;
+          if (readingPositionRef.current) {
+            if (!pendingReadingRef.current && (readingPositionRef.current.answerId === undefined
+                || list.scrollTop !== positionedScrollTopRef.current)) {
+              readingPositionRef.current = { scrollTop: list.scrollTop };
+            }
+            return;
+          }
           const distanceToBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
-          followLatestRef.current = distanceToBottom <= 64;
+          if (distanceToBottom <= 64) followLatestRef.current = true;
+          else if (list.scrollTop < previousTop) followLatestRef.current = false;
         }}
       >
         <div className="mx-auto max-w-[860px] space-y-4 px-4 py-4">
@@ -579,8 +655,8 @@ export default function Chat() {
             const isStream = stream != null && i === display.length - 1;
             const mid = m.id ?? -1;
             return (
+              <div key={mid} data-message-anchor={isStream ? "stream" : mid}>
               <MessageView
-                key={mid}
                 msg={m}
                 assessment={isStream ? (stream as StreamMsg)?.assessment : ctx.assessment}
                 trend={isStream ? (stream as StreamMsg)?.trend : ctx.trend}
@@ -592,6 +668,7 @@ export default function Chat() {
                 onFeedback={(fb) => setFeedback(mid, fb)}
                 onAdopt={() => setAdopted((p) => ({ ...p, [mid]: !p[mid] }))}
               />
+              </div>
             );
           })}
           {showResume && (

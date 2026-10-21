@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { MemoryRouter, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UiFeedbackProvider } from "../components/UiFeedback";
 import type { ChatEvent, ChatMessageItem } from "../types";
 import Chat from "./Chat";
@@ -135,6 +135,153 @@ describe("Chat 核心操作", () => {
     });
     expect(messageList.scrollTop).toBe(1000);
     await act(async () => { finish(); await activeStream; });
+  });
+});
+
+describe("最终答案阅读位置", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function startTurn(scenario = "assessment") {
+    let emit!: (event: ChatEvent) => void;
+    let finish!: () => void;
+    const request = new Promise<void>((resolve) => { finish = resolve; });
+    streamChat.mockReset().mockImplementation((_url, _body, onEvent) => { emit = onEvent; return request; });
+    renderChat();
+    await screen.findByText("测试会话");
+    const list = screen.getByTestId("chat-message-list");
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 400 });
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      const top = this.hasAttribute("data-message-anchor") ? 100 + 220 - list.scrollTop : 100;
+      return { top, bottom: top + 1000, left: 0, right: 800, width: 800, height: 1000, x: 0, y: top, toJSON() {} };
+    });
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), { target: { value: "分析一下" } });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+    await waitFor(() => expect(streamChat).toHaveBeenCalled());
+    act(() => emit({ type: "start", data: { scenario } }));
+    await waitFor(() => expect(list.scrollTop).toBe(1200));
+    return { list, emit, finish, request };
+  }
+
+  it.each([false, true])("最终替换后定位答案开头，完成事件不再拉到底部（同批完成=%s）", async (batched) => {
+    const { list, emit, finish, request } = await startTurn();
+    act(() => {
+      emit({ type: "replace", data: { text: "最终完整分析", reason: "final_sync" } });
+      if (batched) emit({ type: "done", data: { message: answer(2, "最终完整分析") } });
+    });
+    await waitFor(() => expect(list.scrollTop).toBe(220));
+    // Even a programmatic near-bottom scroll must not re-enable tail following.
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 620 });
+    fireEvent.scroll(list);
+    if (!batched) act(() => emit({ type: "done", data: { message: answer(2, "最终完整分析") } }));
+    await act(async () => { finish(); await request; await new Promise(requestAnimationFrame); });
+    expect(list.scrollTop).toBe(220);
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1200 });
+    streamChat.mockResolvedValue(undefined);
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), { target: { value: "继续提问" } });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+    await waitFor(() => expect(list.scrollTop).toBe(1200));
+  });
+
+  it("用户上滑阅读历史后最终替换和完成均不抢位置", async () => {
+    const { list, emit, finish, request } = await startTurn();
+    list.scrollTop = 80;
+    fireEvent.scroll(list);
+    act(() => {
+      emit({ type: "replace", data: { text: "最终完整分析", reason: "final_sync" } });
+      emit({ type: "done", data: { message: answer(2, "最终完整分析") } });
+    });
+    await act(async () => { finish(); await request; await new Promise(requestAnimationFrame); });
+    expect(list.scrollTop).toBe(80);
+  });
+
+  it("普通问答的最终同步仍跟随末尾", async () => {
+    const { list, emit, finish, request } = await startTurn("free_qa");
+    act(() => emit({ type: "replace", data: { text: "普通问答", reason: "final_sync" } }));
+    await act(async () => { finish(); await request; await new Promise(requestAnimationFrame); });
+    expect(list.scrollTop).toBe(1200);
+  });
+
+  it("内容增高产生的scroll事件不会被当作用户上滑而取消最终定位", async () => {
+    const { list, emit, finish, request } = await startTurn();
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1669 });
+    fireEvent.scroll(list);
+    act(() => {
+      emit({ type: "replace", data: { text: "最终完整分析", reason: "final_sync" } });
+      emit({ type: "done", data: { message: answer(2, "最终完整分析") } });
+    });
+    await act(async () => { finish(); await request; });
+    await waitFor(() => expect(list.scrollTop).toBe(220));
+  });
+
+  it("草稿转正式会话重挂载后保留答案开头", async () => {
+    const final = answer(99, "新会话的最终分析");
+    createSession.mockResolvedValue({ id: 42, title: "测试会话" });
+    getSession.mockResolvedValue(session([final], 42));
+    streamChat.mockReset().mockImplementation(async (_url, _body, emit) => {
+      emit({ type: "start", data: { scenario: "assessment" } });
+      emit({ type: "replace", data: { text: final.content, reason: "final_sync" } });
+      emit({ type: "done", data: { message: final } });
+    });
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      const list = screen.getByTestId("chat-message-list");
+      const top = this.hasAttribute("data-message-anchor") ? 220 - list.scrollTop : 0;
+      return { top, bottom: top + 1000, left: 0, right: 800, width: 800, height: 1000, x: 0, y: top, toJSON() {} };
+    });
+    function KeyedChat() {
+      const { sessionId } = useParams();
+      return <Chat key={sessionId} />;
+    }
+    render(<UiFeedbackProvider><MemoryRouter initialEntries={["/chat/new"]}>
+      <Routes><Route path="/chat/:sessionId" element={<KeyedChat />} /></Routes>
+    </MemoryRouter></UiFeedbackProvider>);
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), { target: { value: "分析一下" } });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+    await screen.findByText(final.content);
+    await waitFor(() => expect(getSession).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(screen.getByTestId("chat-message-list").scrollTop).toBe(220));
+  });
+
+  it.each(["wheel", "touch", "keyboard", "scrollbar"])("草稿最终替换后%s手动阅读，done重挂载保留新位置", async (input) => {
+    const final = answer(99, "新会话的最终分析");
+    createSession.mockResolvedValue({ id: 42, title: "测试会话" });
+    getSession.mockResolvedValue(session([final], 42));
+    let emit!: (event: ChatEvent) => void;
+    let finish!: () => void;
+    const request = new Promise<void>((resolve) => { finish = resolve; });
+    streamChat.mockReset().mockImplementation((_url, _body, onEvent) => { emit = onEvent; return request; });
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      const list = screen.getByTestId("chat-message-list");
+      const top = this.hasAttribute("data-message-anchor") ? 220 - list.scrollTop : 0;
+      return { top, bottom: top + 1000, left: 0, right: 800, width: 800, height: 1000, x: 0, y: top, toJSON() {} };
+    });
+    function KeyedChat() {
+      const { sessionId } = useParams();
+      return <Chat key={sessionId} />;
+    }
+    render(<UiFeedbackProvider><MemoryRouter initialEntries={["/chat/new"]}>
+      <Routes><Route path="/chat/:sessionId" element={<KeyedChat />} /></Routes>
+    </MemoryRouter></UiFeedbackProvider>);
+    fireEvent.change(screen.getByPlaceholderText("输入消息，或描述你关心的客户与问题…"), { target: { value: "分析一下" } });
+    fireEvent.click(screen.getByRole("button", { name: "➤" }));
+    await waitFor(() => expect(streamChat).toHaveBeenCalled());
+    act(() => {
+      emit({ type: "start", data: { scenario: "assessment" } });
+      emit({ type: "replace", data: { text: final.content, reason: "final_sync" } });
+    });
+    const list = screen.getByTestId("chat-message-list");
+    await waitFor(() => expect(list.scrollTop).toBe(220));
+    if (input === "wheel") fireEvent.wheel(list, { deltaY: -140 });
+    if (input === "touch") fireEvent.touchMove(list);
+    if (input === "keyboard") fireEvent.keyDown(list, { key: "PageUp" });
+    list.scrollTop = 80;
+    fireEvent.scroll(list);
+    act(() => emit({ type: "done", data: { message: final } }));
+    await act(async () => { finish(); await request; });
+    await waitFor(() => expect(getSession).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(screen.getByTestId("chat-message-list")).not.toBe(list));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(screen.getByTestId("chat-message-list").scrollTop).toBe(80);
   });
 });
 
