@@ -519,11 +519,8 @@ dimensions:
           type: mapping
           map:
             "<15min且达标率>95%": 10
-            "<15分钟且SLA>95%": 10
             "<30min且>90%": 7
-            "<30分钟且SLA>90%": 7
             "<1h且>80%": 4
-            "<1小时且SLA>80%": 4
           default_score: 0
           detail: "故障响应时效「{value}」：{score}分"
 
@@ -542,11 +539,8 @@ dimensions:
           type: mapping
           map:
             "<4h且一次解决率>90%": 10
-            "<4小时且一次解决率>90%": 10
             "<8h且>80%": 7
-            "<8小时且一次解决率>80%": 7
             "<24h且>70%": 4
-            "<24小时且一次解决率>70%": 4
           default_score: 0
           detail: "故障解决效率「{value}」：{score}分"
 
