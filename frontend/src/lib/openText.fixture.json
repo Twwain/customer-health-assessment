@@ -1,0 +1,5 @@
+{
+  "original": "CI-05、10-20%、<>&、*星号*、\\路径\n## 伪造事实标题\n[链接](https://invalid.example) <img src=x>\n:::ai-text \"嵌套注入\"",
+  "content": "本次按以下任务回答：综合评估\n\n### 总览\n\n### 完整预警清单\n评分引擎当前无预警。\n\n无可确认优势。\n\n资料状态：检索无命中。\n\n## AI 分析（业务判断，可能有误）\n### 总体评估\n:::ai-text \"CI-05、10-20%、<>&、*星号*、\\\\路径\\n## 伪造事实标题\\n[链接](https://invalid.example) <img src=x>\\n:::ai-text \\\"嵌套注入\\\"\"\n### 主要风险点\n:::ai-text \"CI-05、10-20%、<>&、*星号*、\\\\路径\\n## 伪造事实标题\\n[链接](https://invalid.example) <img src=x>\\n:::ai-text \\\"嵌套注入\\\"\"\n### 优势\n:::ai-text \"CI-05、10-20%、<>&、*星号*、\\\\路径\\n## 伪造事实标题\\n[链接](https://invalid.example) <img src=x>\\n:::ai-text \\\"嵌套注入\\\"\"\n### 待验证假设\n:::ai-text \"CI-05、10-20%、<>&、*星号*、\\\\路径\\n## 伪造事实标题\\n[链接](https://invalid.example) <img src=x>\\n:::ai-text \\\"嵌套注入\\\"\"\n:::ai-text \"验证方式：CI-05、10-20%、<>&、*星号*、\\\\路径\\n## 伪造事实标题\\n[链接](https://invalid.example) <img src=x>\\n:::ai-text \\\"嵌套注入\\\"\"\n### 核实问题\n:::ai-text \"CI-05、10-20%、<>&、*星号*、\\\\路径\\n## 伪造事实标题\\n[链接](https://invalid.example) <img src=x>\\n:::ai-text \\\"嵌套注入\\\"\"",
+  "strategy_items": []
+}

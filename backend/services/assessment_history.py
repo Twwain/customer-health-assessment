@@ -130,7 +130,6 @@ def record_assessment(
     *,
     assessed_by: str = "system",
     trigger: str = "manual",
-    strategy_snapshot: list | None = None,
     skip_if_unchanged: bool = True,
     commit: bool = True,
 ) -> AssessmentHistory | None:
@@ -166,7 +165,6 @@ def record_assessment(
         dimensions=[d.model_dump() for d in assessment.dimensions],
         risk_alerts=list(assessment.risk_alerts),
         factor_snapshot=snapshot,
-        strategy_snapshot=strategy_snapshot or [],
         config_version=assessment.config_version,
         assessed_at=utcnow(),
     )
@@ -223,28 +221,6 @@ def backfill_current_config_snapshots(db: Session) -> int:
     return created
 
 
-def attach_strategy_snapshot(db: Session, customer_id: int, items: list, commit: bool = True) -> bool:
-    """把 AI 生成的策略回写到最近一条评估快照。
-
-    PDF 报告与"上次给过什么建议"的追溯都依赖这份快照；
-    没有历史记录时静默跳过，不影响对话主流程。
-    """
-    if not items:
-        return False
-    last = (
-        db.query(AssessmentHistory)
-        .filter(AssessmentHistory.customer_id == customer_id)
-        .order_by(AssessmentHistory.assessed_at.desc(), AssessmentHistory.id.desc())
-        .first()
-    )
-    if last is None:
-        return False
-    last.strategy_snapshot = list(items)
-    if commit:
-        db.commit()
-    return True
-
-
 def list_history(db: Session, customer_id: int, limit: int = 50) -> list[AssessmentHistory]:
     """按时间倒序返回评估历史。"""
     return (
@@ -256,8 +232,15 @@ def list_history(db: Session, customer_id: int, limit: int = 50) -> list[Assessm
     )
 
 
-def to_history_items(records: list[AssessmentHistory]) -> list[AssessmentHistoryItem]:
-    return [AssessmentHistoryItem.model_validate(r) for r in records]
+def to_history_items(records: list[AssessmentHistory], db: Session) -> list[AssessmentHistoryItem]:
+    from services.ai.repository import resolve_strategy_history
+    resolved = resolve_strategy_history(db, records)
+    result = []
+    for row in records:
+        data = {column.name: getattr(row, column.name) for column in AssessmentHistory.__table__.columns}
+        data.update(resolved[row.id])
+        result.append(AssessmentHistoryItem.model_validate(data))
+    return result
 
 
 def build_trend(

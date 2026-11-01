@@ -98,6 +98,7 @@ def _run_pdf_job(
             include_ai=include_ai,
             cancel_event=cancel_event,
             deadline=deadline,
+            job_id=job_id,
         )
         db.commit()  # 模型生成结束后再写入累计的知识命中计数
         record_report_metric(db, report, elapsed_ms=int((time.monotonic() - report_started) * 1000))
@@ -105,6 +106,7 @@ def _run_pdf_job(
             report.assessment,
             strategy_items=report.strategy_items,
             references=report.references,
+            analysis=getattr(report, "analysis", None), hypotheses=getattr(report, "hypotheses", None),
             trend=report.trend,
             industry=customer.industry or "",
             generation_warnings=report.warnings,
@@ -118,7 +120,7 @@ def _run_pdf_job(
                 job["status"] = "ready"
                 job["degraded"] = report.degraded
                 job["warnings"] = report.warnings
-                job["verification"] = report.timings.get("verification", [])
+                job["ai_run_id"] = report.timings.get("run_id")
                 logger.info("PDF 导出任务完成: job=%s customer_id=%s", job_id, customer_id)
             elif job is not None:
                 # 任务已被 TTL 标记为失败（超时），丢弃本次生成结果，避免覆盖错误状态
@@ -193,7 +195,7 @@ def get_assessment_history(
         customer_id=customer.id,
         customer_name=customer.customer_name,
         total=len(records),
-        items=assessment_history.to_history_items(records),
+        items=assessment_history.to_history_items(records, db=db),
     )
 
 
@@ -240,6 +242,7 @@ def download_pdf(
             report.assessment,
             strategy_items=report.strategy_items,
             references=report.references,
+            analysis=getattr(report, "analysis", None), hypotheses=getattr(report, "hypotheses", None),
             trend=report.trend,
             industry=customer.industry or "",
             generation_warnings=report.warnings,
@@ -307,25 +310,26 @@ def create_pdf_job(
 
 
 @router.get("/{customer_id}/pdf/jobs/{job_id}")
-def get_pdf_job(customer_id: int, job_id: str):
+def get_pdf_job(customer_id: int, job_id: str, db: Session = Depends(get_db)):
     """查询导出任务状态：running / ready / error。"""
     with _pdf_jobs_lock:
         _sweep_pdf_jobs()
         job = _pdf_jobs.get(job_id)
         if job is None or job["customer_id"] != customer_id:
             raise HTTPException(status_code=404, detail="导出任务不存在")
+        _check_pdf_source(db, job, customer_id, job_id)
         return {"job_id": job_id, "status": job["status"], "error": job.get("error"),
-                "degraded": job.get("degraded", False), "warnings": job.get("warnings", []),
-                "verification": job.get("verification", [])}
+                "degraded": job.get("degraded", False), "warnings": job.get("warnings", [])}
 
 
 @router.get("/{customer_id}/pdf/jobs/{job_id}/download")
-def download_pdf_job(customer_id: int, job_id: str):
+def download_pdf_job(customer_id: int, job_id: str, db: Session = Depends(get_db)):
     """下载已生成的报告（status=ready 时可用）。"""
     with _pdf_jobs_lock:
         job = _pdf_jobs.get(job_id)
         if job is None or job["customer_id"] != customer_id:
             raise HTTPException(status_code=404, detail="导出任务不存在")
+        _check_pdf_source(db, job, customer_id, job_id)
         if job["status"] == "error":
             raise HTTPException(status_code=409, detail=f"报告生成失败：{job.get('error') or '未知错误'}")
         if job["status"] != "ready" or not job.get("bytes"):
@@ -340,6 +344,17 @@ def download_pdf_job(customer_id: int, job_id: str):
             "Content-Disposition": f"attachment; filename=report.pdf; filename*=UTF-8''{encoded}"
         },
     )
+
+
+def _check_pdf_source(db, job, customer_id, job_id):
+    if not job.get("ai_run_id"):
+        return
+    from models import AIAssessmentRun
+    from services.ai.repository import available_result
+    run = db.get(AIAssessmentRun, job["ai_run_id"])
+    if not available_result(db, run, customer_id=customer_id, job_id=job_id):
+        job.pop("bytes", None)
+        job["status"], job["error"] = "error", "报告资料已不可用，请重新生成"
 
 
 @router.get("/all/overview", response_model=OverviewResponse)

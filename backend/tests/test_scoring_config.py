@@ -13,7 +13,6 @@ import pytest
 from models import Customer
 from factories import MAX_FACTORS
 from seed_factors import RISKY_FACTORS
-from services.health_score import HealthScoreEngine
 from services.scoring.config_driven import ConfigDrivenStrategy
 from services.scoring.config_loader import (
     ScoringConfigError,
@@ -151,7 +150,7 @@ def test_find_factor_prefers_editable_definition():
 
 def test_empty_factors_score_minimum():
     """未填报因子按各因子最低档计分（客观事实驱动，无记录即低分）。"""
-    result = HealthScoreEngine().evaluate(make_customer())
+    result = ConfigDrivenStrategy().evaluate(make_customer())
     scores = {d.key: d.score for d in result.dimensions}
     assert scores["kcr"] == pytest.approx(4.0)
     assert scores["er"] == pytest.approx(2.25)
@@ -167,7 +166,7 @@ def test_empty_factors_score_minimum():
 
 def test_maxed_factors_score_100():
     """28 个因子全部取最高档 → 总分 100、等级健康。"""
-    result = HealthScoreEngine().evaluate(
+    result = ConfigDrivenStrategy().evaluate(
         make_customer(custom_fields=MAX_FACTORS, customer_satisfaction=10)
     )
     assert result.total_score == pytest.approx(100.0)
@@ -176,7 +175,7 @@ def test_maxed_factors_score_100():
 
 
 def test_kcr_01_raw_percent_score():
-    engine = HealthScoreEngine()
+    engine = ConfigDrivenStrategy()
     cases = [("100%", "10分"), ("87.5%", "8分"), ("65%", "6分"), ("45%", "4分"), ("30%", "1分")]
     for value, tail in cases:
         dim = engine._dimension_score("kcr", make_customer(custom_fields={"kcr_01": value}))
@@ -184,7 +183,7 @@ def test_kcr_01_raw_percent_score():
 
 
 def test_kcr_02_list_average_and_support_distribution():
-    engine = HealthScoreEngine()
+    engine = ConfigDrivenStrategy()
     customer = make_customer(custom_fields={
         "kcr_02": "[3,2,2,1,1]",
         "kcr_07": "支持62.5%且反对12.5%",
@@ -218,7 +217,7 @@ def test_risk_factors_worst_case_lower_score():
             "risk_08c": "危机",
         }
     )
-    dim = next(d for d in HealthScoreEngine().evaluate(c).dimensions if d.key == "risk")
+    dim = next(d for d in ConfigDrivenStrategy().evaluate(c).dimensions if d.key == "risk")
     assert dim.score == pytest.approx(0.72)
 
 
@@ -234,7 +233,7 @@ def test_v3_alerts_cover_raw_and_score_triggers():
             "risk_08c": "危机",
         }
     )
-    alerts = {a.id: a.level for a in HealthScoreEngine().evaluate(c).alerts}
+    alerts = {a.id: a.level for a in ConfigDrivenStrategy().evaluate(c).alerts}
     assert alerts["key_person_opposition"] == "high"
     assert alerts["kcr_dimension_low"] == "high"
     assert alerts["risk_dimension_low"] == "high"
@@ -270,7 +269,7 @@ def test_v3_trend_alert_matches_latest_docx_rule():
 ])
 def test_opposition_alert_uses_explicit_person_level_membership(value, expected):
     customer = make_customer(custom_fields={"kcr_02": value})
-    result = HealthScoreEngine().evaluate(customer)
+    result = ConfigDrivenStrategy().evaluate(customer)
     assert ("key_person_opposition" in {alert.id for alert in result.alerts}) is expected
     assert customer.custom_fields == {"kcr_02": value}
     if value == "1.5-1.9":
@@ -310,7 +309,7 @@ def test_all_alerts_use_current_factor_config():
 
 
 def test_config_version_returned_in_assessment():
-    assert HealthScoreEngine().evaluate(make_customer()).config_version == "2026.08.24-v3"
+    assert ConfigDrivenStrategy().evaluate(make_customer()).config_version == "2026.08.24-v3"
 
 
 # ── 3. 改配置即改算法（§11.1 首条验收）────────────────────────────────────

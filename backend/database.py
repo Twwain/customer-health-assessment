@@ -182,3 +182,59 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def migrate_ai_v2(target_engine: Engine = engine) -> int:
+    """Additive bridge migration. Caller must take a consistent backup first."""
+    from models import AIAssessmentRun, AIAssessmentDependency
+    AIAssessmentRun.__table__.create(bind=target_engine, checkfirst=True)
+    AIAssessmentDependency.__table__.create(bind=target_engine, checkfirst=True)
+    inspector = inspect(target_engine)
+    changes = 0
+    columns = {
+        "chat_messages": {
+            "ai_run_id": "VARCHAR(64) REFERENCES ai_assessment_runs(run_id) ON DELETE SET NULL",
+            "content_format": "VARCHAR(20) NOT NULL DEFAULT 'legacy'"},
+        "assessment_history": {
+            "strategy_run_id": "VARCHAR(64) REFERENCES ai_assessment_runs(run_id) ON DELETE SET NULL",
+            "strategy_format": "VARCHAR(20) NOT NULL DEFAULT 'legacy'"}}
+    with target_engine.begin() as conn:
+        for table, additions in columns.items():
+            if table not in inspector.get_table_names():
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for column, definition in additions.items():
+                if column not in existing:
+                    conn.exec_driver_sql(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+                    changes += 1
+        if conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("AI v2 foreign key check failed")
+    return changes
+
+
+def backup_before_ai_v2(target_engine: Engine = engine):
+    """Consistent SQLite backup before first additive bridge upgrade."""
+    from pathlib import Path
+    from uuid import uuid4
+    database = target_engine.url.database
+    if target_engine.dialect.name != "sqlite" or not database or database == ":memory:":
+        return None
+    path = Path(database).resolve()
+    if not path.is_file():
+        return None
+    inspector = inspect(target_engine)
+    if "chat_messages" not in inspector.get_table_names():
+        return None
+    if "content_format" in {c["name"] for c in inspector.get_columns("chat_messages")}:
+        return None
+    destination = path.with_name(path.stem+".before-ai-v2-"+uuid4().hex+".db")
+    source = sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
+    backup = sqlite3.connect(destination)
+    try:
+        source.backup(backup)
+        if backup.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("AI v2 backup integrity failure")
+    finally:
+        source.close()
+        backup.close()
+    return destination

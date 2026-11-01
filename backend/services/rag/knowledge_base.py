@@ -566,56 +566,6 @@ class KnowledgeBaseService:
         self._db.commit()
         return doc
 
-    # ── 对话沉淀：采纳策略入库─────────────────────────────────
-    def create_from_strategy(
-        self,
-        title: str,
-        strategy_text: str,
-        adopted_by: str = "user",
-        customer_name: str = "",
-    ) -> KnowledgeDocument:
-        category = normalize_category("对话沉淀")
-        os.makedirs(KNOWLEDGE_DATA_DIR, exist_ok=True)
-        doc = KnowledgeDocument(
-            title=title,
-            category=category,
-            source_type="对话沉淀",
-            file_size=len(strategy_text.encode("utf-8")),
-            status="canonical",  # 用户已采纳，直接可用
-            index_status="pending",
-            created_by=adopted_by,
-        )
-        self._db.add(doc)
-        self._db.flush()
-        fname = _safe_filename(f"{doc.id}_adopted", ".md")
-        path = os.path.join(KNOWLEDGE_DATA_DIR, fname)
-        header = f"# {title}\n\n> 来源客户：{customer_name}\n\n" if customer_name else f"# {title}\n\n"
-        with open(path, "wb") as fh:
-            fh.write((header + strategy_text).encode("utf-8"))
-        doc.file_path = path
-        self._db.add(
-            KnowledgeItem(
-                document_id=doc.id,
-                title=title,
-                category=category,
-                storage="vector",
-                status="canonical",
-                created_by=adopted_by,
-            )
-        )
-        try:
-            self._db.commit()
-        except Exception:
-            self._db.rollback()
-            try:
-                os.remove(path)
-            except OSError:
-                logger.warning("清理孤儿文件失败 %s", path)
-            raise
-        self.index_document(doc)
-        self._db.commit()
-        return doc
-
     # ── 浏览 / 检索 ─────────────────────────────────────────────────────────
     def list_items(
         self,
@@ -671,6 +621,14 @@ class KnowledgeBaseService:
             store=self._store,
         )
 
+    def _invalidate_ai_results(self):
+        try:
+            from services.ai.repository import sources_changed
+            sources_changed(self._db)
+        except Exception:
+            self._db.rollback()
+            logger.warning("AI 历史资料清理尚未完成；引用读取保持失效关闭")
+
     # ── 元数据编辑（正文不可编辑，）────────────────────────────────
     @_serialized_vector_mutation
     def update_item_metadata(
@@ -722,6 +680,7 @@ class KnowledgeBaseService:
         vector_ids = _enqueue_metadata_updates(self._db, chunk_rows)
         # 业务数据与 outbox 同一事务落库；Chroma 失败时返回 SQL 最新值，后台可重试。
         self._db.commit()
+        self._invalidate_ai_results()
         if vector_ids:
             result = self._flush_metadata_outbox(vector_ids)
             if result["failures"]:
@@ -777,6 +736,7 @@ class KnowledgeBaseService:
             c.chunk_metadata = {**(c.chunk_metadata or {}), "status": status}
         vector_ids = _enqueue_metadata_updates(self._db, chunk_rows)
         self._db.commit()
+        self._invalidate_ai_results()
 
         warnings: list[str] = []
         if vector_ids:
@@ -861,6 +821,7 @@ class KnowledgeBaseService:
             doc.status = "proposed"
             doc.index_status = "deleting"
         self._db.commit()
+        self._invalidate_ai_results()
         try:
             self._purge_deleting_document(doc_id, vector_ids, file_path)
         except Exception as exc:
@@ -1184,32 +1145,6 @@ class KnowledgeBaseService:
             "orphans_cleaned": len(orphan_ids) if cleanup_orphans else 0,
             "retired_collections_cleaned": retired_cleaned,
         }
-
-    # ── 预置知识──────────────────────────────────
-    def seed_default_knowledge(self, source_path: str | None = None) -> KnowledgeDocument | None:
-        existing = (
-            self._db.query(KnowledgeDocument)
-            .filter(KnowledgeDocument.category == "内部规范", KnowledgeDocument.title.like("%评估方法论%"))
-            .first()
-        )
-        if existing:
-            return existing
-        path = source_path or os.path.join(KNOWLEDGE_DATA_DIR, "customer_health_methodology.md")
-        if not os.path.exists(path):
-            return None
-        with open(path, "rb") as fh:
-            raw = fh.read()
-        return self.create_from_upload(
-            title="客户健康度评估方法论",
-            category="内部规范",
-            filename="customer_health_methodology.md",
-            raw=raw,
-            created_by="seed",
-            # 预置知识随项目交付即可用：直接 canonical，无需人工审核；
-            # 检索默认只查 canonical，若为 proposed 将导致预置知识实际不可检索
-            status="canonical",
-        )
-
 
 def run_vector_maintenance_once(
     db: Any, store: VectorStore, *, force_reconcile: bool = False

@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Open analysis plan 2.4 review candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "request_contract_id",
+    "summary_refs",
+    "risks",
+    "strength_refs",
+    "hypotheses",
+    "actions",
+    "verification_questions",
+    "projections",
+    "analysis",
+    "citation_refs",
+    "detail_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.4"
+    },
+    "snapshot_id": {
+      "$ref": "#/$defs/id"
+    },
+    "request_contract_id": {
+      "$ref": "#/$defs/id"
+    },
+    "summary_refs": {
+      "$ref": "#/$defs/refs"
+    },
+    "detail_refs": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "section",
+          "render_ref"
+        ],
+        "properties": {
+          "section": {
+            "enum": [
+              "trend",
+              "policy",
+              "explanation",
+              "comparison",
+              "data_quality"
+            ]
+          },
+          "render_ref": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "render_ref",
+          "priority"
+        ],
+        "properties": {
+          "render_ref": {
+            "$ref": "#/$defs/id"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          }
+        }
+      }
+    },
+    "strength_refs": {
+      "$ref": "#/$defs/refs"
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "statement",
+          "how_to_check"
+        ],
+        "properties": {
+          "statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "how_to_check": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 8
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "priority",
+          "reason",
+          "steps",
+          "suggested_owner",
+          "suggested_timing",
+          "deliverable",
+          "expected_outcome",
+          "depends_on",
+          "source_refs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^a:[A-Za-z0-9_]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "priority": {
+            "enum": [
+              "recommended",
+              "alternative",
+              "long_term"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "minItems": 1,
+            "maxItems": 8
+          },
+          "suggested_owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "suggested_timing": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "deliverable": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "expected_outcome": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "depends_on": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 24,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          "source_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 24,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 8
+    },
+    "verification_questions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      },
+      "minItems": 0,
+      "maxItems": 10
+    },
+    "projections": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "purpose",
+          "changes"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id"
+          },
+          "purpose": {
+            "enum": [
+              "what_if",
+              "plan_goal"
+            ]
+          },
+          "changes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field_ref",
+                "option_ref"
+              ],
+              "properties": {
+                "field_ref": {
+                  "$ref": "#/$defs/id"
+                },
+                "option_ref": {
+                  "$ref": "#/$defs/id"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "risks",
+        "strengths"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "minItems": 0,
+          "maxItems": 8
+        },
+        "strengths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "minItems": 0,
+          "maxItems": 8
+        }
+      }
+    },
+    "citation_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 24,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+    },
+    "refs": {
+      "type": "array",
+      "maxItems": 24,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "nonemptyRefs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    }
+  }
+}

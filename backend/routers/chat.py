@@ -8,8 +8,6 @@
 | DELETE | /api/chat/sessions/{id}                  | 删除会话 |
 | POST   | /api/chat/sessions/{id}/messages         | 发送消息（默认 SSE 流式） |
 | POST   | /api/chat/sessions/{id}/evaluate         | 快捷评估 |
-| POST   | /api/chat/sessions/{id}/strategy         | 快捷策略生成 |
-| POST   | /api/chat/sessions/{id}/alert-analysis   | 预警 AI 解读 |
 | POST   | /api/chat/sessions/{id}/regenerate       | 重新生成上一条回复（原型「🔄 重新生成」） |
 | POST   | /api/chat/messages/{id}/feedback         | 消息点赞/点踩 |
 | GET    | /api/chat/status                         | LLM 可用性（降级提示条数据源） |
@@ -24,7 +22,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-import config
 from database import get_db
 from models import ChatMessage, ChatSession, Customer, MESSAGE_FEEDBACKS
 from schemas import (
@@ -40,8 +37,7 @@ from schemas import (
     MessageFeedbackResponse,
 )
 from services.ai import chat_engine, llm_adapter, metrics as chat_metrics
-from services.ai.answer_presentation import present_history_answer
-from services.ai.prompt_templates import PromptTemplateError, load_prompt_templates
+from services.ai.protocol import ProtocolError, load_runtime_assets
 
 router = APIRouter(prefix="/chat", tags=["AI 对话"])
 
@@ -74,6 +70,16 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
     from sqlalchemy import func
 
     session_ids = [s.id for s in sessions]
+    from services.ai.execution import recover_pending
+    recover_pending(db, session_ids)
+    from models import AIAssessmentRun
+    running_sids = {sid for (sid,) in db.query(AIAssessmentRun.session_id).filter(
+        AIAssessmentRun.session_id.in_(session_ids), AIAssessmentRun.status.in_(
+            ("capturing", "facts_ready", "request_resolved", "planning", "validating", "repairing", "validated", "committing"))).distinct().all()}
+    latest_times = db.query(AIAssessmentRun.session_id.label("sid"), func.max(AIAssessmentRun.created_at).label("created")).filter(
+        AIAssessmentRun.session_id.in_(session_ids)).group_by(AIAssessmentRun.session_id).subquery()
+    latest_runs = {r.session_id: r for r in db.query(AIAssessmentRun).join(latest_times,
+        (AIAssessmentRun.session_id == latest_times.c.sid) & (AIAssessmentRun.created_at == latest_times.c.created)).all()}
 
     # 每个会话的消息数 + 最大消息 id（一次 GROUP BY 查询）
     stats_rows = (
@@ -94,18 +100,23 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
 
     # 最近一条消息内容（一次 IN 查询）
     last_content_by_mid: dict[int, str] = {}
+    last_role_by_mid = {}
     if last_msg_ids:
-        for mid, content, role in (
-            db.query(ChatMessage.id, ChatMessage.content, ChatMessage.role)
-            .filter(ChatMessage.id.in_(last_msg_ids))
-            .all()
-        ):
-            last_content_by_mid[mid] = present_history_answer(content or "") if role == "assistant" else content or ""
+        from services.ai.repository import resolve_messages
+        rows = db.query(ChatMessage).filter(ChatMessage.id.in_(last_msg_ids)).all()
+        for row in resolve_messages(db, rows, "preview"):
+            last_content_by_mid[row["id"]] = row["content"]
+            last_role_by_mid[row["id"]] = row["role"]
     last_content_by_sid = {
         sid: last_content_by_mid.get(max_id, "")
         for sid, _, max_id in stats_rows
         if max_id is not None
     }
+    last_role_by_sid = {sid: last_role_by_mid.get(mid) for sid, _, mid in stats_rows}
+    notices = {}
+    for sid, run in latest_runs.items():
+        if run.error_code in ("executor_lost", "timeout") and run.status in ("provider_error", "timeout"):
+            notices[sid] = "上次生成已中断，已保留原答案。" if last_role_by_sid.get(sid) == "assistant" else "上次生成已中断，请重试。"
 
     # 客户名（一次 IN 查询）
     customer_ids = {s.customer_id for s in sessions if s.customer_id}
@@ -124,7 +135,8 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
             customer_id=s.customer_id,
             customer_name=name_by_cid.get(s.customer_id, "") if s.customer_id else "",
             scenario=s.scenario,
-            streaming=chat_engine.is_session_streaming(s.id),
+            streaming=chat_engine.is_session_streaming(s.id) or s.id in running_sids,
+            run_notice=notices.get(s.id, ""),
             message_count=count_by_sid.get(s.id, 0),
             last_message=(last_content_by_sid.get(s.id, "") or "")[:60],
             created_at=s.created_at,
@@ -136,12 +148,26 @@ def _to_items(db: Session, sessions: list[ChatSession]) -> list[ChatSessionItem]
 
 def _run(db: Session, session: ChatSession, payload: ChatRequest, scenario: str):
     """按 payload.stream 选择 SSE 流式或一次性 JSON。"""
+    if scenario not in chat_engine.SCENARIOS:
+        raise HTTPException(status_code=400, detail="仅支持综合评估和自由问答")
+    if payload.idempotency_key:
+        from models import AIAssessmentRun
+        from services.ai.protocol import fingerprint
+        from services.ai.guardrails import sanitize_input
+        question = sanitize_input(payload.content)[0] or chat_engine._DEFAULT_QUICK_QUESTIONS.get(scenario, "")
+        scope = fingerprint([session.id, None, scenario, payload.idempotency_key])
+        run = db.query(AIAssessmentRun).filter_by(idempotency_key=scope).first()
+        expected = fingerprint(dict(customer_id=payload.customer_id or session.customer_id, scenario=scenario,
+                                    question=question, base_contract=None, supersede_message_id=None))
+        if run and run.payload_hash != expected:
+            raise HTTPException(status_code=409, detail="幂等键对应另一项请求")
     if payload.stream:
         generator = chat_engine.stream_sse(
             session.id,
             content=payload.content,
             scenario=scenario,
             customer_id=payload.customer_id,
+            idempotency_key=payload.idempotency_key,
         )
         return StreamingResponse(generator, media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -151,6 +177,7 @@ def _run(db: Session, session: ChatSession, payload: ChatRequest, scenario: str)
         content=payload.content,
         scenario=scenario,
         customer_id=payload.customer_id,
+        idempotency_key=payload.idempotency_key,
     )
     return ChatTurnResponse(**result)
 
@@ -190,12 +217,14 @@ def get_session(session_id: int, db: Session = Depends(get_db)):
     return ChatSessionDetail(
         **base.model_dump(),
         system_prompt=session.system_prompt,
-        messages=[
-            ChatMessageItem.model_validate(chat_engine._message_payload(m))
-            for m in session.messages
-            if m.superseded_by_id is None
-        ],
+        messages=_resolved_detail(db, session),
     )
+
+
+def _resolved_detail(db, session):
+    from services.ai.repository import resolve_messages
+    rows = [m for m in session.messages if m.superseded_by_id is None]
+    return [ChatMessageItem.model_validate(m) for m in resolve_messages(db, rows)]
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
@@ -215,7 +244,7 @@ def send_message(session_id: int, payload: ChatRequest, db: Session = Depends(ge
         raise HTTPException(status_code=400, detail="消息内容不能为空")
     # 会话内自由提问默认按 free_qa 跟随用户问题（带客户上下文与历史），
     # 不继承会话创建时的场景，避免在评估会话里追问时反复输出整份评估报告。
-    # 一键评估/策略/预警仍走 /evaluate、/strategy、/alert-analysis 场景端点。
+    # 一键综合评估走 /evaluate。
     return _run(db, session, payload, payload.scenario or "free_qa")
 
 
@@ -229,36 +258,27 @@ def evaluate(session_id: int, payload: ChatRequest | None = None, db: Session = 
     return _run(db, session, payload, "assessment")
 
 
-@router.post("/sessions/{session_id}/strategy")
-def strategy(session_id: int, payload: ChatRequest | None = None, db: Session = Depends(get_db)):
-    """快捷策略生成：输出推荐 / 备选 / 长期三层策略（含结构化条目）。"""
-    session = _get_session(db, session_id)
-    payload = payload or ChatRequest()
-    if not (payload.customer_id or session.customer_id):
-        raise HTTPException(status_code=400, detail="该会话未关联客户，无法生成策略")
-    return _run(db, session, payload, "strategy")
-
-
-@router.post("/sessions/{session_id}/alert-analysis")
-def alert_analysis(session_id: int, payload: ChatRequest | None = None, db: Session = Depends(get_db)):
-    """预警 AI 解读：预警成因 + 趋势判断 + 止损动作。"""
-    session = _get_session(db, session_id)
-    payload = payload or ChatRequest()
-    if not (payload.customer_id or session.customer_id):
-        raise HTTPException(status_code=400, detail="该会话未关联客户，无法解读预警")
-    return _run(db, session, payload, "alert_analysis")
-
-
 @router.post("/sessions/{session_id}/regenerate")
 def regenerate(session_id: int, payload: ChatRequest | None = None, db: Session = Depends(get_db)):
-    """重新生成上一条 AI 回复（删除旧回复后按同一提问重跑）。"""
+    """重新生成上一条 AI 回复，成功后替换原回复。"""
     session = _get_session(db, session_id)
     payload = payload or ChatRequest()
+    from services.ai.chat import replay_regeneration
+    identity = dict(customer_id=payload.customer_id or session.customer_id, scenario=payload.scenario, content=payload.content)
+    replay = replay_regeneration(db, session, payload.idempotency_key, identity)
+    if replay is not None:
+        if payload.stream:
+            return StreamingResponse(iter([chat_engine.sse(chat_engine.TurnEvent("done" if replay.get("message") else "error", replay))]),
+                                     media_type="text/event-stream", headers=SSE_HEADERS)
+        return ChatTurnResponse(**replay)
     scenario = payload.scenario or session.scenario or "free_qa"
+    if scenario not in chat_engine.SCENARIOS:
+        scenario = "assessment"
 
     if payload.stream:
         generator = chat_engine.stream_sse(
-            session.id, scenario=scenario, customer_id=payload.customer_id, regenerate=True
+            session.id, scenario=scenario, customer_id=payload.customer_id, regenerate=True, idempotency_key=payload.idempotency_key,
+            request_identity=identity,
         )
         return StreamingResponse(generator, media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -274,6 +294,8 @@ def regenerate(session_id: int, payload: ChatRequest | None = None, db: Session 
         persist_user=False,          # 提问已在库里，重跑不再重复落库
         exclude_message_id=exclude_id,
         supersede_message_id=exclude_id,
+        idempotency_key=payload.idempotency_key,
+        request_identity=identity,
     )
     return ChatTurnResponse(**result)
 
@@ -288,6 +310,31 @@ def chat_metrics_distribution(
 ):
     """查看最近 1 小时至 90 天的 token、耗时、降级和资源边界分布。"""
     return chat_metrics.summarize(db, hours=hours)
+
+
+@router.get("/sessions/{session_id}/runs/{run_id}")
+def get_ai_run(session_id: int, run_id: str, db: Session = Depends(get_db)):
+    from models import AIAssessmentRun
+    from services.ai.repository import available_result
+    session = _get_session(db, session_id)
+    from services.ai.execution import recover_pending
+    recover_pending(db, [session_id])
+    run = db.get(AIAssessmentRun, run_id)
+    if not run or run.session_id != session_id or run.customer_id != session.customer_id:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    result = available_result(db, run, customer_id=session.customer_id, session_id=session_id)
+    return dict(run_id=run_id, status=run.status, error_code=run.error_code, result=result)
+
+
+@router.post("/sessions/{session_id}/runs/{run_id}/cancel")
+def cancel_ai_run(session_id: int, run_id: str, db: Session = Depends(get_db)):
+    from services.ai.chat import cancel_run
+    _get_session(db, session_id)
+    try:
+        run = cancel_run(db, session_id, run_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    return dict(run_id=run_id, status=run.status)
 
 
 @router.post("/messages/{message_id}/feedback", response_model=MessageFeedbackResponse)
@@ -308,12 +355,10 @@ def message_feedback(
 def llm_status():
     """LLM 可用性探测：前端据此显示"AI 就绪"或"已降级为规则引擎"。"""
     status = llm_adapter.llm_status()
-    status["chat_thinking_enabled"] = config.LLM_CHAT_THINKING_ENABLED
-    status["report_thinking_enabled"] = config.LLM_REPORT_THINKING_ENABLED
     try:
-        templates = load_prompt_templates()
-        status["prompt_version"] = templates.version
-        status["scenarios"] = templates.scenarios
-    except PromptTemplateError as exc:
+        assets = load_runtime_assets()
+        status["prompt_version"] = assets.manifest["prompts_version"]
+        status["scenarios"] = list(chat_engine.SCENARIOS)
+    except ProtocolError as exc:
         status["reason"] = (status.get("reason") or "") + f"（Prompt 模板异常：{exc}）"
     return LLMStatusResponse(**status)

@@ -12,9 +12,8 @@ WORKDIR /app
 
 # 生产可选依赖开关（默认安装）：
 #   INSTALL_PROD_DEPS=1（默认）→ 安装 chromadb / pymupdf / python-docx
-#   INSTALL_PROD_DEPS=0      → 跳过（镜像进一步缩小），系统自动回退
-#                              内存向量库 / metadata 重排 / 基础文档解析，核心功能不受影响。
-# 内存受限的服务器（如 1G RAM）建议关闭，用 docker compose build --build-arg INSTALL_PROD_DEPS=0
+#   INSTALL_PROD_DEPS=0      → 跳过，仅适用于显式使用 memory 向量库的开发测试。
+# 生产 Chroma 依赖缺失时失败关闭，不自动回退内存库。
 ARG INSTALL_PROD_DEPS=1
 # PyPI 镜像源：国内网络建议用清华源等镜像加速，可被 docker compose build --build-arg 覆盖
 ARG PIP_INDEX_URL=https://pypi.org/simple
@@ -31,17 +30,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 后端代码（含可选依赖清单 requirements-prod.txt）
 COPY backend/ ./
 
-# 生产可选依赖：缺失时系统自动回退内存实现，不影响核心功能
+# 生产依赖：缺失会影响 Chroma 和相应文档解析能力，须检查构建日志
 # （chromadb 向量库 / pymupdf / python-docx 文档解析）
 RUN if [ "$INSTALL_PROD_DEPS" = "1" ]; then \
       pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements-prod.txt || { \
         echo "===================== WARNING ====================="; \
-        echo "可选依赖安装失败！RAG 向量库 / PDF 解析 / 重排将回退内存实现，"; \
-        echo "知识库向量检索或文档解析能力将降级。请检查网络或私有 PyPI 源后重建镜像。"; \
+        echo "生产依赖安装失败！Chroma 不会自动回退内存，相关知识检索或解析不可用。"; \
+        echo "请检查网络或私有 PyPI 源并重建镜像，确认 readiness 后再部署。"; \
         echo "==================================================="; \
       }; \
     else \
-      echo "INSTALL_PROD_DEPS=0：已跳过可选依赖（RAG 向量库 / PDF 解析 / 重排使用回退实现）"; \
+      echo "INSTALL_PROD_DEPS=0：已跳过生产依赖，仅适用于显式 memory 开发测试配置"; \
     fi
 
 # 前端构建产物

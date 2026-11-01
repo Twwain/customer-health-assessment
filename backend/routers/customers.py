@@ -682,6 +682,8 @@ def delete_customer(customer_id: int, db: Session = Depends(get_db)):
     if not customer:
         raise HTTPException(status_code=404, detail="客户不存在")
     name = customer.customer_name
+    from services.ai.repository import purge_customer_dependencies
+    purge_customer_dependencies(db, customer_id)
     db.delete(customer)
     db.commit()
     logger.info("删除客户 id=%s name=%s（级联清理评估历史与聊天会话）", customer_id, name)

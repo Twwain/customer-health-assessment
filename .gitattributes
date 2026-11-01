@@ -1,0 +1,2 @@
+# Runtime manifests verify exact bytes; preserve each reviewed asset verbatim.
+backend/services/ai/assets/** -text whitespace=cr-at-eol

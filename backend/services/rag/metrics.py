@@ -1,10 +1,9 @@
 """结构化知识指标服务。
 
-行业基准值、续约率、客户画像统计等**精确数值**不进向量库，评估时按客户
-行业 / 规模 / 地域精确查询，避免语义检索造成数值漂移。
+行业基准值、续约率、客户画像统计等精确数值不进向量库，支持按
+行业 / 规模 / 地域精确查询。
 
-本模块提供指标的精确查询、幂等写入、删除与 Prompt 注入格式化；
-对话上下文由 ``services.ai.context_builder`` 在构建客户上下文时注入。
+本模块提供指标的精确查询、幂等写入和删除。
 """
 
 from __future__ import annotations
@@ -84,15 +83,3 @@ def delete_metric(db: Any, metric_id: int) -> bool:
     db.delete(row)
     db.commit()
     return True
-
-
-def format_metrics_context(metrics: list[KnowledgeMetric]) -> str:
-    """渲染为 Prompt 注入的 Markdown 段落；空列表返回空串（不注入）。"""
-    if not metrics:
-        return ""
-    lines = ["## 行业基准指标（结构化精确数据，可作为对比基线）"]
-    for m in metrics:
-        scope = "、".join(x for x in (m.industry or "全行业", m.region, m.scale) if x)
-        period = f"（{m.period}）" if m.period else ""
-        lines.append(f"- {m.metric_name or m.metric_key}：{m.metric_value}{m.unit}　[{scope}]{period}")
-    return "\n".join(lines)

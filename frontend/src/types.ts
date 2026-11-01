@@ -109,30 +109,6 @@ export interface FactorUpdateResponse {
   ignored_fields: string[];
 }
 
-export interface AssessmentHistoryItem {
-  id: number;
-  customer_id: number;
-  assessed_by: string;
-  trigger: string;
-  total_score: number;
-  max_score: number;
-  level: string;
-  level_color: string;
-  dimensions: DimensionScore[];
-  risk_alerts: string[];
-  factor_snapshot: Record<string, unknown>;
-  strategy_snapshot: unknown[];
-  config_version: string;
-  assessed_at: string;
-}
-
-export interface AssessmentHistoryResponse {
-  customer_id: number;
-  customer_name: string;
-  total: number;
-  items: AssessmentHistoryItem[];
-}
-
 export interface TrendPoint {
   assessed_at: string;
   label: string;
@@ -156,6 +132,11 @@ export interface AssessmentTrendResponse {
 }
 
 export interface StrategyItem {
+  steps?: string[] | null;
+  depends_on?: string[] | null;
+  suggested_owner?: string | null;
+  suggested_timing?: string | null;
+  deliverable?: string | null;
   priority: string; // recommended / alternative / long_term
   title: string;
   urgency: string; // high / medium / low
@@ -172,7 +153,7 @@ export interface KnowledgeReference {
   chunk_id?: number;
   title: string;
   category: string;
-  score: number;
+  score: number | null;
   snippet: string;
   used?: boolean;
 }
@@ -181,6 +162,7 @@ export interface ChatMessageItem {
   id: number;
   session_id: number;
   role: string;
+  scenario?: string | null;
   content: string;
   references: KnowledgeReference[];
   strategy_items: StrategyItem[];
@@ -197,6 +179,7 @@ export interface ChatSessionItem {
   customer_name: string;
   scenario: string;
   streaming: boolean;
+  run_notice?: string;
   message_count: number;
   last_message: string;
   created_at: string;
@@ -211,20 +194,6 @@ export interface ChatSessionDetail extends ChatSessionItem {
 export interface ChatSessionListResponse {
   items: ChatSessionItem[];
   total: number;
-}
-
-export interface ChatTurnResponse {
-  session_id: number;
-  message: ChatMessageItem | null;
-  assessment: AssessmentResponse | null;
-  trend: AssessmentTrendResponse | null;
-  strategy_items: StrategyItem[];
-  references: KnowledgeReference[];
-  degraded: boolean;
-  tokens_used: number;
-  latency_ms: number;
-  warnings: string[];
-  error: string;
 }
 
 export interface LLMStatusResponse {

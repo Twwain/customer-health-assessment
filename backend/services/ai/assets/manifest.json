@@ -1,0 +1,21 @@
+{
+  "contracts_version": "2.4",
+  "user_pack_version": "2.4",
+  "prompts_version": "2.4",
+  "intent_version": "2.4",
+  "plan_version": "2.4",
+  "intent_rules_version": "1.2",
+  "repair_rules_version": "1.2",
+  "diagnostics_version": "1.0",
+  "source_sha256": "15612deb7c5ae981bf0f64f8667c72d841ec0ae209ec86a5486e258205558a3b",
+  "artifact_sha256": "924664b98239751115530d2fd66d9c903357fd0833a9cb0610fc7d84904375fb",
+  "sha256": {
+    "prompts.json": "8cb0f0c475903a800e1c32fcfcc234267240ec70b2e5ec7cbc08d1d754cd4a27",
+    "plan.schema.json": "dda71d800924cf4b0464bcac30e8c2cf11b215b9b90615c24906f1a3c665ced7",
+    "intent.schema.json": "42395685b9549634f3896781f9eec897c404d16618cf754e48e74ffc52328fe6",
+    "intent.rules.json": "5b31e10096604466099af0e23c9197252db9cd48ec910b550c7a93e70db6c994",
+    "intent.input.schema.json": "626207e25d8fe0386c2516aa37e63f961ecbecec48034fb17af8d505a51dd7ad",
+    "audit.schema.json": "00ed4664e0fd4ad5b797e79b3b7e01f595de1d8f0aefc58136158f540c7c3c71",
+    "diagnostic.schema.json": "4e8bece32dd0ac22dec17e1e6b376e0f83623e1bd73511808d9c9bccd8d82de4"
+  }
+}

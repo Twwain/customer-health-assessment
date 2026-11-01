@@ -5,7 +5,7 @@
   并限制长度（防止超长输入撑爆上下文与 Token 成本）。
 - **出向**：LLM 回复落库与推流前做同样的脱敏，防止提示词注入把密钥回显出来。
 
-注意：客户联系电话属业务数据但含个人信息，**不注入 LLM 上下文**（见 context_builder），
+注意：客户联系电话属业务数据但含个人信息，**不注入 LLM 上下文**，
 这里只在自由文本里做兜底遮蔽。
 """
 
@@ -38,11 +38,6 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
 ]
 
 _PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)(\d{4})(\d{4})(?!\d)")
-
-# 这些标签只用于把数据库字段 / RAG 原文明确降权为“不可信数据”。标签名固定，
-# 调用方不能让文档内容自行闭合标签；尖括号会在包装前转义。
-_UNTRUSTED_LABELS = {"customer", "rag", "tool"}
-
 
 def sanitize_text(text: str) -> tuple[str, list[str]]:
     """脱敏并返回命中的敏感类型列表。"""
@@ -89,50 +84,3 @@ def sanitize_for_outbound(text: str, *, max_chars: int | None = None) -> tuple[s
         cleaned = cleaned[:max_chars] + "\n（出站内容过长已截断）"
         hits.append("truncated")
     return cleaned, hits
-
-
-def wrap_untrusted(text: str, source: str) -> str:
-    """把客户/RAG/工具正文标为不可信数据，防止其伪装成 Prompt 指令。"""
-    label = source if source in _UNTRUSTED_LABELS else "tool"
-    cleaned, _ = sanitize_for_outbound(text)
-    cleaned = cleaned.replace("<", "＜").replace(">", "＞")
-    return f"<untrusted_{label}_data>\n{cleaned}\n</untrusted_{label}_data>"
-
-
-class StreamingOutputSanitizer:
-    """增量脱敏器：保留可能跨 chunk 的敏感尾部，完成后再安全输出。"""
-
-    _TAIL_CHARS = 24
-    _TRAILING_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+$")
-    _OPEN_CREDENTIAL_RE = re.compile(
-        r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|token|密码|口令|密钥)"
-        r"\s*(?:[:=是为]|：)\s*[^\s，,；;、'\"]*$",
-        re.IGNORECASE,
-    )
-
-    def __init__(self) -> None:
-        self._pending = ""
-
-    def feed(self, text: str) -> str:
-        self._pending += text or ""
-        cut = max(0, len(self._pending) - self._TAIL_CHARS)
-        for pattern in (self._TRAILING_TOKEN_RE, self._OPEN_CREDENTIAL_RE):
-            match = pattern.search(self._pending)
-            if match is not None:
-                cut = min(cut, match.start())
-        # 已形成完整敏感串但恰好横跨输出边界时，也必须整体留到下一轮。
-        for _, pattern in _PATTERNS:
-            for match in pattern.finditer(self._pending):
-                if match.start() < cut < match.end():
-                    cut = match.start()
-        for match in _PHONE_RE.finditer(self._pending):
-            if match.start() < cut < match.end():
-                cut = match.start()
-        if cut <= 0:
-            return ""
-        ready, self._pending = self._pending[:cut], self._pending[cut:]
-        return sanitize_output(ready)
-
-    def flush(self) -> str:
-        ready, self._pending = self._pending, ""
-        return sanitize_output(ready)

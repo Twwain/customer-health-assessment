@@ -12,6 +12,7 @@ from services.ai.metrics import record_report_metric, summarize
 from test_export_endpoints import (  # 复用隔离 SQLite / HTTP 夹具
     _offline_llm, _wait_ready, client, customer, db, engine, session_factory,
 )
+from test_ai_protocol import Adapter, v2db
 
 
 @pytest.fixture
@@ -22,11 +23,10 @@ def report_factory(monkeypatch):
             assessment=object(), strategy_items=[], references=[], trend=None,
             timings={
                 "llm_calls": [
-                    {"phase": "reason", "total_tokens": 65000},
-                    {"phase": "budget_final", "total_tokens": 35000},
+                    {"phase": "plan", "total_tokens": 65000},
+                    {"phase": "repair", "total_tokens": 35000},
                 ],
-                "tool_rounds": 2, "refine_rounds": 1,
-                "verification": [{"status": "passed", "reason": ""}],
+                "llm_call_count": 2,
             },
         )
 
@@ -59,7 +59,6 @@ def test_pdf_entries_persist_complete_report_usage(
         report.degraded = degraded
         if degraded:
             report.warnings = ["已降级"]
-            report.timings["verification"] = []
         return report
 
     monkeypatch.setattr(report_builder, "build_report_data", build)
@@ -76,8 +75,9 @@ def test_pdf_entries_persist_complete_report_usage(
     assert metric.status == ("degraded" if degraded else "success")
     assert metric.warning_count == int(degraded)
     assert metric.llm_call_count == 2
-    assert metric.tool_rounds == 2
-    assert metric.refine_rounds == 1
+    assert metric.tool_rounds == metric.refine_rounds == 0
+    assert metric.quality_diagnostics == {}
+    assert metric.error_code == ("report_degraded" if degraded else "")
     result = summarize(db)
     assert result["configured_token_budget"] == 100
     assert result["configured_report_token_budget"] == 90000
@@ -98,29 +98,35 @@ def test_metric_database_failure_does_not_break_pdf(client, customer, engine, re
     assert response.content == b"%PDF-test"
 
 
-@pytest.mark.parametrize("verification,code", [
-    ([], "fact_check_unverified"),
-    ([{"status": "unverified", "reason": "响应截断"}], "fact_check_unverified"),
-    ([{"status": "issues", "reason": ""}], "fact_check_issues"),
-    ([{"status": "passed", "reason": "部分目标未核对"}], "fact_check_unverified"),
-])
-def test_unverified_report_is_not_recorded_as_verified(db, report_factory, customer, verification, code):
-    report = report_factory(db, customer)
-    report.timings["verification"] = verification
-    record_report_metric(db, report, elapsed_ms=12345)
-    metric = db.query(ChatTurnMetric).one()
-    assert metric.status == "partial"
-    assert metric.error_code == code
-    assert metric.latency_ms == 12345
-
-
 def test_malformed_optional_metric_metadata_is_nonfatal(db, report_factory, customer):
     report = report_factory(db, customer)
-    report.timings = {"llm_calls": [None, {"total_tokens": "bad"}], "tool_rounds": "bad"}
+    report.timings = {"llm_calls": [None, {"total_tokens": "bad"}]}
     record_report_metric(db, report, elapsed_ms=0)
     metric = db.query(ChatTurnMetric).one()
     assert metric.tokens_used == 0
-    assert metric.status == "partial"
+    assert metric.status == "success"
     report.timings = None
     record_report_metric(db, report, elapsed_ms=0)
     assert db.query(ChatTurnMetric).count() == 2
+
+
+def test_published_current_report_records_success_without_legacy_checker(v2db, monkeypatch):
+    from services.ai import evidence, orchestrator
+    from services.ai.report import build_report
+
+    db, customer, _ = v2db
+    monkeypatch.setattr(orchestrator, 'get_chat_adapter', lambda: Adapter())
+
+    def no_hits(db, package, *args):
+        package['retrieval_status'] = 'no_hits'
+        return {}
+
+    monkeypatch.setattr(evidence, 'retrieve', no_hits)
+    report = build_report(db, customer)
+    assert report.has_ai and not report.degraded
+    assert report.timings['run_id'] and 'verification' not in report.timings
+    record_report_metric(db, report, elapsed_ms=12345)
+    metric = db.query(ChatTurnMetric).one()
+    assert metric.status == 'success' and metric.error_code == ''
+    assert metric.llm_call_count == 1 and metric.tokens_used > 0
+    assert metric.latency_ms == 12345

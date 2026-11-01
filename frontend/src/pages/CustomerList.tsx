@@ -179,7 +179,7 @@ export default function CustomerList() {
         customer_id: c.id,
         scenario: "assessment",
       });
-      navigate(`/chat/${s.id}`, { state: { autoScenario: "assessment" } });
+      navigate(`/chat/${s.id}`, { state: { autoAssess: true } });
     } catch {
       notify("创建评估会话失败", "error");
     }

@@ -913,46 +913,6 @@ def test_reindex(db, memory_store, fake_embed):
     assert memory_store.count() == doc.chunk_count
 
 
-def test_adopt_strategy_is_canonical(db, memory_store, fake_embed):
-    svc = _kb(db, memory_store, fake_embed)
-    doc = svc.create_from_strategy(
-        title="采纳的策略", strategy_text="建议安排高层拜访以应对竞品。", adopted_by="alice", customer_name="示例汽车集团"
-    )
-    assert doc.category == "对话沉淀"
-    assert doc.status == "canonical"
-    assert doc.index_status == "indexed"
-
-
-# ══════════════════════════ 知识上下文注入对话 ══════════════════════════════
-
-
-def test_build_knowledge_context_injects_refs(db, memory_store, fake_embed):
-    from services.ai import context_builder
-
-    svc = _kb(db, memory_store, fake_embed)
-    doc = svc.create_from_upload(
-        title="方法论", category="内部规范", filename="m.md", raw=METHODOLOGY_MD.encode("utf-8")
-    )
-    item = db.query(KnowledgeItem).filter(KnowledgeItem.document_id == doc.id).first()
-    svc.approve_item(item.id)
-
-    text, refs = context_builder.build_knowledge_context(
-        "回款风险", db=db, embed_func=fake_embed, store=memory_store
-    )
-    assert "知识库参考资料" in text
-    assert refs
-    assert refs[0]["category"] == "内部规范"
-    assert "document_id" in refs[0]
-
-
-def test_build_knowledge_context_degrades_without_query(db, memory_store, fake_embed):
-    from services.ai import context_builder
-
-    text, refs = context_builder.build_knowledge_context("", db=db)
-    assert text == context_builder.NO_KNOWLEDGE_HINT
-    assert refs == []
-
-
 # ══════════════════════════ 接口层═══════════════════════════════
 
 
@@ -1495,9 +1455,9 @@ def test_migrate_seed_knowledge_status(db, memory_store, fake_embed):
     assert migrate_seed_knowledge_status(db, store=memory_store) == 0
 
 
-def test_metrics_crud_and_context_format(app_client, db):
-    """结构化指标：写入幂等、按行业精确查询、渲染为 Prompt 段落、删除。"""
-    from services.rag.metrics import format_metrics_context, query_metrics
+def test_metrics_crud_and_query(app_client, db):
+    """结构化指标：写入幂等、按行业精确查询、删除。"""
+    from services.rag.metrics import query_metrics
 
     resp = app_client.post(
         "/api/knowledge/metrics",
@@ -1530,8 +1490,7 @@ def test_metrics_crud_and_context_format(app_client, db):
 
     rows = query_metrics(db, industry="金融")
     assert len(rows) == 1
-    text = format_metrics_context(rows)
-    assert "行业基准指标" in text and "73.0分" in text and "金融" in text
+    assert rows[0].metric_value == 73.0 and rows[0].industry == "金融"
     # 其他行业查不到行业特定指标，但能看到通用指标（industry 为空）
     assert query_metrics(db, industry="能源") == []
 
@@ -1544,56 +1503,6 @@ def test_metrics_crud_and_context_format(app_client, db):
 
     assert app_client.delete(f"/api/knowledge/metrics/{metric_id}").json()["deleted"] is True
     assert query_metrics(db, industry="金融") == []
-
-
-def test_metrics_injected_into_chat_context(db):
-    """客户上下文注入同行业基准指标段落。"""
-    from models import Customer
-    from services.ai.context_builder import build_context
-    from services.rag.metrics import upsert_metric
-
-    c = Customer(customer_name="指标客户", industry="金融")
-    db.add(c)
-    db.commit()
-    upsert_metric(
-        db,
-        metric_key="industry_avg_score",
-        metric_name="行业健康度均值",
-        metric_value=72.5,
-        unit="分",
-        industry="金融",
-    )
-
-    ctx = build_context(db, c, query="", retrieve_knowledge=False)
-    assert "行业基准指标" in ctx.customer_text
-    assert "72.5分" in ctx.customer_text
-
-    # 无匹配行业指标的客户不注入该段落
-    c2 = Customer(customer_name="无指标客户", industry="教育")
-    db.add(c2)
-    db.commit()
-    ctx2 = build_context(db, c2, query="", retrieve_knowledge=False)
-    assert "行业基准指标" not in ctx2.customer_text
-
-    # 无行业的客户：只注入通用指标，绝不注入其他行业的特定指标
-    upsert_metric(
-        db,
-        metric_key="global_avg_score",
-        metric_name="全行业健康度均值",
-        metric_value=68.0,
-        unit="分",
-        industry="",
-    )
-    c3 = Customer(customer_name="无行业客户", industry="")
-    db.add(c3)
-    db.commit()
-    ctx3 = build_context(db, c3, query="", retrieve_knowledge=False)
-    assert "68.0分" in ctx3.customer_text
-    assert "72.5分" not in ctx3.customer_text  # 金融行业的特定指标不得错配
-
-    # 有行业的客户：行业特定指标 + 通用指标都可见
-    ctx4 = build_context(db, c, query="", retrieve_knowledge=False)
-    assert "72.5分" in ctx4.customer_text and "68.0分" in ctx4.customer_text
 
 
 def test_list_items_tag_search(app_client):
@@ -1835,10 +1744,11 @@ def test_retrieval_defers_writes_until_commit(tmp_path, memory_store, fake_embed
         eng.dispose()
 
 
-def test_pdf_generation_and_check_receive_full_retrieved_source(db, memory_store, fake_embed, monkeypatch):
-    from services.ai import llm_adapter
+def test_pdf_generation_receives_full_retrieved_source(db, memory_store, fake_embed, monkeypatch):
+    import json
+    import services.ai.orchestrator as orchestrator
     from services.report_builder import build_report_data
-    from test_fact_check import ScriptedAdapter
+    from test_ai_protocol import Adapter
 
     full = "回款核验必须保留记录。" * 24 + "必须在37小时内完成核验，在73小时内取得付款排期。"
     svc = _kb(db, memory_store, fake_embed)
@@ -1850,15 +1760,14 @@ def test_pdf_generation_and_check_receive_full_retrieved_source(db, memory_store
     db.commit()
     monkeypatch.setattr("services.rag.retriever.make_embedding_func", lambda: fake_embed)
     monkeypatch.setattr("services.rag.retriever.get_vector_store", lambda: memory_store)
-    adapter = ScriptedAdapter(['应在37小时内完成核验。参考：回款规则。', '{"issues":[]}'])
-    monkeypatch.setattr(llm_adapter, "get_chat_adapter", lambda: adapter)
-    report = build_report_data(db, customer, scenario="assessment")
-    assert len(adapter.calls) == 2  # 首次生成 + 独立核对，无修订
-    for messages, _ in adapter.calls:
-        assert "37小时" in messages[-1].content
-        assert "73小时" in messages[-1].content
-    assert report.timings["verification"][0]["status"] == "passed"
-    assert "37小时" not in report.references[0]["snippet"]
+    adapter = Adapter()
+    monkeypatch.setattr(orchestrator, "get_chat_adapter", lambda: adapter)
+    report = build_report_data(db, customer)
+    assert not report.degraded
+    assert len(adapter.calls) == 1
+    payload = json.loads(adapter.calls[0][-1]["content"])
+    evidence_text = " ".join(e["content"] for e in payload["untrusted_evidence"])
+    assert "37小时" in evidence_text and "73小时" in evidence_text
     assert all("_model_content" not in ref for ref in report.references)
 
 

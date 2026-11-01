@@ -98,3 +98,6 @@ frontend/lint_out.txt
 # Local dev process artifacts (not for git)
 dev_process/
 AGENTS.md
+
+# Local documentation (not for new commits)
+/docs/
