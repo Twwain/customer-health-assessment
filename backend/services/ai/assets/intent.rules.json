@@ -1,0 +1,218 @@
+{
+  "intent_rule_matrix": {
+    "score_grade": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "explain_score": {
+      "subjects": "bound_primary",
+      "fields": "optional_current_fields",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "data_quality": {
+      "subjects": "bound_primary",
+      "fields": "optional_current_fields",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "risk": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "alerts": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "actions": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "nullable": true,
+        "min": 1,
+        "max": 8,
+        "default": 1
+      }
+    },
+    "verify_questions": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "nullable": true,
+        "min": 1,
+        "max": 10,
+        "default": 1
+      }
+    },
+    "projection": {
+      "subjects": "bound_primary",
+      "fields": "required_paired_fields",
+      "options": "required_field_matched_options",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "trend": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "compare": {
+      "subjects": "all_explicit_members",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    },
+    "policy": {
+      "subjects": "bound_primary",
+      "fields": "empty",
+      "options": "empty",
+      "sources": "required_selected_policy_hits_or_empty_general_no_hits",
+      "count": {
+        "const": null
+      }
+    },
+    "analysis": {
+      "subjects": "bound_primary",
+      "fields": "optional_current_fields",
+      "options": "empty",
+      "sources": "empty",
+      "count": {
+        "const": null
+      }
+    }
+  },
+  "user_packages": {
+    "intent": {
+      "additionalProperties": false,
+      "fields": [
+        "version",
+        "intent_rules_version",
+        "question",
+        "history",
+        "allowed_intents",
+        "allowed_subject_refs",
+        "allowed_field_refs",
+        "allowed_option_refs",
+        "allowed_source_refs",
+        "count_limits",
+        "intent_definitions",
+        "subject_context",
+        "argument_rules",
+        "retrieval_context",
+        "intent_output_schema",
+        "source_policy"
+      ],
+      "fixed_literals": {
+        "intent_definitions": {
+          "score_grade": "查询当前引擎评分和等级。",
+          "explain_score": "解释被问因子原值和实际计分；field_refs为空表示全部合法配置因子。",
+          "data_quality": "查询指定或全部因子的缺失、冲突及格式状态，不据此推断经营风险。",
+          "risk": "围绕问题自由判断客户业务风险及优先级；问最大或首要风险只聚焦一个，不按引擎预警顺序选择。",
+          "alerts": "仅在明确要求评分引擎预警原始清单时使用；最大风险、主要风险等业务判断不使用本意图。",
+          "actions": "生成具体业务建议；count为空使用1，显式数量1至8；不限制为预先登记的候选。",
+          "verify_questions": "请求客户级核实问题；count为空使用1，显式数量1至10；本版不声明字段限定语义。",
+          "projection": "对已知基线因子进行合法目标的条件测算；字段与目标逐一对应。基线/选项不足则澄清。",
+          "trend": "查询评分历史窗口与变化，不推断业务因果。",
+          "compare": "只比较本次明确指定并捕获的全部客户评分，至少2个；不能增加客户。",
+          "policy": "查询制度原文、责任主体、时限和出处；无需客户因子或测算选项，不确认客户适用或违规。资料身份由document_ref及本次证据版本限定；source_policy缺失/歧义时整次choose_source，泛查询无命中可正常说明未知。",
+          "analysis": "开放业务分析、机会、原因假设和推进讨论，允许条件判断；资料缺失或判断不确定不构成澄清。"
+        },
+        "subject_context": {
+          "bound_subject_ref": {
+            "$binding": "snapshot.customer_ref"
+          },
+          "use_bound_subject_for_implicit_subject": true,
+          "explicit_subject_rule": "仅当问题未另指客户时使用绑定对象；不得替代明确的其他客户或比较成员。"
+        },
+        "argument_rules": {
+          "count": "仅行动卡/核实问题数量；制度时限等不是count。未要求数量用null，默认值按已声明规则。",
+          "field_refs": "可在analysis、explain_score、data_quality和projection使用当前允许字段；其他为空。",
+          "option_refs": "只在projection使用；每个字段对应一个合法目标。",
+          "source_refs": "只在policy使用本次source_policy限定来源。明确点名时保留全部所选制度分片；缺失/歧义须choose_source，不全选同名不同文档。",
+          "duplicate_kinds": "每种kind至多一个；字段和来源合并在同一项，冲突任务须澄清，不能覆盖。"
+        }
+      },
+      "bindings": {
+        "version": "literal 2.4",
+        "intent_rules_version": "literal 1.2",
+        "question": "DLP user question",
+        "history": "bounded resolved history",
+        "allowed_intents": "registered kind namespace",
+        "allowed_subject_refs": "snapshot members",
+        "allowed_field_refs": "current config fields",
+        "allowed_option_refs": "known-baseline legal targets",
+        "allowed_source_refs": "retrieved canonical SQL-authoritative evidence",
+        "count_limits": "registered per-kind limits",
+        "retrieval_context": "status and safe source IDs/titles",
+        "intent_output_schema": "closed rule matrix plus source_policy compilation",
+        "source_policy": "one immutable question-aware SQL-evidence scope"
+      }
+    },
+    "plan": {
+      "additionalProperties": false,
+      "version": "2.4",
+      "fields": [
+        "version",
+        "snapshot_id",
+        "request_contract",
+        "plan_schema",
+        "catalog",
+        "allocated_action_ids",
+        "allocated_projection_ids",
+        "question",
+        "history",
+        "untrusted_evidence",
+        "preferences"
+      ],
+      "plan_output_version": "2.4",
+      "source_policy": "union of displayed knowledge quotes, citation_refs and action.source_refs; canonical frozen evidence only"
+    },
+    "repair": {
+      "additionalProperties": false,
+      "version": "2.4",
+      "fields": [
+        "version",
+        "request_contract",
+        "catalog",
+        "base_plan",
+        "repair_envelope",
+        "repair_output_schema"
+      ],
+      "source_policy": "union of displayed knowledge quotes, citation_refs and action.source_refs; canonical frozen evidence only"
+    }
+  }
+}

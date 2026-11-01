@@ -10,6 +10,11 @@ __pycache__
 .git
 *.db
 data/
+dev_process/
+.tmp/
+tmp/
+.playwright-mcp/
+.vite/
 backend/static/
 .env
 .ch_secret

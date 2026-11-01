@@ -3,7 +3,7 @@
 - 评分相关：维度 / 因子 / 权重 / 规则等业务配置在 ``backend/scoring_config.yaml``
   。
 - LLM 相关：API Key / Base URL / 模型名走 ``.env``；
-  Prompt 文案在 ``backend/prompt_templates.yaml``。
+  Prompt 与数据合同在 ``backend/services/ai/assets/``。
 """
 
 import logging
@@ -103,7 +103,7 @@ def _decrypt_env(raw: str, name: str = "") -> str:
 
 # ══════════════════════════ 评分引擎══════════════════════════════
 
-# 评分策略：rule_based（配置驱动，默认）/ config（同义）/ ml（预留模型接入）
+# 评分策略：rule_based（配置驱动，默认）/ config（同义）
 SCORING_STRATEGY = os.getenv("SCORING_STRATEGY", "rule_based")
 
 # 评分配置文件路径，可用环境变量覆盖（便于多环境使用不同权重）
@@ -123,9 +123,7 @@ LLM_API_KEY = _decrypt_env(os.getenv("LLM_API_KEY", ""), "LLM_API_KEY")
 # 对话模型标识由 .env 指定；未配置则视为不可用、自动降级
 LLM_MODEL = os.getenv("LLM_MODEL", "")
 
-LLM_TEMPERATURE = _env_float("LLM_TEMPERATURE", 0.3)
-# 对话输出 token 上限：作为 prompt_templates.yaml 中各模板 max_tokens 的硬上限
-# （实际生效值 = min(模板 max_tokens, LLM_MAX_TOKENS)），默认与模板对齐为 8000
+# 对话输出 token 上限
 LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 8000)
 LLM_TIMEOUT = _env_float("LLM_TIMEOUT", 60.0)
 LLM_CONNECT_TIMEOUT = _env_float("LLM_CONNECT_TIMEOUT", 8.0)
@@ -134,24 +132,14 @@ LLM_RETRY_BACKOFF = _env_float("LLM_RETRY_BACKOFF", 0.6)
 
 # 总开关：置 false 可强制走规则引擎降级（演示环境 / 断网自测用）
 LLM_ENABLED = _env_bool("LLM_ENABLED", True)
-# 流式请求是否附带 usage 统计（部分网关不支持，握手失败会自动关闭）
+# 流式请求是否附带 usage 统计；不支持此参数的网关需显式关闭。
 LLM_STREAM_USAGE = _env_bool("LLM_STREAM_USAGE", True)
-# 是否启用函数调用工具（customer_compare / knowledge_search）。
-# 关闭后对话仍可正常生成，只是不再主动检索与对比；不兼容 function calling
-# 的供应商会在适配器层收到 400 后自动去掉 tools 重试，无需改这里。
-LLM_TOOLS_ENABLED = _env_bool("LLM_TOOLS_ENABLED", True)
-# DeepSeek V4 默认开启 thinking。交互对话优先首字速度，PDF 报告优先分析质量。
-LLM_CHAT_THINKING_ENABLED = _env_bool("LLM_CHAT_THINKING_ENABLED", False)
-LLM_REPORT_THINKING_ENABLED = _env_bool("LLM_REPORT_THINKING_ENABLED", True)
-# PDF 是独立的后台思考任务。生成预算包含思考与正文，不受聊天模板 8000 限制。
-LLM_REPORT_REASONING_EFFORT = os.getenv("LLM_REPORT_REASONING_EFFORT", "high").strip().lower()
-if LLM_REPORT_REASONING_EFFORT not in {"low", "high", "max"}:
-    raise ValueError("LLM_REPORT_REASONING_EFFORT 必须是 low / high / max")
+# 报告使用独立的输出与整轮 token 预算。
 LLM_REPORT_MAX_TOKENS = max(1024, _env_int("LLM_REPORT_MAX_TOKENS", 32768))
-# 防极端滥用的探索软上限；正常报告保留充分核对/修订余量，先采集真实消耗再优化。
+# 报告整轮输入、输出 token 累计上限。
 REPORT_TURN_TOKEN_BUDGET = max(LLM_REPORT_MAX_TOKENS, _env_int("REPORT_TURN_TOKEN_BUDGET", 1_000_000))
 REPORT_GENERATION_TIMEOUT_SECONDS = max(30.0, _env_float("REPORT_GENERATION_TIMEOUT_SECONDS", 600.0))
-# 进程内 Chat LLM 全局并发上限。所有同步/流式调用（含报告 AI）共用该额度。
+# 进程内 Chat LLM 全局并发上限，对话与报告共用。
 CHAT_LLM_GLOBAL_CONCURRENCY = max(1, _env_int("CHAT_LLM_GLOBAL_CONCURRENCY", 8))
 # 公网匿名部署的轻量突发保护：按客户端 IP 汇总 AI 重型接口请求。
 AI_RATE_LIMIT_PER_MINUTE = max(1, _env_int("AI_RATE_LIMIT_PER_MINUTE", 60))
@@ -186,10 +174,6 @@ EMBEDDING_ENABLED = _env_bool("EMBEDDING_ENABLED", bool(EMBEDDING_API_KEY))
 
 # ══════════════════════════ 对话编排════════════════════════════
 
-PROMPT_TEMPLATE_PATH = os.getenv(
-    "PROMPT_TEMPLATE_PATH",
-    os.path.join(BASE_DIR, "prompt_templates.yaml"),
-)
 
 # 多轮上下文窗口：最多带入最近 N 条消息、总字符预算上限（控制 Token 成本，）
 CHAT_MAX_CONTEXT_MESSAGES = _env_int("CHAT_MAX_CONTEXT_MESSAGES", 12)
@@ -198,36 +182,9 @@ CHAT_CONTEXT_CHAR_BUDGET = _env_int("CHAT_CONTEXT_CHAR_BUDGET", 8000)
 CHAT_MAX_INPUT_CHARS = _env_int("CHAT_MAX_INPUT_CHARS", 4000)
 # 趋势上下文带入的历史评估条数
 CHAT_TREND_POINTS = _env_int("CHAT_TREND_POINTS", 6)
-# 降级模式下模拟流式的分片大小（字符）
-CHAT_DEGRADED_CHUNK_SIZE = _env_int("CHAT_DEGRADED_CHUNK_SIZE", 24)
-# Agent 线程/事件队列硬边界，防止断线或慢客户端造成无界内存与后台调用堆积。
-CHAT_AGENT_EVENT_QUEUE_MAX = max(8, _env_int("CHAT_AGENT_EVENT_QUEUE_MAX", 128))
 CHAT_TURN_TIMEOUT_SECONDS = max(5.0, _env_float("CHAT_TURN_TIMEOUT_SECONDS", 600.0))
-CHAT_AGENT_CANCEL_GRACE_SECONDS = max(
-    0.1, _env_float("CHAT_AGENT_CANCEL_GRACE_SECONDS", 1.0)
-)
-# 防极端滥用的探索软上限（含输入/输出），不是正常请求的成本目标。
-# 保留有限收尾、总时限、并发、输入/工具边界，并记录真实用量供后续优化。
+# 对话整轮输入、输出 token 累计上限。
 CHAT_TURN_TOKEN_BUDGET = max(1000, _env_int("CHAT_TURN_TOKEN_BUDGET", 1_000_000))
-# 工具预算同时限制模型单轮并行调用、整轮累计调用和回填到 Prompt 的总字符数。
-CHAT_TOOL_CALLS_PER_ROUND = max(1, _env_int("CHAT_TOOL_CALLS_PER_ROUND", 4))
-CHAT_TOOL_CALLS_PER_TURN = max(
-    CHAT_TOOL_CALLS_PER_ROUND, _env_int("CHAT_TOOL_CALLS_PER_TURN", 10)
-)
-CHAT_TOOL_RESULT_CHARS_PER_TURN = max(
-    1000, _env_int("CHAT_TOOL_RESULT_CHARS_PER_TURN", 12_000)
-)
-CHAT_TOOL_ARGUMENT_CHARS_PER_TURN = max(
-    1000, _env_int("CHAT_TOOL_ARGUMENT_CHARS_PER_TURN", 8_000)
-)
-# 包含初稿；聊天与报告默认允许15轮恢复（内容修订或重做核对），预算可分别配置。
-# 最终选择后新问题另有一次局部修复，仍共享各自预算和总时限。
-CHAT_AGENT_MAX_ITERATIONS = min(21, max(1, _env_int("CHAT_AGENT_MAX_ITERATIONS", 16)))
-REPORT_AGENT_MAX_ITERATIONS = min(21, max(1, _env_int("REPORT_AGENT_MAX_ITERATIONS", 16)))
-AI_FACT_CHECK_TIMEOUT_SECONDS = max(1.0, _env_float("AI_FACT_CHECK_TIMEOUT_SECONDS", 30.0))
-# 完整目标与原文锚点可能较长，避免正常核对因2000 token输出不足被截断。
-AI_FACT_CHECK_MAX_TOKENS = max(256, _env_int("AI_FACT_CHECK_MAX_TOKENS", 8000))
-AI_FACT_CHECK_MAX_DRAFT_CHARS = max(1000, _env_int("AI_FACT_CHECK_MAX_DRAFT_CHARS", 24000))
 # 运行指标只用于近期容量观察，超过保留期的数据在写入新指标时自动清理。
 CHAT_METRICS_RETENTION_DAYS = max(1, _env_int("CHAT_METRICS_RETENTION_DAYS", 90))
 
@@ -293,10 +250,6 @@ RAG_TOP_K = _env_int("RAG_TOP_K", 5)
 RAG_RECALL_K = _env_int("RAG_RECALL_K", 20)
 # 命中切片窗口扩展：把相邻切片一起拼进上下文，缓解跨切片信息截断（0=关闭）
 RAG_WINDOW = _env_int("RAG_WINDOW", 1)
-# Agent/PDF 模型上下文预算；展示引用仍只保留短 snippet。
-RAG_MODEL_CONTEXT_CHAR_BUDGET = max(
-    1000, _env_int("RAG_MODEL_CONTEXT_CHAR_BUDGET", 12_000)
-)
 RERANKER = os.getenv("RERANKER", "metadata")  # metadata（默认，无依赖）/ bge（本地 CrossEncoder）
 BGE_MODEL = os.getenv("BGE_MODEL", "BAAI/bge-reranker-v2-m3")
 # 检索时优先提升的分类权重（内部规范 / 指标 > 外部趋势， 分类权重）

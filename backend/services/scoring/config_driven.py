@@ -191,7 +191,7 @@ class ConfigDrivenStrategy(ScoringStrategy):
                 dim = next(dim for dim in config.enabled_dimensions if dim.key == rule.key)
                 if any(f.field in gaps for f in dim.enabled_factors):
                     level = "low"
-                    message = (f"{dim.name}得分率 {round(value, 1)}%，包含缺失或非法资料的默认计分；"
+                    message = (f"{dim.name}得分率 {round(value, 1)}%，存在缺失或输入格式需核实的资料，保留引擎实际计分；"
                                "需先核实资料，不能据此确认业务风险")
             if rule.target == "factor":
                 related_fields[rule.id] = rule.key
@@ -219,10 +219,18 @@ class ConfigDrivenStrategy(ScoringStrategy):
         alerts = [a for a in alerts if not related_fields.get(a.id)
                   or best[related_fields[a.id]] is a]
         suggestions = [alert_suggestions[a.id] for a in alerts if a.id in alert_suggestions] + suggestions
+        missing = []
         for field in sorted(gaps):
             factor = definitions[field]
+            value = resolve_value(c, factor)
+            if value is None or isinstance(value, str) and not value.strip():
+                missing.append(factor.label)
+                continue
             alerts.append(AlertItem(id=f"{field}_data_gap", level="low",
-                message=f"{factor.label}资料缺失或取值非法，当前计分仅作默认参考，需核实后判断"))
+                message=f"{factor.label}已有记录与当前输入选项或格式不一致，保留引擎实际计分，核实后再判断业务状态"))
+        if missing:
+            alerts.append(AlertItem(id="missing_data_summary", level="low",
+                message=f"有 {len(missing)} 项资料未填写：{'、'.join(missing)}；保留引擎实际计分，补充后再判断业务状态"))
 
         return alerts, suggestions
 

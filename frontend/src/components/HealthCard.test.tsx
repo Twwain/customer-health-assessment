@@ -29,14 +29,24 @@ function assessmentWithAlerts(count: number): AssessmentResponse {
 describe("HealthCard alert preview", () => {
   it("prioritizes high alerts in the preview and can expand the full list", async () => {
     const user = userEvent.setup();
-    render(<HealthCard assessment={assessmentWithAlerts(10)} showTrendButton={false} />);
+    render(<HealthCard assessment={assessmentWithAlerts(10)} />);
 
     expect(screen.getByText(/预警 10/)).toBeInTheDocument();
+    expect(screen.getAllByText(/^⚠ 预警 /)).toHaveLength(2);
     expect(screen.queryByText(/预警 8/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "查看其余 2 项" }));
+    await user.click(screen.getByRole("button", { name: "查看其余 8 项" }));
 
     expect(screen.getByText(/预警 8/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "收起预警" })).toBeInTheDocument();
+    expect(screen.getAllByText(/^⚠ 预警 /)).toHaveLength(10);
+    await user.click(screen.getByRole("button", { name: "收起预警" }));
+    expect(screen.getAllByText(/^⚠ 预警 /)).toHaveLength(2);
+  });
+
+  it("two alerts need no expand button", () => {
+    render(<HealthCard assessment={assessmentWithAlerts(2)} />);
+    expect(screen.getAllByText(/^⚠ 预警 /)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /查看其余/ })).not.toBeInTheDocument();
   });
 });

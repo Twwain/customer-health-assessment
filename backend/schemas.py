@@ -197,6 +197,8 @@ class AssessmentHistoryItem(BaseModel):
     risk_alerts: list[str] = Field(default_factory=list)
     factor_snapshot: dict[str, Any] = Field(default_factory=dict)
     strategy_snapshot: list[Any] = Field(default_factory=list)
+    availability: str = "legacy"
+    format: str = "legacy"
     config_version: str = ""
     assessed_at: datetime.datetime
 
@@ -247,18 +249,11 @@ class StrategyItem(BaseModel):
     action: str = ""
     expected_outcome: str = ""
     reference: str = Field(default="", description="知识溯源：引用的知识条目")
-
-
-class KnowledgeReference(BaseModel):
-    """RAG 引用来源（M3 接入后填充，供 📎 溯源抽屉定位原文）。"""
-
-    id: str = ""
-    title: str = ""
-    category: str = ""
-    score: float = 0
-    snippet: str = ""
-    chunk_id: int | None = None
-    used: bool = False
+    steps: list[str] | None = None
+    depends_on: list[str] | None = None
+    suggested_owner: str | None = None
+    suggested_timing: str | None = None
+    deliverable: str | None = None
 
 
 class ChatMessageItem(BaseModel):
@@ -266,6 +261,9 @@ class ChatMessageItem(BaseModel):
     session_id: int
     role: str
     content: str
+    scenario: str | None = None
+    run_id: str | None = None
+    availability: str = "legacy"
     references: list[Any] = Field(default_factory=list)
     strategy_items: list[Any] = Field(default_factory=list)
     tokens_used: int = 0
@@ -280,7 +278,7 @@ class ChatMessageItem(BaseModel):
 class ChatSessionCreate(BaseModel):
     title: str = Field(default="", max_length=200)
     customer_id: int | None = None
-    scenario: str = Field(default="free_qa", description="free_qa / assessment / strategy / alert_analysis")
+    scenario: str = Field(default="free_qa", description="free_qa / assessment")
     system_prompt: str = Field(default="", max_length=2000)
 
 
@@ -291,6 +289,7 @@ class ChatSessionItem(BaseModel):
     customer_name: str = ""
     scenario: str = "free_qa"
     streaming: bool = False
+    run_notice: str = ""
     message_count: int = 0
     last_message: str = ""
     created_at: datetime.datetime
@@ -314,12 +313,16 @@ class ChatRequest(BaseModel):
     scenario: str | None = None
     customer_id: int | None = None
     stream: bool = Field(default=True, description="true=SSE 流式；false=一次性返回 JSON")
+    idempotency_key: str | None = Field(default=None, max_length=100)
 
 
 class ChatTurnResponse(BaseModel):
     """非流式模式下的一轮对话结果。"""
 
     session_id: int
+    run_id: str | None = None
+    status: str = "legacy"
+    error_code: str = ""
     message: ChatMessageItem | None = None
     assessment: AssessmentResponse | None = None
     trend: AssessmentTrendResponse | None = None
@@ -355,8 +358,6 @@ class LLMStatusResponse(BaseModel):
     embedding_available: bool = False
     prompt_version: str = ""
     scenarios: list[str] = Field(default_factory=list)
-    chat_thinking_enabled: bool = False
-    report_thinking_enabled: bool = True
 
 
 # ════════════════════════ 知识库 RAG═══════════════════════

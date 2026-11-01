@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
+import { plainTextBlock } from "./plainText";
 
 // 共享 UI 工具：等级配色、趋势箭头、告警配色、日期格式化、Markdown 轻量渲染。
-
-export type Grade = string;
 
 export interface LevelSpec {
   name: string;
@@ -32,25 +31,11 @@ export function getLevels(): LevelSpec[] {
   return _levels;
 }
 
-export function gradeOf(score: number): string {
-  for (const lv of _levels) {
-    if (score >= lv.min_score) return lv.name;
-  }
-  return _levels[_levels.length - 1]?.name ?? "风险";
-}
-
 export function levelColor(grade: string): string {
   const hit = _levels.find((lv) => lv.name === grade);
   if (hit) return hit.color;
   return (
     { 健康: "#22C55E", 亚健康: "#EAB308", 风险: "#F97316", 高危: "#EF4444" }[grade] || "#3B82F6"
-  );
-}
-
-export function levelClass(grade: string): string {
-  return (
-    { 健康: "lv-excellent", 亚健康: "lv-good", 风险: "lv-normal", 高危: "lv-risk" }[grade] ||
-    "lv-normal"
   );
 }
 
@@ -66,17 +51,6 @@ export function trendMeta(cur: number, prev: number | null | undefined): TrendMe
   if (d > 2) return { arrow: "↑", cls: "trend-up", text: "+" + d };
   if (d < -2) return { arrow: "↓", cls: "trend-down", text: String(d) };
   return { arrow: "→", cls: "trend-flat", text: (d >= 0 ? "+" : "") + d };
-}
-
-// 告警等级配色（评审结论 Q5：高=红 / 中=黄 / 低=蓝）
-export function alertLevelClass(level: string): string {
-  if (level === "high") return "ab-high";
-  if (level === "medium") return "ab-medium";
-  return "ab-low";
-}
-
-export function alertLevelLabel(level: string): string {
-  return level === "high" ? "高" : level === "medium" ? "中" : "低";
 }
 
 export function fmtDate(s: string | null | undefined): string {
@@ -181,6 +155,13 @@ export function renderMarkdown(text: string): ReactNode {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
+    const plain = plainTextBlock(line);
+    if (plain !== null) {
+      flushPara();
+      blocks.push(<p key={key++} className="whitespace-pre-wrap">{plain}</p>);
+      i++;
+      continue;
+    }
     if (!line.trim()) {
       flushPara();
       i++;

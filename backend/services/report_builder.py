@@ -1,21 +1,8 @@
-"""Step 7 (M5) 报告整合：把 AI 策略建议 + 知识溯源 + 健康分趋势汇总为报告数据。
-
-复用既有能力，不重复造轮子：
-- 评分引擎算量化评估（services.scoring）
-- assessment_history.build_trend 取趋势点位（含 fallback 到当前评估）
-- context_builder.build_context 组装事实上下文
-- ai.strategy.generate 跑策略 Agent Loop（含 LLM 不可用降级）
-- ai.strategy.split_strategy_payload / build_degraded_strategies 解析与兜底
-
-设计要点：报告导出是「读取型」操作，不写库、不持久化会话；任何 AI 异常都降级为
-规则引擎建议，保证 PDF 一定能导出。
-"""
-
+"""Build factual reports or the current validated AI report result."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import threading
-import time
 
 import config
 from models import Customer
@@ -30,6 +17,8 @@ class ReportData:
     trend: AssessmentTrendResponse | None = None
     strategy_items: list[dict] = field(default_factory=list)
     references: list[dict] = field(default_factory=list)
+    analysis: dict = field(default_factory=dict)
+    hypotheses: list[dict] = field(default_factory=list)
     degraded: bool = False
     has_ai: bool = False
     error: str | None = None
@@ -42,81 +31,18 @@ def build_report_data(
     customer: Customer,
     *,
     include_ai: bool = True,
-    scenario: str = "strategy",
     cancel_event: threading.Event | None = None,
     deadline: float | None = None,
+    job_id: str | None = None,
 ) -> ReportData:
     """汇总单客户报告的全部数据；``include_ai=False`` 时只产出量化评估 + 趋势。"""
+    if include_ai:
+        from services.ai.report import build_report
+        return build_report(db, customer, cancelled=cancel_event, deadline=deadline, job_id=job_id)
     engine = get_scoring_strategy()
     assessment = engine.evaluate(customer)
     assessment_history.apply_trend_alerts(db, customer, assessment)
     trend = assessment_history.build_trend(
         db, customer, limit=config.CHAT_TREND_POINTS, fallback_assessment=assessment
     )
-
-    data = ReportData(assessment=assessment, trend=trend)
-    if not include_ai:
-        return data
-
-    # 懒导入，避免在无需 AI 的路径上硬耦合 LLM / RAG
-    from services.ai import context_builder, llm_adapter, strategy as strategy_mod
-    from services.ai.answer_presentation import present_strategies, present_warning
-
-    adapter = llm_adapter.get_chat_adapter()
-    if not getattr(adapter, "available", False):
-        # LLM 不可用：直接走规则引擎兜底（与对话降级同款建议）
-        data.strategy_items = present_strategies(strategy_mod.build_degraded_strategies(assessment))
-        data.degraded = True
-        data.has_ai = True
-        data.warnings = ["AI 模型不可用，本报告使用规则引擎建议，未执行 AI 事实核对。"]
-        return data
-
-    question = (
-        "请基于以上量化评估与历史趋势，为该客户生成分层（推荐 / 备选 / 长期）的客情维护"
-        "策略建议，并尽量标注知识来源。"
-    )
-    try:
-        cancel_event = cancel_event or threading.Event()
-        deadline = deadline or (time.monotonic() + config.REPORT_GENERATION_TIMEOUT_SECONDS)
-        ctx = context_builder.build_context(db, customer, assessment=assessment, query=question)
-        gen = strategy_mod.generate(
-            scenario,
-            ctx,
-            customer,
-            db,
-            adapter=adapter,
-            question=question,
-            # PDF 报告优先分析质量；上下文已预检索，关闭工具避免思考模式工具续轮
-            # 需要回传 reasoning_content 的协议复杂度与重复检索。
-            tools_enabled=False,
-            thinking_enabled=config.LLM_REPORT_THINKING_ENABLED,
-            reasoning_effort=config.LLM_REPORT_REASONING_EFFORT,
-            output_token_limit=config.LLM_REPORT_MAX_TOKENS,
-            token_budget=config.REPORT_TURN_TOKEN_BUDGET,
-            retrieve_enabled=False,
-            max_iterations=config.REPORT_AGENT_MAX_ITERATIONS,
-            cancel_event=cancel_event,
-            deadline=deadline,
-        )
-        _body, items = strategy_mod.split_strategy_payload(gen.text)
-        data.strategy_items = present_strategies(gen.degraded_items if gen.degraded else items)
-        data.references = list(gen.references or [])
-        data.degraded = gen.degraded
-        data.warnings = list(dict.fromkeys(present_warning(w) for w in gen.warnings))
-        data.timings = dict(gen.timings)
-        data.has_ai = True
-        if not data.strategy_items:
-            # AI 已参与但未产出结构化策略：用规则引擎建议兜底，并如实标注
-            data.strategy_items = present_strategies(strategy_mod.build_degraded_strategies(assessment))
-            data.degraded = True
-            if not gen.degraded:
-                data.error = "AI 未返回结构化策略建议，已用规则引擎建议补充"
-                data.warnings.append(data.error)
-    except Exception as exc:  # 兜底：绝不能让报告导出失败
-        data.strategy_items = present_strategies(strategy_mod.build_degraded_strategies(assessment))
-        data.degraded = True
-        data.has_ai = True
-        data.error = f"AI 建议生成失败，已降级为规则引擎：{exc}"
-        data.warnings = [data.error]
-
-    return data
+    return ReportData(assessment=assessment, trend=trend)

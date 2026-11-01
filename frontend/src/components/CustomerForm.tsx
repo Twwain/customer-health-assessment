@@ -237,6 +237,17 @@ export default function CustomerForm({ customer, config, value, onChange, readOn
           })}
         </div>
       </div>
+
+      <section className="rounded-xl border border-border bg-surface p-3" aria-label="企业内部数据接入">
+        <div className="mb-2.5 flex items-center gap-2">
+          <span className="text-[14.5px] font-semibold text-ink">🔗 企业内部数据接入</span>
+          <span className="rounded bg-surface-2 px-1.5 py-[1px] text-[12px] text-muted">待接入</span>
+        </div>
+        <div className="rounded-lg border border-dashed border-border-strong bg-surface-2 px-3 py-2.5">
+          <p className="text-[14px] text-ink-2">销售额等数据待接入</p>
+          <p className="mt-1 text-[12px] leading-relaxed text-muted">可对接公司内部各平台，汇集客户相关业务数据。</p>
+        </div>
+      </section>
     </div>
   );
 }

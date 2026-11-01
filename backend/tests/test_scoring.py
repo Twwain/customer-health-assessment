@@ -5,15 +5,14 @@
 2. 28 因子全取最高档 → 总分 100 / 健康
 3. 代表性因子分档规则、RISK 风险因子扣分
 4. 自动预警触发、机会点建议
-5. 两种引擎（RuleBasedStrategy / HealthScoreEngine）输出一致
+5. 现有评分配置名均使用配置驱动引擎
 """
 
 import pytest
 
 from models import Customer
 from factories import MAX_FACTORS
-from services.health_score import HealthScoreEngine
-from services.scoring.rule_based import RuleBasedStrategy
+from services.scoring.config_driven import ConfigDrivenStrategy
 
 
 def base_customer(**overrides):
@@ -31,7 +30,7 @@ def base_customer(**overrides):
     return c
 
 def engines():
-    return [RuleBasedStrategy(), HealthScoreEngine()]
+    return [ConfigDrivenStrategy()]
 
 
 def _dim_score(result, key):
@@ -67,7 +66,7 @@ def test_total_is_sum_of_7_dimensions():
 
 def test_level_thresholds_come_from_config():
     """等级表来自配置：健康80 / 亚健康60 / 风险40 / 高危0。"""
-    config = RuleBasedStrategy().config
+    config = ConfigDrivenStrategy().config
     assert [lv.name for lv in config.levels] == ["健康", "亚健康", "风险", "高危"]
     assert [lv.min_score for lv in config.levels] == [80, 60, 40, 0]
 
@@ -169,13 +168,8 @@ def test_response_total_score_in_range():
         assert 0 <= result.total_score <= 100
 
 
-def test_both_engines_produce_same_result():
-    rule = RuleBasedStrategy()
-    health = HealthScoreEngine()
-    c = base_customer(custom_fields=MAX_FACTORS, customer_satisfaction=10)
-    r1 = rule.evaluate(c)
-    r2 = health.evaluate(c)
-    assert r1.total_score == r2.total_score
-    assert r1.level == r2.level
-    assert len(r1.risk_alerts) == len(r2.risk_alerts)
-    assert [d.score for d in r1.dimensions] == [d.score for d in r2.dimensions]
+@pytest.mark.parametrize("name", ["rule_based", "config"])
+def test_scoring_configuration_uses_current_engine(monkeypatch, name):
+    from services.scoring import factory
+    monkeypatch.setattr(factory, "SCORING_STRATEGY", name)
+    assert type(factory.get_scoring_strategy()) is ConfigDrivenStrategy

@@ -20,31 +20,6 @@ from models import ChatTurnMetric
 logger = logging.getLogger(__name__)
 
 
-def quality_reason(reason):
-    """Persist failure categories, never model quotes, customer content or exception text."""
-    if not reason:
-        return ""
-    for fragment, code in (("自我撤销", "checker_conflict"), ("评分推算", "projection_incomplete"),
-                           ("响应", "checker_protocol"), ("协议", "format_invalid"),
-                           ("格式", "format_invalid"), ("预算", "budget_exhausted"),
-                           ("时限", "timeout"), ("超时", "timeout")):
-        if fragment in str(reason):
-            return code
-    return "verification_incomplete"
-
-
-def quality_diagnostics(timings):
-    return {
-        "checks": [{"status": row.get("status"), "reason": quality_reason(row.get("reason")),
-                    "issues_count": len(row.get("issues") or []), "recheck": bool(row.get("recheck"))}
-                   for row in timings.get("verification", []) if isinstance(row, dict)],
-        "repairs": [{"operation": row.get("operation"), "status": row.get("status"),
-                     "reason": quality_reason(row.get("reason"))}
-                    for row in timings.get("local_repairs", []) if isinstance(row, dict)],
-        "answer_source": timings.get("answer_source", ""),
-    }
-
-
 def _percentile(values: list[int], percentile: float) -> int:
     """返回 nearest-rank 分位数；空样本返回 0。"""
     if not values:
@@ -99,15 +74,6 @@ class TurnMetricObserver:
 
     def __post_init__(self) -> None:
         self.started = time.monotonic()
-
-    def consume_usage(self, data: dict[str, Any]) -> None:
-        """接收不依赖客户端消费进度的成本快照，断线时仍能持久化。"""
-        self.tokens_used = max(self.tokens_used, int(data.get("tokens_used") or 0))
-        call = data.get("llm_call") or {}
-        if call:
-            timings = dict(self.timings or {})
-            timings["llm_call_count"] = int(timings.get("llm_call_count") or 0) + 1
-            self.timings = timings
 
     def consume(self, event: Any) -> None:
         data = event.data or {}
@@ -167,13 +133,10 @@ class TurnMetricObserver:
             token_overshoot=max(0, self.tokens_used - budget),
             latency_ms=latency_ms,
             llm_call_count=int(timings.get("llm_call_count") or 0),
-            tool_rounds=int(timings.get("tool_rounds") or 0),
-            refine_rounds=int(timings.get("refine_rounds") or 0),
             queue_capacity=int(timings.get("event_queue_capacity") or 0),
             queue_high_watermark=int(timings.get("event_queue_high_watermark") or 0),
             warning_count=self.warning_count,
             error_code=self.error_code,
-            quality_diagnostics=quality_diagnostics(timings),
         )
         try:
             cutoff = utcnow() - datetime.timedelta(
@@ -203,29 +166,21 @@ def record_report_metric(db: Any, report: Any, *, elapsed_ms: int) -> None:
         timings = report.timings if isinstance(report.timings, dict) else {}
         calls = timings.get("llm_calls")
         calls = calls if isinstance(calls, list) else []
-        verification = timings.get("verification")
-        verification = verification if isinstance(verification, list) else []
-        last_check = verification[-1] if verification and isinstance(verification[-1], dict) else {}
-        verified = last_check.get("status") == "passed" and not last_check.get("reason")
+        # The report builder only returns published, validated AI results.
+        # Failed runs raise instead of producing a partially verified report.
         degraded = bool(report.degraded)
         observer = TurnMetricObserver(
             session_id=None,
             scenario="report",
             model=str(getattr(get_chat_adapter(), "model", "") or "")[:100],
-            status="degraded" if degraded else "success" if verified else "partial",
+            status="degraded" if degraded else "success",
             tokens_used=sum(count(call.get("total_tokens")) for call in calls if isinstance(call, dict)),
             timings={
                 "total_ms": count(elapsed_ms),
                 "llm_call_count": len(calls),
-                "tool_rounds": count(timings.get("tool_rounds")),
-                "refine_rounds": count(timings.get("refine_rounds")),
-                "verification": verification,
-                "local_repairs": timings.get("local_repairs", []),
-                "answer_source": timings.get("answer_source", ""),
             },
             warning_count=len(report.warnings) if isinstance(report.warnings, list) else 0,
-            error_code=("report_degraded" if degraded else "" if verified else
-                        "fact_check_issues" if last_check.get("status") == "issues" else "fact_check_unverified"),
+            error_code="report_degraded" if degraded else "",
             token_budget=config.REPORT_TURN_TOKEN_BUDGET,
         )
         observer.persist(db)

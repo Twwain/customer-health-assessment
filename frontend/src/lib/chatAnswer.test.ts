@@ -1,86 +1,57 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessageItem, StrategyItem } from "../types";
-import { additionalStrategies, completeAnswerText } from "./chatAnswer";
+import { completeAnswerText } from "./chatAnswer";
 
-const strategy: StrategyItem = {
-  priority: "recommended", title: "加强高层沟通", urgency: "high",
-  reason: "尚未建立高层联系", action: "本月安排一次高层拜访",
-  expected_outcome: "建立季度沟通机制", reference: "客户经营指南",
+const action: StrategyItem = {
+  priority: "recommended", title: "形成价值测算表", urgency: "high",
+  reason: "已有定性价值", action: "1. 确认价值口径\n2. 收集基线\n建议参与方：客户经理；建议期限：两周内；交付物：测算表。\n前置行动：客户认可口径",
+  expected_outcome: "提交评审", reference: "", suggested_owner: "客户经理",
+  suggested_timing: "两周内", deliverable: "测算表", steps: ["确认价值口径", "收集基线"],
 };
-const message = (content: string, strategy_items = [strategy]): ChatMessageItem => ({
+const message = (content: string, strategy_items = [action]): ChatMessageItem => ({
   id: 1, session_id: 7, role: "assistant", content, strategy_items,
   references: [], tokens_used: 0, feedback: "", degraded: false, created_at: "",
 });
 
-describe("完整答案展示和复制", () => {
-  it("复制已核实AI概况与规则行动时保留各自说明，不把全部内容冒称规则生成", () => {
-    const rule = { ...strategy, title: "保持服务回访", reference: "评分规则建议" };
-    const overview = "已核实的AI概况：客户需要持续经营。";
-    const notice = "已保留核实通过的概况；以下行动来自规则建议。";
-    const msg = { ...message(`${overview}\n\n${notice}`, [rule]), degraded: true };
-    const copied = completeAnswerText(msg);
-    expect(copied).toContain(overview);
-    expect(copied).toContain(notice);
-    expect(copied).toContain(rule.action);
-    expect(copied).toContain("评分规则建议");
-    expect(copied).toContain("本次包含规则引擎建议");
-    expect(copied).not.toContain("本次结果由规则引擎生成");
-  });
-
-  it("历史正文完整覆盖卡片时只展示一份，仍保留原有结论和核实提示", () => {
-    const body = `## 客户结论\n需要持续关注\n\n## 推荐策略\n### 加强高层沟通（紧急度：高）\n原因：尚未建立高层联系\n行动：本月安排一次高层拜访\n预期：建立季度沟通机制\n依据：客户经营指南\n\n> 部分结论尚待核实`;
-    expect(additionalStrategies(body, [strategy])).toEqual([]);
-    const result = completeAnswerText(message(body));
-    expect(result).toBe(body);
-    expect(result.match(/本月安排一次高层拜访/g)).toHaveLength(1);
-  });
-
-  it("不能因正文只提到了策略标题就丢弃完整卡片", () => {
-    expect(additionalStrategies("建议加强高层沟通", [strategy])).toEqual([strategy]);
-    const result = completeAnswerText(message("建议加强高层沟通"));
-    for (const field of [strategy.reason, strategy.action, strategy.expected_outcome, strategy.reference]) {
-      expect(result).toContain(field);
+describe("完整答案复制", () => {
+  it("综合评估和自由问答统一包含计划、完整步骤与依赖，元数据只出现一次", () => {
+    for (const body of ["建议先量化价值。", '本次按以下任务回答：综合评估\n## AI 分析（业务判断，可能有误）\n### 总体评估\n:::ai-text "建议先量化价值。"']) {
+      const copied = completeAnswerText(message(body));
+      for (const text of ["建议先量化价值。", "## 下一步计划", "行动：形成价值测算表", "责任人：客户经理", "时限：两周内", "交付物：测算表", "1. 确认价值口径", "2. 收集基线", "前置行动：客户认可口径"]) {
+        expect(copied).toContain(text);
+      }
+      expect(copied.match(/交付物：测算表/g)).toHaveLength(1);
+      expect(copied).not.toContain("建议参与方：");
+      expect(copied).not.toContain("AI 分析（业务判断，可能有误）");
     }
   });
 
-  it("不将正负增益或不同数字的策略误判为相同", () => {
-    const item = { ...strategy, expected_outcome: "总分+3" };
-    const body = [item.title, item.reason, item.action, "总分-3", item.reference].join("\n");
-    expect(additionalStrategies(body, [item])).toEqual([item]);
-  });
-
-  it("正文缺少分层或紧急度时仍保留卡片及完整复制信息", () => {
-    const fields = [strategy.title, strategy.reason, strategy.action, strategy.expected_outcome, strategy.reference].join("\n");
-    for (const body of [fields, `## 推荐策略\n${fields}`, `紧急度：高\n${fields}`]) {
-      expect(additionalStrategies(body, [strategy])).toEqual([strategy]);
-      expect(completeAnswerText(message(body))).toContain("加强高层沟通（紧急度：高）");
-      expect(completeAnswerText(message(body))).toContain("## 推荐策略");
-    }
-  });
-
-  it("不会借用另一层级或另一条策略的紧急度来隐藏卡片", () => {
-    const fields = [strategy.title, strategy.reason, strategy.action, strategy.expected_outcome, strategy.reference].join("\n");
-    const second = { ...strategy, title: "其他策略", urgency: "high" };
-    expect(additionalStrategies(`## 备选策略\n紧急度：高\n${fields}`, [strategy])).toEqual([strategy]);
-    const body = `## 推荐策略\n${fields}\n### 其他策略（紧急度：高）\n其他内容`;
-    expect(additionalStrategies(body, [strategy, second])).toContain(strategy);
-  });
-
-  it("混合新旧条目仅去除完全重复项，复制包含全部层级和引用状态", () => {
-    const second = { ...strategy, priority: "alternative", title: "技术交流", action: "组织产品演示" };
-    const third = { ...strategy, priority: "long_term", title: "长期伙伴", action: "制定年度合作计划" };
-    const body = "## 推荐策略\n" + [strategy.title, "紧急度：高", strategy.reason, strategy.action, strategy.expected_outcome, strategy.reference].join("\n");
-    const msg = message(body, [strategy, second, third]);
+  it("保留引用与仅检索的区别，并标注规则兜底", () => {
+    const msg = message("现有概况");
+    msg.degraded = true;
     msg.references = [
-      { title: "客户经营指南", category: "", snippet: "", score: 0.8, chunk_id: 3, used: true },
+      { title: "经营指南", category: "", snippet: "", score: 0.8, chunk_id: 3, used: true },
       { title: "行业参考", category: "", snippet: "", score: 0.5, used: false },
     ];
-    expect(additionalStrategies(body, msg.strategy_items)).toEqual([second, third]);
-    const result = completeAnswerText(msg);
-    expect(result.match(/本月安排一次高层拜访/g)).toHaveLength(1);
-    expect(result).toContain("## 备选策略");
-    expect(result).toContain("## 长期建议");
-    expect(result).toContain("客户经营指南 · 切片 3（已引用）");
-    expect(result).toContain("行业参考（仅检索，未作为结论依据）");
+    const copied = completeAnswerText(msg);
+    expect(copied).toContain("现有概况");
+    expect(copied).toContain("经营指南 · 切片 3（已引用）");
+    expect(copied).toContain("行业参考（仅检索，未作为结论依据）");
+    expect(copied).toContain("本次包含规则引擎建议");
+  });
+
+  it("没有行动或引用时不追加空段落，解码安全文本", () => {
+    expect(completeAnswerText(message(':::ai-text "原文 <b>与符号</b>"', [])))
+      .toBe("原文 <b>与符号</b>");
+  });
+
+  it("直接问答复制只包含理由、唯一行动及引用，不增加报告模板", () => {
+    const msg = { ...message(':::ai-text "先量化价值，方便客户明确试点目标。"'), scenario: 'free_qa' };
+    const copied = completeAnswerText(msg);
+    expect(copied).toContain('先量化价值，方便客户明确试点目标。');
+    expect(copied.match(/行动：形成价值测算表/g)).toHaveLength(1);
+    for (const section of ['总览', '总体评估', '完整预警清单', '重点解读', 'AI 分析', ':::ai-text']) {
+      expect(copied).not.toContain(section);
+    }
   });
 });

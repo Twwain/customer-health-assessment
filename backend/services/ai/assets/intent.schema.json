@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "status",
+        "intents",
+        "clarification_code"
+      ],
+      "properties": {
+        "version": {
+          "const": "2.4"
+        },
+        "status": {
+          "const": "resolved"
+        },
+        "clarification_code": {
+          "const": null
+        },
+        "intents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "subject_refs",
+              "field_refs",
+              "option_refs",
+              "source_refs",
+              "count"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "score_grade",
+                  "explain_score",
+                  "data_quality",
+                  "risk",
+                  "alerts",
+                  "actions",
+                  "verify_questions",
+                  "projection",
+                  "trend",
+                  "compare",
+                  "policy",
+                  "analysis"
+                ]
+              },
+              "subject_refs": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 28,
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "field_refs": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 28,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "option_refs": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 28,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "source_refs": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 24,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "count": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10
+                  }
+                ]
+              }
+            }
+          },
+          "allOf": [
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "score_grade"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "explain_score"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "data_quality"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "risk"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "alerts"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "actions"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "verify_questions"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "projection"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "trend"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "compare"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "policy"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "analysis"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "status",
+        "intents",
+        "clarification_code"
+      ],
+      "properties": {
+        "version": {
+          "const": "2.4"
+        },
+        "status": {
+          "const": "clarify"
+        },
+        "clarification_code": {
+          "enum": [
+            "choose_subject",
+            "choose_intent",
+            "reduce_scope",
+            "confirm_projection",
+            "choose_source"
+          ]
+        },
+        "intents": {
+          "type": "array",
+          "maxItems": 0,
+          "items": false
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "status",
+        "intents",
+        "clarification_code"
+      ],
+      "properties": {
+        "version": {
+          "const": "2.4"
+        },
+        "status": {
+          "const": "unsupported"
+        },
+        "clarification_code": {
+          "const": null
+        },
+        "intents": {
+          "type": "array",
+          "maxItems": 0,
+          "items": false
+        }
+      }
+    }
+  ]
+}

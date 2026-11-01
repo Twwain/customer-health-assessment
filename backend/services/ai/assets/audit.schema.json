@@ -1,0 +1,110 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "1.0"
+    },
+    "stage": {
+      "enum": [
+        "run_created",
+        "assets_verified",
+        "capture_ready",
+        "retrieval_ready",
+        "before_intent",
+        "before_plan",
+        "before_repair",
+        "failure",
+        "success"
+      ]
+    },
+    "assets_state": {
+      "enum": [
+        "not_available",
+        "verified",
+        "mismatch"
+      ]
+    },
+    "source_kind": {
+      "enum": [
+        "not_available",
+        "captured",
+        "full_evidence"
+      ]
+    },
+    "capture_fingerprint": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence_fingerprint": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retrieval_state": {
+      "enum": [
+        "not_started",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "invalidated": {
+      "type": "boolean"
+    },
+    "diagnostics_cleared": {
+      "type": "boolean"
+    },
+    "overflow_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "legacy_initialized": {
+      "type": "boolean"
+    },
+    "terminal_kind": {
+      "enum": [
+        "none",
+        "cancelled",
+        "timeout",
+        "executor_lost",
+        "audit_incomplete",
+        "failed",
+        "succeeded",
+        "source_changed",
+        "source_unavailable"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "stage",
+    "assets_state",
+    "source_kind",
+    "capture_fingerprint",
+    "evidence_fingerprint",
+    "retrieval_state",
+    "invalidated",
+    "diagnostics_cleared",
+    "overflow_count",
+    "revision",
+    "legacy_initialized",
+    "terminal_kind"
+  ]
+}

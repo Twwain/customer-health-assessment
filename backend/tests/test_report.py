@@ -1,10 +1,6 @@
-"""Step 7 (M5) 报告整合测试：AI 策略建议 / 知识溯源 / 健康分趋势 进 PDF。
-
-覆盖：LLM 不可用降级、LLM 可用时结构化策略解析、趋势曲线渲染、include_ai=False 回退。
-"""
+"""报告数据聚合、规则降级与 PDF 评分、行动和趋势展示。"""
 
 import datetime
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -13,11 +9,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from reportlab.platypus import KeepTogether, Paragraph, Table
 
-import config
-from database import Base, get_db
+from database import Base
 from models import AssessmentHistory, Customer
-from schemas import AlertItem, AssessmentResponse, DimensionScore, FactorScoreItem
-from services.ai import llm_adapter, tools
+from schemas import AssessmentResponse, DimensionScore, FactorScoreItem
+from services.ai import llm_adapter
 from services.ai.llm_adapter import LLMUnavailableError
 from services.pdf_report import PdfReportGenerator
 from services.report_builder import build_report_data
@@ -69,37 +64,6 @@ def customer(db):
     return c
 
 
-class _FakeAdapter:
-    def __init__(self, chunks=None, error=None, available=True, model="fake-chat"):
-        self.chunks = chunks if chunks is not None else ["你好。"]
-        self.error = error
-        self.available = available
-        self.model = model
-        self.calls = []
-        self.extra_args = []
-        self.tool_args = []
-
-    def status(self):
-        return {"available": self.available, "model": self.model}
-
-    def stream_chat_completion(
-        self, messages, *, temperature=None, max_tokens=None, extra=None, on_usage=None, tools=None, on_tool_calls=None
-    ):
-        self.calls.append(list(messages))
-        self.extra_args.append(extra)
-        self.tool_args.append(tools)
-        if self.error:
-            raise self.error
-        checking = any(
-            (message.get("role") if isinstance(message, dict) else message.role) == "system"
-            and "独立的事实核对员" in (message.get("content", "") if isinstance(message, dict) else message.content)
-            for message in messages
-        )
-        chunks = ['{"issues": [], "score_projections": []}'] if checking else self.chunks
-        for chunk in chunks:
-            yield chunk
-
-
 @pytest.fixture(autouse=True)
 def _reset_adapters():
     llm_adapter.reset_adapters()
@@ -108,30 +72,10 @@ def _reset_adapters():
 
 
 @pytest.fixture()
-def fake_llm():
-    adapter = _FakeAdapter()
-    llm_adapter.set_chat_adapter(adapter)
-    return adapter
-
-
-@pytest.fixture()
 def offline_llm():
-    adapter = _FakeAdapter(available=False, error=LLMUnavailableError("未配置 API Key"))
-    llm_adapter.set_chat_adapter(adapter)
-    return adapter
-
-
-_STRATEGY_PAYLOAD = (
-    "以下是为该客户生成的策略建议：\n\n"
-    "```json\n"
-    "[\n"
-    '  {"priority": "recommended", "title": "立即安排高层回访", "urgency": "high",\n'
-    '   "reason": "长期未联系且竞品介入", "action": "本月内拜访", "expected_outcome": "重建联系", "reference": "客户分级标准"},\n'
-    '  {"priority": "long_term", "title": "扩大合作面", "urgency": "low",\n'
-    '   "reason": "增长潜力低", "action": "挖掘新需求", "expected_outcome": "提升商业价值", "reference": ""}\n'
-    "]\n"
-    "```\n\n请参考执行。"
-)
+    def unavailable(*args, **kwargs):
+        raise LLMUnavailableError("未配置 API Key")
+    llm_adapter.set_chat_adapter(SimpleNamespace(chat_completion_once=unavailable))
 
 
 def _pdf_starts_ok(pdf_bytes: bytes) -> bool:
@@ -145,94 +89,21 @@ def test_build_report_data_offline_uses_degraded_strategies(db, customer, offlin
     assert report.has_ai is True
     assert report.degraded is True
     assert report.strategy_items, "降级时仍应产出规则引擎建议"
-    # 降级建议带规则引擎溯源标记
-    assert all((i.get("reference") or "").startswith("评分规则建议") for i in report.strategy_items)
+    assert all(i["reason"] == "规则兜底建议。" for i in report.strategy_items)
+    assert not report.references
+    assert any("规则兜底" in warning for warning in report.warnings)
 
 
-def test_build_report_data_with_ai_parses_strategy(db, customer, fake_llm, monkeypatch):
-    monkeypatch.setattr(
-        tools,
-        "rag_retrieve",
-        lambda *args, **kwargs: pytest.fail("PDF Agent 不应重复执行 RAG"),
-    )
-    adapter = _FakeAdapter(chunks=[_STRATEGY_PAYLOAD])
-    llm_adapter.set_chat_adapter(adapter)
-    report = build_report_data(db, customer, include_ai=True)
-    assert report.degraded is False
-    assert report.has_ai is True
-    titles = [i["title"] for i in report.strategy_items]
-    assert "立即安排高层回访" in titles
-    assert "扩大合作面" in titles
-    # 优先级被规整
-    by_title = {i["title"]: i for i in report.strategy_items}
-    assert by_title["立即安排高层回访"]["priority"] == "recommended"
-    assert by_title["扩大合作面"]["priority"] == "long_term"
-    assert report.trend is not None
-    assert adapter.extra_args[0] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
-    assert adapter.extra_args[-1]["thinking"]["type"] == "disabled"  # 独立事实核对
-    assert report.timings["llm_calls"][0]["max_tokens"] == config.LLM_REPORT_MAX_TOKENS
-    assert report.timings["verification"][-1]["status"] == "passed"
-    assert adapter.tool_args[-1] is None
-
-
-def test_build_report_data_ai_off_does_not_call_llm(db, customer, fake_llm):
+def test_build_report_data_ai_off_does_not_call_llm(db, customer):
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("include_ai=False 不应调用模型")
+    llm_adapter.set_chat_adapter(SimpleNamespace(chat_completion_once=unexpected_call))
     report = build_report_data(db, customer, include_ai=False)
     assert report.has_ai is False
     assert report.strategy_items == []
-    assert fake_llm.calls == []  # 不应触发任何 LLM 调用
-
-
-def test_report_generation_budget_is_independent_from_chat(db, customer, fake_llm, monkeypatch):
-    from services.ai import strategy
-
-    monkeypatch.setattr(config, "CHAT_TURN_TIMEOUT_SECONDS", 1)
-    monkeypatch.setattr(config, "LLM_MAX_TOKENS", 500)
-    monkeypatch.setattr(config, "CHAT_TURN_TOKEN_BUDGET", 1000)
-    monkeypatch.setattr(config, "CHAT_AGENT_MAX_ITERATIONS", 1)
-    monkeypatch.setattr(config, "REPORT_AGENT_MAX_ITERATIONS", 16)
-    monkeypatch.setattr(config, "REPORT_TURN_TOKEN_BUDGET", 123456)
-    monkeypatch.setattr(config, "REPORT_GENERATION_TIMEOUT_SECONDS", 300)
-    started = time.monotonic()
-    observed = {}
-
-    def generate(*args, **kwargs):
-        observed.update(kwargs)
-        return SimpleNamespace(text=_STRATEGY_PAYLOAD, references=[], degraded=False,
-                               degraded_items=[], warnings=[], timings={})
-
-    monkeypatch.setattr(strategy, "generate", generate)
-    report = build_report_data(db, customer)
-    assert report.strategy_items and not report.degraded
-    assert observed["deadline"] >= started + 299
-    assert observed["output_token_limit"] == 32768
-    assert observed["token_budget"] == 123456
-    assert observed["max_iterations"] == 16
-    assert observed["thinking_enabled"] is True
-    assert observed["reasoning_effort"] == "high"
-
-
-def test_build_report_data_error_falls_back_to_degraded(db, customer, fake_llm):
-    llm_adapter.set_chat_adapter(_FakeAdapter(error=RuntimeError("boom")))
-    report = build_report_data(db, customer, include_ai=True)
-    assert report.degraded is True
-    assert report.has_ai is True
-    assert report.error and "boom" in report.error
-    assert report.strategy_items, "异常后仍应有兜底建议"
 
 
 # ── PDF 生成 ───────────────────────────────────────────────────────────────
-
-def test_pdf_with_ai_strategies(db, customer, fake_llm):
-    llm_adapter.set_chat_adapter(_FakeAdapter(chunks=[_STRATEGY_PAYLOAD]))
-    report = build_report_data(db, customer, include_ai=True)
-    gen = PdfReportGenerator()
-    pdf = gen.generate(
-        report.assessment,
-        strategy_items=report.strategy_items,
-        references=report.references,
-        trend=report.trend,
-    )
-    assert _pdf_starts_ok(pdf)
 
 
 def test_pdf_offline_degraded_note(db, customer, offline_llm):
@@ -257,40 +128,6 @@ def test_pdf_include_ai_false_backward_compatible(db, customer):
         trend=report.trend,
     )
     assert _pdf_starts_ok(pdf)
-
-
-def test_build_report_data_ai_without_strategy_text_falls_back(db, customer, fake_llm):
-    """AI 已参与但未返回结构化策略块时，用规则引擎建议兜底并如实标注。"""
-    llm_adapter.set_chat_adapter(_FakeAdapter(chunks=["这是一段没有策略块的纯文本回复。"]))
-
-    report = build_report_data(db, customer, include_ai=True)
-
-    assert report.degraded is True
-    assert report.has_ai is True
-    assert report.strategy_items, "无策略块时应有规则引擎兜底建议"
-    assert report.timings["answer_source"] == "ai_summary_with_rule_strategies"
-    assert any("未形成可核实的 AI 行动策略" in warning and "规则建议" in warning
-               for warning in report.warnings)
-    assert all((i.get("reference") or "").startswith("评分规则建议") for i in report.strategy_items)
-
-
-def test_split_strategy_payload_unclosed_fence_recovers_items():
-    """输出被 max_tokens 截断（```json 围栏未闭合）时仍能解析出策略条目。"""
-    from services.ai.strategy import split_strategy_payload
-
-    truncated = (
-        "以下为策略：\n\n```json\n"
-        '{"strategies": [{"priority": "recommended", "title": "启动分级评审", '
-        '"urgency": "high", "reason": "客情评分低于 25", "action": "15 个工作日内召集评审", '
-        '"expected_outcome": "完成挽留/退出决策"}]}'
-    )
-
-    body, items = split_strategy_payload(truncated)
-
-    assert len(items) == 1
-    assert items[0]["title"] == "启动分级评审"
-    assert items[0]["priority"] == "recommended"
-    assert body == "以下为策略："
 
 
 def _collect_flow_text(flows) -> str:

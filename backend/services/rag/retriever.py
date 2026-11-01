@@ -87,6 +87,7 @@ class KnowledgeRetriever:
         status: str = "canonical",
         db: Any | None = None,
         timings: dict[str, int] | None = None,
+        strict: bool = False,
     ) -> list[RetrievedChunk]:
         where: dict = {}
         if status:
@@ -98,6 +99,8 @@ class KnowledgeRetriever:
         try:
             qvec = self._embed([query])[0]
         except EmbeddingUnavailableError:
+            if strict:
+                raise
             if timings is not None:
                 timings["embedding_ms"] = int((time.monotonic() - embedding_started) * 1000)
             return []

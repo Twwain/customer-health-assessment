@@ -11,10 +11,16 @@ import type {
 } from "../types";
 import { useLLMStatus } from "../statusContext";
 import { renderMarkdown } from "../lib/ui";
-import { additionalStrategies, completeAnswerText } from "../lib/chatAnswer";
+import { completeAnswerText } from "../lib/chatAnswer";
+import { assessmentSections } from "../lib/assessmentPresentation";
+import { hasPlaybackText, playAnswer } from "../lib/answerPlayback";
+import { AssessmentAnalysis } from "../components/AssessmentAnalysis";
+import { AssessmentPlan } from "../components/AssessmentPlan";
 import HealthCard from "../components/HealthCard";
-import { RefsBox, StrategyList } from "../components/StrategyList";
+import { RefsBox } from "../components/RefsBox";
 import { useUiFeedback } from "../components/UiFeedback";
+import { presentFactorNames } from "../lib/factorNames";
+import { useFactorNames } from "../lib/useFactorNames";
 
 interface StreamMsg {
   role: "assistant";
@@ -29,18 +35,7 @@ interface StreamMsg {
   streaming: true;
 }
 
-type Scenario = "assessment" | "strategy" | "alert_analysis";
 type ReadingPosition = { answerId?: number | "stream"; scrollTop?: number };
-const EP: Record<Scenario, string> = {
-  assessment: "evaluate",
-  strategy: "strategy",
-  alert_analysis: "alert-analysis",
-};
-const SCENE_LABEL: Record<Scenario, string> = {
-  assessment: "综合评估",
-  strategy: "策略建议",
-  alert_analysis: "风险排查",
-};
 
 export default function Chat() {
   const { sessionId } = useParams();
@@ -70,9 +65,7 @@ export default function Chat() {
   const busyRef = useRef(false);
   const streamRef = useRef<StreamMsg | null>(null);
   const customerIdRef = useRef<number | null>(null);
-  const scenarioRef = useRef<string>("free_qa");
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const pendingScenario = useRef<Scenario | null>(null);
   const pollRef = useRef<number | null>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const initialReading = (location.state as { chatReading?: ReadingPosition } | null)?.chatReading;
@@ -103,14 +96,7 @@ export default function Chat() {
   const startPolling = (id: number) => {
     stopPolling();
     // eslint-disable-next-line react-hooks/purity -- 轮询超时基准必须取启动时的当前时间
-    const startedAt = Date.now();
     pollRef.current = window.setInterval(() => {
-      if (Date.now() - startedAt > 120000) {
-        stopPolling();
-        setResuming(false);
-        setError("生成超时，请刷新页面或重新发送");
-        return;
-      }
       void loadSession(id);
     }, 3000);
   };
@@ -130,7 +116,14 @@ export default function Chat() {
   // ── SSE 流式发送 ──────────────────────────────────────────
   const handleEvent = (ev: ChatEvent) => {
     if (ev.type === "done") {
-      const msg = ev.data.message as ChatMessageItem;
+      const received = ev.data.message as ChatMessageItem;
+      const msg = { ...received, scenario: received.scenario ?? streamRef.current?.scenario };
+      if (streamRef.current?.scenario
+          && followLatestRef.current && !readingPositionRef.current) {
+        readingPositionRef.current = { answerId: msg.id };
+        pendingReadingRef.current = true;
+        followLatestRef.current = false;
+      }
       if (readingPositionRef.current?.answerId === "stream") {
         readingPositionRef.current = { answerId: msg.id };
       }
@@ -180,13 +173,13 @@ export default function Chat() {
         next = { ...cur, stageMessage: ev.data.message as string };
         break;
       case "replace":
-        if (ev.data.reason === "final_sync" && cur.scenario && cur.scenario in EP
+        if (ev.data.reason === "final_sync" && cur.scenario
             && followLatestRef.current && !readingPositionRef.current) {
           readingPositionRef.current = { answerId: "stream" };
           pendingReadingRef.current = true;
           followLatestRef.current = false;
         }
-        next = { ...cur, content: (ev.data.text as string | undefined) || "" };
+        next = { ...cur, content: (ev.data.text as string | undefined) || "", stageMessage: undefined };
         break;
       case "strategy":
         next = { ...cur, strategy_items: ev.data.items as StrategyItem[] };
@@ -230,6 +223,8 @@ export default function Chat() {
     }
     streamRef.current = {
       role: "assistant",
+      scenario: endpoint.endsWith("/messages") ? "free_qa" : endpoint.endsWith("/evaluate") ? "assessment"
+        : messages.find((message) => message.id === replacementId)?.scenario ?? undefined,
       content: "",
       references: [],
       strategy_items: [],
@@ -238,8 +233,16 @@ export default function Chat() {
     };
     setStream(streamRef.current);
     try {
-      await streamChat(`/api${endpoint}`, { stream: true, ...body }, (event) => {
+      await streamChat(`/api${endpoint}`, { stream: true, idempotency_key: crypto.randomUUID(), ...body }, (event) => {
         if (!activeRef.current || generation !== generationRef.current || terminal) return;
+        const text = event.data.text;
+        if (event.type === "delta" && typeof text === "string"
+            && hasPlaybackText(text)
+            && !streamRef.current?.content
+            && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+          return playAnswer(text, (frame) => handleEvent({ type: "replace", data: { text: frame } }),
+            () => activeRef.current && generation === generationRef.current && !terminal);
+        }
         terminal = event.type === "done" || event.type === "error";
         handleEvent(event);
       });
@@ -253,6 +256,7 @@ export default function Chat() {
       setError(replacementId !== null ? "重新生成未完成，已保留原答案" : e instanceof Error ? e.message : "流式请求失败");
       streamRef.current = null;
       setStream(null);
+      void loadSession(id);
     } finally {
       if (activeRef.current && generation === generationRef.current) {
         replacementIdRef.current = null;
@@ -262,9 +266,9 @@ export default function Chat() {
     }
   };
 
-  const runScenarioEndpoint = (scenario: Scenario, customerId: number | null) => {
+  const runAssessment = (customerId: number | null) => {
     if (!sessionIdNum) return;
-    sendTurn(sessionIdNum, `/chat/sessions/${sessionIdNum}/${EP[scenario]}`, {
+    sendTurn(sessionIdNum, `/chat/sessions/${sessionIdNum}/evaluate`, {
       customer_id: customerId ?? undefined,
     });
   };
@@ -282,9 +286,9 @@ export default function Chat() {
         if (!activeRef.current) return;
         setMessages(s.messages);
         setSessionTitle(s.title || "AI 对话");
+        if (s.run_notice) setError(s.run_notice);
         setSessionCustomerId(s.customer_id);
         customerIdRef.current = s.customer_id;
-        scenarioRef.current = s.scenario;
         for (const m of s.messages) if (m.feedback) setFeedbacks((p) => ({ ...p, [m.id]: m.feedback }));
         if (s.customer_id) fetchCtx(s.customer_id);
         // 恢复提示：切走再切回时，若后端标记会话仍在生成则显示「正在生成」并轮询
@@ -295,6 +299,7 @@ export default function Chat() {
           setResuming(false);
           stopPolling();
         }
+        return s;
       })
       .catch(() => setError("会话加载失败"));
 
@@ -302,11 +307,11 @@ export default function Chat() {
     // 会话切换由路由层 key 重挂载保证状态全新（App.tsx ChatBySession），
     // 这里只负责加载当前会话，不再手动清空上个会话的状态
     if (!sessionIdNum) return;
-    const auto = (location.state as { autoScenario?: Scenario } | null)?.autoScenario;
-    // 快捷场景（评估/策略/预警）在加载完成后的异步回调里触发，
+    const auto = (location.state as { autoAssess?: boolean } | null)?.autoAssess;
+    // 综合评估在加载完成后的异步回调里触发，
     // 避免在 effect 的同步链路上触发 setState（react-hooks/set-state-in-effect）
-    void loadSession(sessionIdNum).then(() => {
-      if (auto && customerIdRef.current) runScenarioEndpoint(auto, customerIdRef.current);
+    void loadSession(sessionIdNum).then((session) => {
+      if (auto && customerIdRef.current && session?.message_count === 0 && !session.streaming) runAssessment(customerIdRef.current);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionIdNum]);
@@ -354,22 +359,18 @@ export default function Chat() {
     return () => window.cancelAnimationFrame(frame);
   }, [messages, stream, resuming, busy, error]);
 
-  const runQuick = (scenario: Scenario) => {
+  const runQuick = () => {
     if (!sessionIdNum) {
-      // 草稿态点快捷场景：先选客户，按场景建会话并自动执行
-      pendingScenario.current = scenario;
+      // 草稿态先选客户，再创建评估会话并自动执行。
       setPickerOpen(true);
       return;
     }
-    if (customerIdRef.current) runScenarioEndpoint(scenario, customerIdRef.current);
+    if (customerIdRef.current) runAssessment(customerIdRef.current);
     else setPickerOpen(true);
   };
 
   const streamLabel = (scenario?: string) => {
-    if (scenario && scenario in SCENE_LABEL) {
-      return `正在生成${SCENE_LABEL[scenario as Scenario]}…`;
-    }
-    return "思考中…";
+    return scenario === "assessment" ? "正在生成综合评估…" : "思考中…";
   };
 
   const sendMessage = () => {
@@ -413,7 +414,6 @@ export default function Chat() {
     if (idx < 0) return;
     const lastId = messages[messages.length - 1 - idx].id;
     sendTurn(sessionIdNum, `/chat/sessions/${sessionIdNum}/regenerate`, {
-      scenario: scenarioRef.current,
       customer_id: customerIdRef.current ?? undefined,
     }, lastId);
   };
@@ -517,12 +517,10 @@ export default function Chat() {
   };
 
   const handlePick = (c: { id: number; customer_name: string }) => {
-    const sc = pendingScenario.current || "assessment";
-    pendingScenario.current = null;
     setPickerOpen(false);
     chat
-      .createSession({ title: `${c.customer_name} · ${SCENE_LABEL[sc]}`, customer_id: c.id, scenario: sc })
-      .then((s) => navigate(`/chat/${s.id}`, { state: { autoScenario: sc } }))
+      .createSession({ title: `${c.customer_name} · 综合评估`, customer_id: c.id, scenario: "assessment" })
+      .then((s) => navigate(`/chat/${s.id}`, { state: { autoAssess: true } }))
       .catch(() => notify("创建会话失败", "error"));
   };
 
@@ -530,7 +528,6 @@ export default function Chat() {
     <CustomerPicker
       onClose={() => {
         setPickerOpen(false);
-        pendingScenario.current = null;
       }}
       onPick={handlePick}
     />
@@ -541,8 +538,7 @@ export default function Chat() {
     return (
       <>
         <WelcomeScreen
-          onPick={(sc) => {
-            pendingScenario.current = sc;
+          onPick={() => {
             setPickerOpen(true);
           }}
           onKnowledge={() => navigate("/knowledge")}
@@ -658,8 +654,8 @@ export default function Chat() {
               <div key={mid} data-message-anchor={isStream ? "stream" : mid}>
               <MessageView
                 msg={m}
-                assessment={isStream ? (stream as StreamMsg)?.assessment : ctx.assessment}
-                trend={isStream ? (stream as StreamMsg)?.trend : ctx.trend}
+                assessment={isStream ? stream.assessment ?? ctx.assessment : ctx.assessment}
+                trend={isStream ? stream.trend ?? ctx.trend : ctx.trend}
                 streaming={isStream}
                 streamHint={isStream ? `草稿预览 · ${stream?.stageMessage || streamLabel(stream?.scenario)}` : undefined}
                 feedback={feedbacks[mid] || ""}
@@ -696,9 +692,7 @@ export default function Chat() {
       <div className="shrink-0 border-t border-border bg-surface px-4 py-3">
         <div className="mx-auto max-w-[860px]">
           <div className="mb-2 flex gap-1.5 overflow-x-auto">
-            <QuickChip label="📊 综合评估" onClick={() => runQuick("assessment")} disabled={busy} />
-            <QuickChip label="🎯 生成策略" onClick={() => runQuick("strategy")} disabled={busy} />
-            <QuickChip label="🚨 风险排查" onClick={() => runQuick("alert_analysis")} disabled={busy} />
+            <QuickChip label="📊 综合评估" onClick={runQuick} disabled={busy} />
             {!isDraft && <QuickChip label="📄 生成报告" onClick={exportPdf} disabled={busy} />}
           </div>
           <div className="flex items-end gap-2 rounded-xl border border-border-strong bg-surface px-3 py-2 focus-within:border-accent">
@@ -767,11 +761,14 @@ function MessageView({
   onAdopt: () => void;
 }) {
   const { notify } = useUiFeedback();
-  const strategies = additionalStrategies(msg.content, msg.strategy_items ?? []);
+  const names = useFactorNames();
+  const displayMsg = presentFactorNames(msg, names);
+  const strategies = displayMsg.strategy_items ?? [];
+  const assessmentPresentation = assessmentSections(displayMsg.content);
   const copyAnswer = async () => {
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-      await navigator.clipboard.writeText(completeAnswerText(msg));
+      await navigator.clipboard.writeText(completeAnswerText(displayMsg));
       notify("已复制完整结果", "success");
     } catch {
       notify("复制失败，请允许浏览器访问剪贴板，或手动选择内容复制", "error");
@@ -790,11 +787,11 @@ function MessageView({
     <div className="flex gap-2.5">
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand/10 text-[16px]">🤖</div>
       <div className="min-w-0 flex-1">
-        {assessment && <div className="mb-2"><HealthCard assessment={assessment} trend={trend ?? null} compact showTrendButton={false} onAlertAI={undefined} /></div>}
+        {assessment && msg.scenario !== "free_qa" && <div className="mb-2"><HealthCard assessment={assessment} trend={trend ?? null} compact /></div>}
         {msg.content ? (
           <div className="md-text rounded-xl rounded-tl-sm border border-border bg-surface px-3.5 py-2.5">
             <div className="md">
-              {renderMarkdown(msg.content)}
+              {assessmentPresentation ? <AssessmentAnalysis sections={assessmentPresentation} /> : renderMarkdown(displayMsg.content)}
               {streaming && <span className="cursor-blink ml-0.5" />}
             </div>
             {streaming && streamHint && <div className="mt-2 text-[12px] text-muted">{streamHint}</div>}
@@ -807,7 +804,7 @@ function MessageView({
         ) : null}
         {strategies.length > 0 && (
           <div className="mt-2">
-            <StrategyList items={strategies} references={msg.references} onTrace={onTrace} />
+            <AssessmentPlan items={strategies} />
           </div>
         )}
         <RefsBox references={msg.references} onTrace={onTrace} />
@@ -945,13 +942,11 @@ function WelcomeScreen({
   onPick,
   onKnowledge,
 }: {
-  onPick: (sc: Scenario) => void;
+  onPick: () => void;
   onKnowledge: () => void;
 }) {
-  const entries: { icon: string; title: string; desc: string; sc?: Scenario; nav?: string }[] = [
-    { icon: "📊", title: "评估某个客户", desc: "选择客户 → 自动评分 + AI 综合分析", sc: "assessment" },
-    { icon: "🚨", title: "排查风险客户", desc: "聚焦预警成因与止损动作", sc: "alert_analysis" },
-    { icon: "🎯", title: "制定客户策略", desc: "基于评估结果生成三层可执行策略", sc: "strategy" },
+  const entries: { icon: string; title: string; desc: string; nav?: string }[] = [
+    { icon: "📊", title: "评估某个客户", desc: "客情评分、风险与优势分析、下一步计划" },
     { icon: "📚", title: "查询内部知识", desc: "分级标准 / SLA / 行业基准 / 竞品动态", nav: "knowledge" },
   ];
   return (
@@ -972,7 +967,7 @@ function WelcomeScreen({
             <button
               key={e.title}
               className="flex flex-col items-center gap-2.5 rounded-xl border border-border bg-surface p-5 text-center transition hover:border-accent/60 hover:bg-surface-3"
-              onClick={() => (e.nav ? onKnowledge() : onPick(e.sc!))}
+              onClick={() => (e.nav ? onKnowledge() : onPick())}
             >
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft/70 text-[19px]">
                 {e.icon}

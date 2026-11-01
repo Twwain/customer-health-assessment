@@ -118,7 +118,7 @@ def test_pdf_job_create_status_download_flow(client, customer):
     assert result["status"] == "ready"
     assert result["error"] is None
     assert result["degraded"] is True
-    assert any("规则引擎" in warning for warning in result["warnings"])
+    assert any("规则兜底" in warning for warning in result["warnings"])
 
     download = client.get(f"/api/assessment/{customer.id}/pdf/jobs/{job_id}/download")
     assert download.status_code == 200

@@ -1,0 +1,398 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "2.4"
+    },
+    "intent_rules_version": {
+      "const": "1.2"
+    },
+    "question": {
+      "type": "string"
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "maxItems": 100
+    },
+    "allowed_intents": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "score_grade",
+          "explain_score",
+          "data_quality",
+          "risk",
+          "alerts",
+          "actions",
+          "verify_questions",
+          "projection",
+          "trend",
+          "compare",
+          "policy",
+          "analysis"
+        ]
+      }
+    },
+    "allowed_subject_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 96,
+        "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+      },
+      "maxItems": 120
+    },
+    "allowed_field_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 96,
+        "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+      },
+      "maxItems": 120
+    },
+    "allowed_option_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 96,
+        "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+      },
+      "maxItems": 1000
+    },
+    "allowed_source_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 96,
+        "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+      },
+      "maxItems": 120
+    },
+    "count_limits": {
+      "const": {
+        "min": 1,
+        "max": 10,
+        "actions_max": 8,
+        "questions_max": 10
+      }
+    },
+    "intent_definitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "score_grade",
+        "explain_score",
+        "data_quality",
+        "risk",
+        "alerts",
+        "actions",
+        "verify_questions",
+        "projection",
+        "trend",
+        "compare",
+        "policy",
+        "analysis"
+      ],
+      "properties": {
+        "score_grade": {
+          "const": "查询当前引擎评分和等级。"
+        },
+        "explain_score": {
+          "const": "解释被问因子原值和实际计分；field_refs为空表示全部合法配置因子。"
+        },
+        "data_quality": {
+          "const": "查询指定或全部因子的缺失、冲突及格式状态，不据此推断经营风险。"
+        },
+        "risk": {
+          "const": "围绕问题自由判断客户业务风险及优先级；问最大或首要风险只聚焦一个，不按引擎预警顺序选择。"
+        },
+        "alerts": {
+          "const": "仅在明确要求评分引擎预警原始清单时使用；最大风险、主要风险等业务判断不使用本意图。"
+        },
+        "actions": {
+          "const": "生成具体业务建议；count为空使用1，显式数量1至8；不限制为预先登记的候选。"
+        },
+        "verify_questions": {
+          "const": "请求客户级核实问题；count为空使用1，显式数量1至10；本版不声明字段限定语义。"
+        },
+        "projection": {
+          "const": "对已知基线因子进行合法目标的条件测算；字段与目标逐一对应。基线/选项不足则澄清。"
+        },
+        "trend": {
+          "const": "查询评分历史窗口与变化，不推断业务因果。"
+        },
+        "compare": {
+          "const": "只比较本次明确指定并捕获的全部客户评分，至少2个；不能增加客户。"
+        },
+        "policy": {
+          "const": "查询制度原文、责任主体、时限和出处；无需客户因子或测算选项，不确认客户适用或违规。资料身份由document_ref及本次证据版本限定；source_policy缺失/歧义时整次choose_source，泛查询无命中可正常说明未知。"
+        },
+        "analysis": {
+          "const": "开放业务分析、机会、原因假设和推进讨论，允许条件判断；资料缺失或判断不确定不构成澄清。"
+        }
+      }
+    },
+    "subject_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bound_subject_ref": {
+          "type": "string",
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+        },
+        "use_bound_subject_for_implicit_subject": {
+          "const": true
+        },
+        "explicit_subject_rule": {
+          "const": "仅当问题未另指客户时使用绑定对象；不得替代明确的其他客户或比较成员。"
+        }
+      },
+      "required": [
+        "bound_subject_ref",
+        "use_bound_subject_for_implicit_subject",
+        "explicit_subject_rule"
+      ]
+    },
+    "argument_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "field_refs",
+        "option_refs",
+        "source_refs",
+        "duplicate_kinds"
+      ],
+      "properties": {
+        "count": {
+          "const": "仅行动卡/核实问题数量；制度时限等不是count。未要求数量用null，默认值按已声明规则。"
+        },
+        "field_refs": {
+          "const": "可在analysis、explain_score、data_quality和projection使用当前允许字段；其他为空。"
+        },
+        "option_refs": {
+          "const": "只在projection使用；每个字段对应一个合法目标。"
+        },
+        "source_refs": {
+          "const": "只在policy使用本次source_policy限定来源。明确点名时保留全部所选制度分片；缺失/歧义须choose_source，不全选同名不同文档。"
+        },
+        "duplicate_kinds": {
+          "const": "每种kind至多一个；字段和来源合并在同一项，冲突任务须澄清，不能覆盖。"
+        }
+      }
+    },
+    "retrieval_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "not_requested",
+            "available",
+            "no_hits",
+            "unavailable"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source_ref": {
+                "type": "string",
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+              },
+              "document_ref": {
+                "type": "string",
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+              },
+              "item_ref": {
+                "type": "string",
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "source_ref",
+              "document_ref",
+              "item_ref",
+              "title"
+            ]
+          },
+          "maxItems": 120
+        },
+        "document_groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "document_ref": {
+                "type": "string",
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+              },
+              "titles": {
+                "type": "array",
+                "uniqueItems": true,
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "evidence_revision": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "maxLength": 96,
+                  "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+                }
+              }
+            },
+            "required": [
+              "document_ref",
+              "titles",
+              "evidence_revision",
+              "source_refs"
+            ]
+          },
+          "maxItems": 120
+        }
+      },
+      "required": [
+        "status",
+        "sources",
+        "document_groups"
+      ]
+    },
+    "source_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": "1.0"
+        },
+        "status": {
+          "enum": [
+            "general_hits",
+            "general_no_hits",
+            "named_unique",
+            "named_missing",
+            "named_ambiguous"
+          ]
+        },
+        "document_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+          }
+        },
+        "allowed_source_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+          }
+        },
+        "document_groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "document_ref": {
+                "type": "string",
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+              },
+              "titles": {
+                "type": "array",
+                "uniqueItems": true,
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "evidence_revision": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "maxLength": 96,
+                  "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9_.-]+$"
+                }
+              }
+            },
+            "required": [
+              "document_ref",
+              "titles",
+              "evidence_revision",
+              "source_refs"
+            ]
+          },
+          "maxItems": 120
+        }
+      },
+      "required": [
+        "version",
+        "status",
+        "document_refs",
+        "allowed_source_refs",
+        "document_groups"
+      ]
+    },
+    "intent_output_schema": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "version",
+    "intent_rules_version",
+    "question",
+    "history",
+    "allowed_intents",
+    "allowed_subject_refs",
+    "allowed_field_refs",
+    "allowed_option_refs",
+    "allowed_source_refs",
+    "count_limits",
+    "intent_definitions",
+    "subject_context",
+    "argument_rules",
+    "retrieval_context",
+    "source_policy",
+    "intent_output_schema"
+  ]
+}

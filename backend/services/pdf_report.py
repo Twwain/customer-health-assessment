@@ -304,6 +304,8 @@ class PdfReportGenerator(
         references: list[dict] | None = None,
         trend: AssessmentTrendResponse | None = None,
         generation_warnings: list[str] | None = None,
+        analysis: dict | None = None,
+        hypotheses: list[dict] | None = None,
     ) -> bytes:
         with self._gen_lock:
             buf = io.BytesIO()
@@ -322,6 +324,7 @@ class PdfReportGenerator(
             story.extend(self._trend_section_pdf(trend))
             story.extend(self._dimension_detail(a))
             story.extend(self._alerts(a))
+            story.extend(self._analysis_section(analysis, hypotheses))
             story.extend(self._ai_strategy_section(strategy_items, references))
             story.extend(self._footer())
             doc.build(story)

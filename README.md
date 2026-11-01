@@ -11,98 +11,92 @@
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?logo=tailwindcss&logoColor=white)](frontend/package.json)
 [![License](https://img.shields.io/badge/License-Internal-blue)](#许可证)
 
-- **客户库 `/customers`**：筛选、新建、Excel 导入、因子编辑（桌面可编辑、移动只读）、评分与历史趋势。
-- **AI 对话 `/chat`**：流式综合评估、策略生成、风险排查与自由问答；支持引用溯源、反馈和完整结果复制。策略以总览与分层卡片展示，重新生成成功后替换旧答复；采纳状态仅保存在前端。
-- **知识库 `/knowledge`**：文档上传（md/txt/csv/pdf/xlsx/docx）、检索、审核、编辑、删除与重索引。
-- **PDF 报告**：评分明细、预警、三层策略建议、知识引用及趋势图。
+## 功能
 
-数据存储使用 SQLAlchemy + SQLite，向量检索使用 Chroma，报告使用 ReportLab + matplotlib；AI 编排与检索管线为项目内实现。
+- **客户库**：资料编辑、Excel 导入、客情评分与历史趋势。
+- **AI 对话**：综合评估与自由问答，提供总体评估、风险、优势和下一步计划，支持引用溯源、重新生成及完整结果复制。
+- **知识库**：文档上传、审核、检索、编辑、删除与重索引。
+- **PDF 报告**：异步生成评分明细、趋势、分析和行动建议。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    UI[React 前端] --> API[FastAPI]
-    API --> Scoring[配置驱动评分引擎]
-    API --> Agent[AI 编排与质量核对]
-    Agent --> Scoring
-    Agent --> RAG[知识检索与来源追溯]
-    Agent --> Model[Chat 模型]
-    Scoring --> DB[(SQLite)]
+    UI[React 前端] --> API[FastAPI 路由]
+    API --> AI[AI 编排与会话]
+    API --> Score[配置驱动评分]
+    API --> PDF[异步 PDF 报告]
+    PDF --> AI
+    PDF --> Score
+    AI --> Facts[事实快照与结果校验]
+    Facts --> Score
+    AI --> RAG[知识检索与来源校验]
+    AI --> LLM[Chat 模型]
+    AI --> Assets[提示词与 Schema]
+    RAG --> Embed[Embedding 模型]
+    RAG --> Chroma[(Chroma)]
+    Facts --> DB[(SQLite)]
     RAG --> DB
-    RAG --> Vector[(Chroma)]
-    API --> Report[报告聚合与异步 PDF]
-    Report --> Agent
-    Report --> Scoring
+    AI --> DB
 ```
+
+## AI 与事实边界
+
+**事实严格，判断开放。** 客户原值、评分与历史事实由数据库和评分引擎提供；AI 负责业务判断与行动建议。结果通过结构及来源校验后展示，模型不可用时使用规则兜底。知识来源会标注哪些资料被回答引用，哪些只是检索结果。
 
 ## 快速开始
 
-环境：Python 3.11+（建议 3.12）、Node.js 22.13+ 的 22.x 或 24+；前端依赖使用 npm。
+环境：Python 3.11+，Node.js 22.13+ 的 22.x 或 24+。
 
 ### 本地开发
 
-先创建并激活 Python 虚拟环境，再在项目根目录安装依赖：
+在项目根目录执行：
 
-```bash
-pip install -r backend/requirements.txt
-pip install -r backend/requirements-prod.txt  # Chroma、PDF/DOCX 文档解析
-cd frontend
+```powershell
+python -m venv backend/.venv
+./backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
+./backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-prod.txt
+if (!(Test-Path backend/.env)) { Copy-Item .env.example backend/.env }
+Set-Location frontend
 npm ci
-cd ..
+Set-Location ..
 ```
 
-复制 [.env.example](.env.example) 为 `backend/.env`，填写 Chat 与 Embedding 的 Key、地址、模型及匹配的 `EMBEDDING_DIM`。不配置 Chat 时使用规则引擎；仅开发测试可显式设置 `KNOWLEDGE_VECTOR_STORE=memory`，跳过 Chroma 安装。
+在 `backend/.env` 配置 Chat、Embedding 的地址、模型、密钥和 `EMBEDDING_DIM`。未配置 Chat 时使用规则结果；开发测试可设置 `KNOWLEDGE_VECTOR_STORE=memory`。
 
-```bash
-bash start.sh  # Linux / Git Bash；Windows 也可双击 start.bat
-```
+双击 `start.bat`，或在 Linux / Git Bash 中运行 `bash start.sh`。访问 [前端 :5173](http://localhost:5173) 和 [API 文档 :8000/docs](http://localhost:8000/docs)。
 
-前端访问 [localhost:5173](http://localhost:5173)，后端为 [localhost:8000](http://localhost:8000)。Shell 启动按 Ctrl+C 停止；Windows 批处理启动需关闭前后端窗口。
+### Docker 部署
 
-启动会创建数据库，但不自动导入客户。需要 13 条演示数据时，在 `backend` 目录执行 `python seed_data.py`，可重复运行。
+准备 `backend/.env` 和密钥文件后执行：
 
-### Docker 与服务器部署
-
-先准备 `backend/.env`。Compose 还会挂载密钥文件，可在根目录运行以下命令生成密钥并加密配置中的 Key：
-
-```bash
+```powershell
 python backend/scripts/encrypt_env.py --env backend/.env --key-file ./.ch_secret
 docker compose up -d --build
 ```
 
-访问 [localhost](http://localhost)。Docker 默认安装生产依赖与中文字体，通过 `./data:/app/data` 持久化数据；已有加密配置须配套原密钥。挂载位置可用 `CH_SECRET_FILE` 覆盖。
+访问 [localhost](http://localhost)。数据持久化至 `./data`；已有加密配置须使用配套密钥。远程部署见 [deploy.sh](deploy.sh)。
 
-远程部署需要本机 Docker、SSH/SCP，以及已安装 Docker、开放 80 端口的服务器。首次同步前准备含有效 Key 的加密配置（Linux / Git Bash，在根目录执行）：
+## 配置与代码
 
-```bash
-cp backend/.env .env.prod
-python backend/scripts/encrypt_env.py --env .env.prod --key-file ./.ch_secret
-DEPLOY_SERVER=root@203.0.113.10 bash deploy.sh  # 替换为实际服务器地址
-```
-
-后续默认仅在服务器缺少配置时同步；强制同步用 `SYNC_CONFIG=1`，仅更新镜像用 `SYNC_CONFIG=0`。详见 [deploy.sh](deploy.sh)。
-
-## 配置
-
-| 入口 | 用途 |
+| 文件或目录 | 用途 |
 | --- | --- |
-| [.env.example](.env.example) → `backend/.env` | 模型、向量库、资源限制等运行配置 |
-| [config.py](backend/config.py) | 完整环境变量与代码默认值 |
-| [scoring_config.yaml](backend/scoring_config.yaml) | 评分维度、因子、规则与预警；修改后重启后端 |
-| [prompt_templates.yaml](backend/prompt_templates.yaml) | 用户场景与内部核对、修订、筛选、收尾提示词；按文件修改时间热加载 |
+| [.env.example](.env.example) → `backend/.env` | 模型连接、生成预算、数据路径与资源限制 |
+| [backend/config.py](backend/config.py) | 完整环境变量及默认值 |
+| [backend/scoring_config.yaml](backend/scoring_config.yaml) | 评分维度、因子、选项及告警规则；修改后重启后端 |
+| [backend/services/ai/](backend/services/ai/) | 会话、模型适配、分析编排与事实校验 |
+| [ai/assets/](backend/services/ai/assets/) | 提示词、Schema、版本与 SHA256 清单 |
+| [backend/services/rag/](backend/services/rag/) | 知识检索与索引生命周期 |
+| [backend/services/report_builder.py](backend/services/report_builder.py) | 报告数据聚合 |
+| [frontend/src/pages/](frontend/src/pages/) | 前端页面 |
 
-提示词分为 `templates`（用户场景）与 `internal_tasks`（内部任务）；安全边界、协议校验、评分重算和调用限制由代码控制。
-
-聊天与报告可分别配置模型思考、修订次数、时间和资源预算，参数见配置入口。PDF 任务存活时间须覆盖生成与排版耗时。
+评分配置修改后重启后端。AI 资产逐请求读取并校验哈希，提示词或 Schema 修改后须更新清单并整套发布。
 
 ## 评分模型
 
-V3.0 共 7 个维度、28 个因子；因子映射为 0–10 分，维度内取均值：
+7 个维度、28 个因子；因子映射为 0–10 分，维度内取均值：
 
 `总分 = Σ(维度内因子均分 × 维度权重 ÷ 10)`
-
-评分、档位、排名及目标增分由引擎计算，AI 负责解释与经营建议。策略目标须通过合法性和原文一致性校验，再由引擎测算增分。
 
 | 维度 | 权重 | 因子数 |
 | --- | --- | --- |
@@ -114,45 +108,37 @@ V3.0 共 7 个维度、28 个因子；因子映射为 0–10 分，维度内取�
 | RISK 竞争态势与风险信号 | 12 | 5 |
 | SVC 服务与支持健康度 | 5 | 3 |
 
-等级：健康 ≥80、亚健康 60≤分数<80、风险 40≤分数<60、高危 <40。35条预警由 YAML 配置，其中28条覆盖全部因子，映射分≤4时触发；同一因子保留最高等级预警。缺失或非法填值只提示资料待核实，不认定为业务风险。季度下降规则按同配置版本每季度最后一次评估判断，连续两个季度下降且累计降幅 >10 分时触发。
+健康 ≥80，亚健康 60–<80，风险 40–<60，高危 <40。资料缺失或选项无效会单独提示，历史趋势按评分配置版本计算。
 
-批量录入从 `GET /api/customers/import-template` 下载 Excel 模板，填写“客户数据表”，保留两行表头。新增因子三步：① 添加客户列或 `custom_fields` 字段；② 在 YAML 注册字段及评分、输入规则和对应因子预警；③ 重启后端，前端通过 `/api/customers/factor-config` 动态加载。
+新增因子：添加客户字段或 `custom_fields` 字段 → 在 YAML 注册评分、选项和告警 → 重启后端。前端通过 `/api/customers/factor-config` 加载表单；Excel 模板从 `/api/customers/import-template` 下载。
 
-## AI、知识库与报告
+## 运行维护
 
-- **对话**：模型可调用匿名客户对比与知识检索工具，由 `LLM_TOOLS_ENABLED` 控制；工具结果经脱敏并标为不可信数据。预警解读通过对话中的“风险排查”进入。
-- **核对与修订**：综合评估、策略生成和风险排查先预览少量草稿，核对完成后一次展示最终结果；这三类场景与报告均默认最多15轮常规恢复，受10分钟和100万token预算约束。内容错误定点修订后完整复核，核对异常重试；无效修订转为筛选可靠内容并再次复核。模型不可用或无法可靠保留分析时，使用规则结果并明确提示；规则建议也覆盖健康客户的明显维度短板。自由问答直接流式输出，不经过上述事实核对与修订流程。
-- **原因分析**：总分低于健康档且没有因子明细业务预警时，AI仍分析有数据依据的可能原因，区分事实、假设与核实动作。
-- **检索**：包含元数据过滤、向量召回、重排和相邻切片扩展；默认按分类、行业等元数据重排，可选 BGE。结构化指标直接从 SQLite 查询，回答与报告携带知识引用。
-- **报告**：PDF 与对话复用评分、知识和 AI 分析能力，通过异步任务生成，可选择是否包含 AI 建议；检索故障不阻断基础回复。
+- 备份 SQLite、知识文件和 Chroma 索引，密钥另行保管；已有环境沿用原数据路径。
+- Chroma 异常时等待恢复与对账；更换 Embedding 模型或维度后执行重索引。
+- `/api/readiness` 检查就绪状态，`/api/chat/status` 查看 AI 配置，`/api/chat/metrics` 查看用量。
+- PDF 任务在进程内管理，服务重启后需重新申请导出。
+- 系统没有登录与租户隔离，应在受控环境使用。
 
-接口参数和响应结构见运行后的 [API 文档](http://localhost:8000/docs)，实现入口见文末。
+## 验证
 
-## 运维边界
-
-- **访问权限**：无登录、RBAC 或租户隔离，所有访问者共享数据并可管理知识库。仅用于虚构或已脱敏、可公开修改和删除的演示数据；使用真实数据前须补充访问控制。配置、密钥及本地开发记录不得随站点公开。
-- **向量一致性**：生产 Chroma 不可用时向量读写与 `/api/readiness` 返回失败，不自动回退内存；列表、详情和原文下载仍可用。更换 Embedding 服务、模型或维度后须完成整库重索引，校验成功后才切换并回收旧索引；后台自动重试待同步和待删除记录。
-- **资源限制**：模型、Embedding、PDF 均设有并发和时间限制，重型请求与上传另有限额，详见配置入口。多进程/多副本会放大额度，供应商侧应设置费用上限。
-- **观测**：`GET /api/chat/status` 查看 AI 可用性，`GET /api/chat/metrics` 查看用量、耗时和降级等指标（默认保留 90 天）；质量诊断另存逐轮核对类别、修订状态和最终来源。指标及质量诊断记录不保存客户原文或模型草稿；聊天消息本身会保存。
-
-## 测试
-
-后端在 `backend` 目录运行 `python -m pytest tests/ -q`；前端在 `frontend` 目录依次运行 `npm run build`、`npm run lint`、`npm run test`。
-
-在线测试默认跳过，显式启用会产生 API 费用。复用 `backend/.env` 中有效的 Chat / Embedding 配置；加密 Key 需配套密钥。以下为 Windows PowerShell 示例，从项目根目录执行：
+后端在 `backend` 目录运行：
 
 ```powershell
-$env:SECRET_KEY_FILE = Join-Path (Get-Location) '.ch_secret'
-Set-Location backend
-.\.venv\Scripts\python.exe -m pytest tests/test_live_llm.py --run-live -q -s -p no:cacheprovider
+./.venv/Scripts/python.exe -m pytest tests/ -q -p no:cacheprovider --basetemp ../.tmp/pytest
 ```
 
-在线测试使用隔离合成数据，覆盖对话、检索、工具、事实核对与报告 AI；配置故障或规则降级不算通过。低频 Chroma 与检索质量评测的启用选项见 [测试选项](backend/tests/conftest.py)，覆盖范围与阈值见 [在线用例](backend/tests/test_live_llm.py) 和 [RAG 评测](backend/tests/test_live_rag_extended.py)。
+前端在 `frontend` 目录执行：
 
-## 代码入口
+```powershell
+node node_modules/typescript/bin/tsc -p tsconfig.app.json --noEmit
+node node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit
+node node_modules/vite/bin/vite.js build
+node node_modules/vitest/vitest.mjs run
+```
 
-[后端路由](backend/routers/) · [评分引擎](backend/services/scoring/) · [AI 编排](backend/services/ai/) · [RAG](backend/services/rag/) · [报告聚合](backend/services/report_builder.py) · [前端页面](frontend/src/pages/)
+测试使用隔离数据，功能变更需补浏览器检查。真实模型测试默认跳过，执行前明确样本与累计额度；分析建议的质量由人工验收。
 
 ## 许可证
 
-本项目为内部评估工具，保留所有权利，不对外开放授权。组织内使用或二次开发请联系项目维护者。
+本项目为内部评估工具，保留所有权利，不对外开放授权。

@@ -18,6 +18,8 @@ from database import (
     migrate_add_chat_message_superseded_column,
     migrate_add_quality_diagnostics,
     migrate_drop_legacy_customer_columns,
+    backup_before_ai_v2,
+    migrate_ai_v2,
 )
 import config
 from request_limits import AIRateLimitMiddleware, UploadBodyLimitMiddleware
@@ -126,11 +128,16 @@ def _migrate_required_schema() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """应用启动时初始化数据库；单纯导入 ``main`` 不再产生写库副作用。"""
+    backup_before_ai_v2()
     Base.metadata.create_all(bind=engine)
     # 结构迁移是当前模型契约的一部分，失败时必须阻止服务启动，不能带病运行。
     migrate_drop_legacy_customer_columns()
     migrate_add_chat_message_superseded_column()
     migrate_add_quality_diagnostics()
+    migrate_ai_v2()
+    from services.ai.execution import recover_pending
+    with SessionLocal() as recovery_db:
+        recover_pending(recovery_db)
     _migrate_required_schema()
     _migrate_legacy_data()
     from services.rag.knowledge_base import (

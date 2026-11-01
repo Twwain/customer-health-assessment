@@ -40,16 +40,3 @@ export function AlertBadge({ level, message }: { level: string; message: string 
     </span>
   );
 }
-
-export function UrgencyBadge({ urgency, label }: { urgency: string; label: string }) {
-  const color =
-    urgency === "high" ? "#E03131" : urgency === "medium" ? "#DD5B00" : "#0075DE";
-  return (
-    <span
-      className="rounded px-1.5 py-[1px] text-[12px] font-semibold"
-      style={{ color, background: hexToRgba(color, 0.12) }}
-    >
-      {label}
-    </span>
-  );
-}

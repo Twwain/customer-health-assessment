@@ -88,6 +88,8 @@ class AssessmentHistory(Base):
     risk_alerts: Mapped[list] = mapped_column(JSON, default=list, comment="风险预警快照")
     factor_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, comment="评估时的因子取值快照")
     strategy_snapshot: Mapped[list] = mapped_column(JSON, default=list, comment="策略建议快照")
+    strategy_run_id: Mapped[str | None] = mapped_column(ForeignKey("ai_assessment_runs.run_id", ondelete="SET NULL", use_alter=True, name="fk_history_strategy_run"), nullable=True)
+    strategy_format: Mapped[str] = mapped_column(String(20), default="legacy", server_default="legacy")
     config_version: Mapped[str] = mapped_column(String(20), default="", comment="评分配置版本")
     assessed_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
@@ -135,6 +137,8 @@ class ChatMessage(Base):
     )
     role: Mapped[str] = mapped_column(String(20), default="user", comment="user / assistant / system")
     content: Mapped[str] = mapped_column(Text, default="", comment="消息内容（Markdown）")
+    ai_run_id: Mapped[str | None] = mapped_column(ForeignKey("ai_assessment_runs.run_id", ondelete="SET NULL"), nullable=True)
+    content_format: Mapped[str] = mapped_column(String(20), default="legacy", server_default="legacy")
     references: Mapped[list] = mapped_column(JSON, default=list, comment="RAG 引用来源（可溯源）")
     strategy_items: Mapped[list] = mapped_column(JSON, default=list, comment="结构化策略建议")
     tokens_used: Mapped[int] = mapped_column(Integer, default=0, comment="Token 消耗")
@@ -147,6 +151,38 @@ class ChatMessage(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
+
+
+class AIAssessmentRun(Base):
+    __tablename__ = "ai_assessment_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[int | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=True, index=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True, unique=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    scenario: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(32), default="capturing", index=True)
+    versions: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    fact_package: Mapped[dict] = mapped_column(JSON, default=dict)
+    request_contract: Mapped[dict] = mapped_column(JSON, default=dict)
+    validated_plan: Mapped[dict] = mapped_column(JSON, default=dict)
+    validated_result: Mapped[dict] = mapped_column(JSON, default=dict)
+    usage: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str] = mapped_column(String(50), default="")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AIAssessmentDependency(Base):
+    __tablename__ = "ai_assessment_dependencies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("ai_assessment_runs.run_id", ondelete="CASCADE"), index=True)
+    source_kind: Mapped[str] = mapped_column(String(20))
+    source_id: Mapped[str] = mapped_column(String(96), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
 
 
 class ChatTurnMetric(Base):

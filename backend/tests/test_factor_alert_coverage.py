@@ -55,11 +55,37 @@ def test_default_scores_create_data_gap_not_confirmed_factor_risk(field, value):
     put(c, factor, value)
     alerts = ConfigDrivenStrategy().evaluate(c).alerts
     ids = {a.id for a in alerts}
-    assert field + "_data_gap" in ids
+    alert_id = "missing_data_summary" if value is None or value == "" else field + "_data_gap"
+    assert alert_id in ids
     assert field + "_low" not in ids
     assert "ces_critical" not in ids
     assert "customer_business_risk_critical" not in ids
-    assert next(a for a in alerts if a.id == field + "_data_gap").level == "low"
+    assert next(a for a in alerts if a.id == alert_id).level == "low"
+
+
+def test_missing_fields_are_one_alert_separate_from_existing_incompatible_values():
+    c = customer()
+    c.custom_fields.update(kcr_04=None, ci_01="  ", his_06="50-79%", svc_03="≥1h或达标率≤80%")
+    strategy = ConfigDrivenStrategy()
+    result = strategy.evaluate(c)
+    missing = [a for a in result.alerts if a.id == "missing_data_summary"]
+    assert len(missing) == 1
+    assert "2 项资料未填写" in missing[0].message
+    assert "KCR-04" in missing[0].message and "CI-01" in missing[0].message
+    assert "HIS-06" not in missing[0].message
+    assert not {"kcr_04_data_gap", "ci_01_data_gap"} & {a.id for a in result.alerts}
+    mismatch = next(a for a in result.alerts if a.id == "his_06_data_gap")
+    assert "已有记录与当前输入选项或格式不一致" in mismatch.message
+    assert "未填写" not in mismatch.message
+    assert any(a.id == "svc_03_low" for a in result.alerts)
+    assert result.risk_alerts == [a.message for a in result.alerts]
+    # Alert aggregation does not mutate records or change the scoring result.
+    assert c.custom_fields["his_06"] == "50-79%"
+    assert result.total_score == round(sum(d.score for d in result.dimensions), 1)
+
+
+def test_complete_record_has_no_missing_summary():
+    assert "missing_data_summary" not in {a.id for a in ConfigDrivenStrategy().evaluate(customer()).alerts}
 
 
 def test_special_factor_alert_wins_over_generic_low_score():

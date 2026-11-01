@@ -1,13 +1,11 @@
 import axios from "axios";
 import type {
   AssessmentResponse,
-  AssessmentHistoryResponse,
   AssessmentTrendResponse,
   ChatSessionDetail,
   ChatSessionItem,
   ChatEvent,
   ChatSessionListResponse,
-  ChatTurnResponse,
   CustomerListResponse,
   CustomerResponse,
   FactorConfigResponse,
@@ -25,7 +23,6 @@ const http = axios.create({ baseURL: "/api" });
 export const customers = {
   list: (params: { search?: string; industry?: string; level?: string; page?: number; page_size?: number } = {}) =>
     http.get<CustomerListResponse>("/customers", { params }).then((r) => r.data),
-  get: (id: number) => http.get<CustomerResponse>(`/customers/${id}`).then((r) => r.data),
   create: (data: Partial<CustomerResponse>) =>
     http.post<CustomerResponse>("/customers", data).then((r) => r.data),
   update: (id: number, data: Partial<CustomerResponse>) =>
@@ -65,10 +62,6 @@ export const customers = {
     http.get<FactorConfigResponse>("/customers/factor-config").then((r) => r.data),
   assessment: (id: number) =>
     http.get<AssessmentResponse>(`/assessment/${id}`).then((r) => r.data),
-  history: (id: number, limit = 50) =>
-    http
-      .get<AssessmentHistoryResponse>(`/customers/${id}/assessment-history`, { params: { limit } })
-      .then((r) => r.data),
   trend: (id: number, limit = 12) =>
     http
       .get<AssessmentTrendResponse>(`/customers/${id}/assessment-trend`, { params: { limit } })
@@ -90,18 +83,6 @@ export const chat = {
   getSession: (id: number) =>
     http.get<ChatSessionDetail>(`/chat/sessions/${id}`).then((r) => r.data),
   deleteSession: (id: number) => http.delete(`/chat/sessions/${id}`).then((r) => r.data),
-  // 注：axios 助手按一次性 JSON 返回解析，强制 stream:false；
-  // 流式对话请使用下方 streamChat（fetch + SSE）
-  send: (id: number, data: { content: string; scenario?: string; customer_id?: number }) =>
-    http.post<ChatTurnResponse>(`/chat/sessions/${id}/messages`, { ...data, stream: false }).then((r) => r.data),
-  evaluate: (id: number, data: { customer_id?: number }) =>
-    http.post<ChatTurnResponse>(`/chat/sessions/${id}/evaluate`, { ...data, stream: false }).then((r) => r.data),
-  strategy: (id: number, data: { customer_id?: number }) =>
-    http.post<ChatTurnResponse>(`/chat/sessions/${id}/strategy`, { ...data, stream: false }).then((r) => r.data),
-  alertAnalysis: (id: number, data: { customer_id?: number }) =>
-    http.post<ChatTurnResponse>(`/chat/sessions/${id}/alert-analysis`, { ...data, stream: false }).then((r) => r.data),
-  regenerate: (id: number, data: { scenario?: string; customer_id?: number }) =>
-    http.post<ChatTurnResponse>(`/chat/sessions/${id}/regenerate`, { ...data, stream: false }).then((r) => r.data),
   feedback: (messageId: number, feedback: string) =>
     http
       .post(`/chat/messages/${messageId}/feedback`, { feedback })
@@ -111,7 +92,6 @@ export const chat = {
 export const knowledge = {
   items: (params: { category?: string; status?: string; q?: string; limit?: number } = {}) =>
     http.get<KnowledgeItemListResponse>("/knowledge/items", { params }).then((r) => r.data),
-  get: (id: number) => http.get<KnowledgeItemResponse>(`/knowledge/items/${id}`).then((r) => r.data),
   search: (data: { query: string; customer_id?: number; category?: string; status?: string; top_k?: number }) =>
     http.post<KnowledgeSearchResponse>("/knowledge/search", data).then((r) => r.data),
   upload: (file: File, category: string, title?: string, industry?: string) => {
@@ -131,8 +111,6 @@ export const knowledge = {
     http.post<KnowledgeItemResponse>(`/knowledge/items/${id}/revoke`).then((r) => r.data),
   batchStatus: (ids: number[], status: "canonical" | "proposed") =>
     http.post("/knowledge/batch-status", { ids, status }).then((r) => r.data),
-  reindex: (category?: string) =>
-    http.post("/knowledge/reindex", category ? { category } : {}).then((r) => r.data),
   reindexJob: (category?: string) =>
     http
       .post<{ job_id: string; status: string }>("/knowledge/reindex/jobs", category ? { category } : {})
@@ -150,7 +128,7 @@ export const knowledge = {
 export async function streamChat(
   url: string,
   body: unknown,
-  onEvent: (ev: ChatEvent) => void,
+  onEvent: (ev: ChatEvent) => void | Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(url, {
@@ -180,11 +158,14 @@ export async function streamChat(
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
       }
       if (!type || dataLines.length === 0) continue;
+      let data: ChatEvent["data"];
       try {
-        onEvent({ type, data: JSON.parse(dataLines.join("\n")) });
+        data = JSON.parse(dataLines.join("\n"));
       } catch {
         /* 忽略非 JSON 数据 */
+        continue;
       }
+      await onEvent({ type, data });
     }
   }
 }

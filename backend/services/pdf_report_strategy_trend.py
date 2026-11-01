@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+from xml.sax.saxutils import escape
 
 import matplotlib.font_manager as fm
 
@@ -41,25 +42,42 @@ class _StrategyMixin:
     _URGENCY_COLOR = {"high": "#C62828", "medium": "#DD5B00", "low": "#666666"}
     _PRIORITY_ORDER = ("recommended", "alternative", "long_term")
 
+    def _analysis_section(self, analysis, hypotheses):
+        if not analysis and not hypotheses:
+            return []
+        elements = [Spacer(1, 0.4 * cm),
+                    Paragraph("AI 分析（业务判断，可能有误）", self.styles["HeadingCN"] if "HeadingCN" in self.styles else self.styles["BodyCN"])]
+        for label, values in (("总体评估", [analysis.get("summary", "")] if analysis else []),
+                              ("主要风险点", (analysis or {}).get("risks", [])),
+                              ("优势", (analysis or {}).get("strengths", []))):
+            if values:
+                elements.append(Paragraph(label, self.styles["BodyCN"]))
+            for value in values:
+                elements.append(Paragraph(escape(str(value)).replace("\n", "<br/>"), self.styles["BodyCN"]))
+        for hypothesis in hypotheses or []:
+            elements.append(Paragraph("待验证假设：" + escape(hypothesis["statement"]), self.styles["BodyCN"]))
+            elements.append(Paragraph("验证方式：" + escape(hypothesis["how_to_check"]), self.styles["BodyCN"]))
+        return elements
+
     def _ai_strategy_section(self, strategy_items, references) -> list:
         header = self._section_header("五", "推荐策略")
+        elements = [Spacer(1, 0.5 * cm)]
         if not strategy_items:
-            return [
-                Spacer(1, 0.5 * cm),
+            elements += [
                 KeepTogether([
                     header,
                     Spacer(1, 0.25 * cm),
                     Paragraph(
-                        "本次评估未生成策略建议，可结合「风险排查」中的改进建议制定跟进计划。",
+                        "本次评估未生成下一步计划，可结合评估结果制定跟进安排。",
                         self.styles["BodyCN"],
                     ),
                 ]),
             ]
 
-        elements = [Spacer(1, 0.5 * cm)]
         header_pending = True
         for priority in self._PRIORITY_ORDER:
-            group = [i for i in strategy_items if (i.get("priority") or "recommended") == priority]
+            group = [i for i in strategy_items or [] if
+                     (i.get("priority") or "recommended") == priority]
             if not group:
                 continue
             mark = "●" if priority == "recommended" else "○" if priority == "alternative" else "·"
@@ -69,14 +87,12 @@ class _StrategyMixin:
                 ParagraphStyle(f"Grp_{priority}", fontName=self.FONT_NAME, fontSize=12.5,
                               leading=19, textColor=self.INK, spaceBefore=10, spaceAfter=5),
             )
-            # 章节标题 / 分组标题与首张卡片绑定，卡片本身不跨页拆分
+            # 开放行动可能较长，允许卡片按行及行内跨页。
             lead = [header, Spacer(1, 0.25 * cm)] if header_pending else []
             header_pending = False
-            elements.append(KeepTogether(
-                lead + [title_p, self._strategy_card(group[0]), Spacer(1, 0.28 * cm)]
-            ))
+            elements.extend(lead + [title_p, self._strategy_card(group[0]), Spacer(1, 0.28 * cm)])
             for item in group[1:]:
-                elements.append(KeepTogether([self._strategy_card(item), Spacer(1, 0.28 * cm)]))
+                elements.extend([self._strategy_card(item), Spacer(1, 0.28 * cm)])
 
         if references:
             ref_lines = []
@@ -84,20 +100,23 @@ class _StrategyMixin:
                 title = ref.get("title") or ref.get("item_title") or "未命名知识"
                 category = ref.get("category") or ""
                 cat_txt = f"（{category}）" if category else ""
-                ref_lines.append(f"{i}. 《{title}》{cat_txt}")
+                ref_lines.append(escape(f"{i}. 《{title}》{cat_txt}"))
+                if ref.get("snippet"):
+                    ref_lines.append(escape(ref["snippet"]).replace("\n", "<br/>"))
             elements.append(Spacer(1, 0.3 * cm))
-            elements.append(KeepTogether([
+            elements.extend([
                 Paragraph(
                     f'<font color="{self.BRAND.hexval()}">▍</font> <b>参考依据</b>',
                     ParagraphStyle("RefTitle", fontName=self.FONT_NAME, fontSize=12,
                                   leading=18, textColor=self.INK),
                 ),
-                Paragraph(
-                    "<br/>".join(ref_lines),
+                Paragraph("资料仅作参考，是否适用于本客户仍需确认。", self.styles["SmallCN"]),
+                *[Paragraph(
+                    line,
                     ParagraphStyle("RefBody", fontName=self.FONT_NAME, fontSize=9.5,
                                   leading=15, textColor=self.INK_2),
-                ),
-            ]))
+                ) for line in ref_lines],
+            ])
         return elements
 
     @staticmethod
@@ -113,7 +132,7 @@ class _StrategyMixin:
         urgency = item.get("urgency") or "medium"
         urg_cn = self._URGENCY_CN.get(urgency, "中")
         urg_hex = self._URGENCY_COLOR.get(urgency, "#DD5B00")
-        title = self._external_text(item.get("title")) or "（未命名策略）"
+        title = escape(self._external_text(item.get("title")) or "（未命名策略）")
         rows = [
             Paragraph(
                 f'<b>{title}</b>'
@@ -124,21 +143,21 @@ class _StrategyMixin:
             ),
         ]
         for label, key in (("原因", "reason"), ("行动", "action"), ("预期成效", "expected_outcome")):
-            val = self._external_text(item.get(key) or "")
+            val = escape(self._external_text(item.get(key) or "")).replace("\n", "<br/>")
             if val:
                 rows.append(Paragraph(
                     f'<font color="#666666">{label}：</font>{val}',
                     ParagraphStyle(f"Str_{key}", fontName=self.FONT_NAME, fontSize=9.5,
                                   leading=15, textColor=self.INK_2),
                 ))
-        ref = self._external_text(item.get("reference") or "")
+        ref = escape(self._external_text(item.get("reference") or ""))
         if ref:
             rows.append(Paragraph(
                 f'<font color="#666666">参考：{ref}</font>',
                 ParagraphStyle("StrRef", fontName=self.FONT_NAME, fontSize=9,
                               leading=14, textColor=self.MUTED),
             ))
-        card = Table([[r] for r in rows], colWidths=[16.4 * cm])
+        card = Table([[r] for r in rows], colWidths=[16.4 * cm], splitByRow=1, splitInRow=1)
         card.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), white),
             ("BOX", (0, 0), (-1, -1), 1, self.BORDER),
