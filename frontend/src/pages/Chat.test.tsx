@@ -92,6 +92,23 @@ describe("Chat 核心操作", () => {
       expect.objectContaining({ customer_id: 26 }), expect.any(Function)));
     expect(streamChat).toHaveBeenCalledOnce();
   });
+  it("公网 HTTP 缺少 randomUUID 时仍能发送综合评估请求", async () => {
+    const getRandomValues = crypto.getRandomValues.bind(crypto);
+    vi.stubGlobal("crypto", { getRandomValues });
+    try {
+      getSession.mockResolvedValue({ ...session(), customer_id: 33, scenario: "assessment", message_count: 0 });
+      streamChat.mockReset().mockResolvedValue(undefined);
+      render(<UiFeedbackProvider><MemoryRouter initialEntries={[{ pathname: "/chat/7", state: { autoAssess: true } }]}>
+        <Routes><Route path="/chat/:sessionId" element={<Chat />} /></Routes>
+      </MemoryRouter></UiFeedbackProvider>);
+      await waitFor(() => expect(streamChat).toHaveBeenCalledWith("/api/chat/sessions/7/evaluate",
+        expect.objectContaining({ customer_id: 33, idempotency_key: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/) }),
+        expect.any(Function)));
+      expect(screen.queryByText(/randomUUID is not a function/)).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("计划等待期间先显示独立评分，后续采用流中的冻结评分", async () => {
     const score: AssessmentResponse = { customer_id: 26, customer_name: "先展示评分客户", total_score: 48.4,
       max_score: 100, level: "风险", level_color: "#f97316", dimensions: [], risk_alerts: [], alerts: [],

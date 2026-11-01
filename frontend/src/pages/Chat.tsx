@@ -21,6 +21,7 @@ import { RefsBox } from "../components/RefsBox";
 import { useUiFeedback } from "../components/UiFeedback";
 import { presentFactorNames } from "../lib/factorNames";
 import { useFactorNames } from "../lib/useFactorNames";
+import { createRequestId } from "../lib/requestId";
 
 interface StreamMsg {
   role: "assistant";
@@ -233,7 +234,7 @@ export default function Chat() {
     };
     setStream(streamRef.current);
     try {
-      await streamChat(`/api${endpoint}`, { stream: true, idempotency_key: crypto.randomUUID(), ...body }, (event) => {
+      await streamChat(`/api${endpoint}`, { stream: true, idempotency_key: createRequestId(), ...body }, (event) => {
         if (!activeRef.current || generation !== generationRef.current || terminal) return;
         const text = event.data.text;
         if (event.type === "delta" && typeof text === "string"
