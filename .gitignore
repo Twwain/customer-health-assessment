@@ -94,6 +94,7 @@ frontend/lint_out.txt
 .codebuddy/
 .codex/
 .codex_tmp
+/.playwright-mcp/
 
 # Local dev process artifacts (not for git)
 dev_process/
