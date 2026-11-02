@@ -96,8 +96,8 @@ frontend/lint_out.txt
 .codex_tmp
 /.playwright-mcp/
 
-# Local dev process artifacts (not for git)
-dev_process/
+# Local runtime data and launcher (not for git)
+/.local/
 AGENTS.md
 
 # Local documentation (not for new commits)
