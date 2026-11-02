@@ -61,6 +61,9 @@ def test_default_scores_create_data_gap_not_confirmed_factor_risk(field, value):
     assert "ces_critical" not in ids
     assert "customer_business_risk_critical" not in ids
     assert next(a for a in alerts if a.id == alert_id).level == "low"
+    message = next(a for a in alerts if a.id == alert_id).message
+    assert ("补充后再判断业务状态" if value is None or value == ""
+            else "核实后再判断业务状态") in message
 
 
 def test_missing_fields_are_one_alert_separate_from_existing_incompatible_values():
@@ -139,13 +142,75 @@ def test_four_triggers_and_next_legal_band_does_not():
     assert "or_02_low" not in {a.id for a in ConfigDrivenStrategy().evaluate(c).alerts}
 
 
-def test_dimension_alert_with_missing_input_is_explicitly_uncertain():
+@pytest.mark.parametrize("key", ["kcr", "risk", "ci"])
+@pytest.mark.parametrize("value", [None, "invalid"])
+def test_dimension_alert_with_missing_input_is_explicitly_uncertain(key, value):
     c = customer()
-    for f in next(d for d in CONFIG.enabled_dimensions if d.key == "kcr").enabled_factors:
-        put(c, f, None)
-    alert = next(a for a in ConfigDrivenStrategy().evaluate(c).alerts if a.id == "kcr_dimension_low")
-    assert "不能据此确认业务风险" in alert.message
+    dim = next(d for d in CONFIG.enabled_dimensions if d.key == key)
+    for f in dim.enabled_factors:
+        put(c, f, value)
+    result = ConfigDrivenStrategy().evaluate(c)
+    score = next(d for d in result.dimensions if d.key == key)
+    threshold = {"kcr": 50, "risk": 40, "ci": 30}[key]
+    assert score.score / score.max_score * 100 < threshold
+    alert = next(a for a in result.alerts if a.id == key + "_dimension_low")
+    assert alert.message == (
+        f"{dim.name}得分率 {round(score.score / score.max_score * 100, 1)}%，"
+        "存在缺失或输入格式需核实的资料，保留引擎实际计分；需先核实资料，不能据此确认业务风险"
+    )
     assert alert.level == "low"
+
+
+def test_kcr_thirteen_out_of_thirty_is_rendered_as_percentage_without_history_claim():
+    c = customer()
+    c.custom_fields.update(kcr_01="40-59%", kcr_02="[1,1,1,0,0]", kcr_04="1次",
+                           kcr_07="<20%支持", kcr_08="无", kcr_10b="全流程且≥3节点可控")
+    result = ConfigDrivenStrategy().evaluate(c)
+    dim = next(d for d in result.dimensions if d.key == "kcr")
+    assert (dim.score, dim.max_score) == (13, 30)
+    alert = next(a for a in result.alerts if a.id == "kcr_dimension_low")
+    assert alert.message == "KCR维度得分率 43.3%，低于50%，当前关键关系基础偏弱"
+    assert "43.3分" not in alert.message and "恶化" not in alert.message
+    assert alert.level == "high"
+
+
+@pytest.mark.parametrize("key,rate,threshold,description", [
+    ("risk", 6, 40, "风险维度表现偏弱"),
+    ("ci", 0, 30, "客户洞察存在明显短板"),
+])
+def test_other_dimension_alerts_render_percentage_and_threshold_unit(key, rate, threshold, description):
+    c = customer()
+    for f in next(d for d in CONFIG.enabled_dimensions if d.key == key).enabled_factors:
+        put(c, f, min(f.input.options, key=lambda value: evaluate_factor(f, value).score))
+    result = ConfigDrivenStrategy().evaluate(c)
+    dim = next(d for d in result.dimensions if d.key == key)
+    assert round(dim.score / dim.max_score * 100, 1) == rate
+    alert = next(a for a in result.alerts if a.id == key + "_dimension_low")
+    assert alert.message == f"{key.upper()}维度得分率 {rate}%，低于{threshold}%，{description}"
+    assert alert.level == "high"
+
+
+@pytest.mark.parametrize("field,alert_id,label,values", [
+    ("risk_08b", "ces_critical", "RISK-08B 客户费力度CES",
+     ["高(<60%)", "较高(60-79%)", "中(80-90%)"]),
+    ("risk_08c", "customer_business_risk_critical", "RISK-08C 客户自身经营风险",
+     ["危机", "下行或承压", "平稳"]),
+])
+@pytest.mark.parametrize("index,score", [(0, 1), (1, 4), (2, 7)])
+def test_special_alert_mapping_score_and_strict_boundary(field, alert_id, label, values, index, score):
+    c = customer()
+    c.custom_fields[field] = values[index]
+    result = ConfigDrivenStrategy().evaluate(c)
+    factor = next(f for d in result.dimensions for f in d.factors if f.field == field)
+    assert factor.score == score
+    alerts = {a.id: a for a in result.alerts}
+    if score < 4:
+        assert alerts[alert_id].message == f"{label}映射分 {score}/10，低于4分"
+        assert alerts[alert_id].level == "high"
+        assert field + "_low" not in alerts
+    else:
+        assert alert_id not in alerts
+        assert (field + "_low" in alerts) is (score == 4)
 
 
 def test_superseded_generic_suggestion_is_not_duplicated():

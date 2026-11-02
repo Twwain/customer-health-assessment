@@ -576,7 +576,7 @@ score_alerts:
     key: kcr
     op: lt
     value: 50
-    message: "KCR维度得分 {value}，低于50，关键关系恶化"
+    message: "KCR维度得分率 {value}%，低于50%，当前关键关系基础偏弱"
     suggestion: "优先补齐决策链覆盖、Champion与关键人支持。"
   - id: risk_dimension_low
     level: high
@@ -584,7 +584,7 @@ score_alerts:
     key: risk
     op: lt
     value: 40
-    message: "RISK维度得分 {value}，低于40，风险信号密集"
+    message: "RISK维度得分率 {value}%，低于40%，风险维度表现偏弱"
     suggestion: "立即复盘关键人变动、互动下降、竞品POC及客户经营风险。"
   - id: ci_dimension_low
     level: high
@@ -592,7 +592,7 @@ score_alerts:
     key: ci
     op: lt
     value: 30
-    message: "CI维度得分 {value}，低于30，客户洞察严重不足"
+    message: "CI维度得分率 {value}%，低于30%，客户洞察存在明显短板"
     suggestion: "补齐业务战略、决策标准、预算周期与ROI材料。"
   - id: ces_critical
     level: high
@@ -600,7 +600,7 @@ score_alerts:
     key: risk_08b
     op: lt
     value: 4
-    message: "RISK-08B客户费力度CES得分 {value}，低于4"
+    message: "RISK-08B 客户费力度CES映射分 {value}/10，低于4分"
     suggestion: "降低客户交互与重复提供信息成本，提升一次解决率。"
   - id: customer_business_risk_critical
     level: high
@@ -608,7 +608,7 @@ score_alerts:
     key: risk_08c
     op: lt
     value: 4
-    message: "RISK-08C客户自身经营风险得分 {value}，低于4"
+    message: "RISK-08C 客户自身经营风险映射分 {value}/10，低于4分"
     suggestion: "复核行业与财务风险，调整授信、项目节奏和资源投入。"
 
   - id: kcr_01_low
