@@ -163,6 +163,8 @@ export interface ChatMessageItem {
   session_id: number;
   role: string;
   scenario?: string | null;
+  assessment?: AssessmentResponse | null;
+  trend?: AssessmentTrendResponse | null;
   content: string;
   references: KnowledgeReference[];
   strategy_items: StrategyItem[];

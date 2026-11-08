@@ -266,6 +266,8 @@ class ChatMessageItem(BaseModel):
     availability: str = "legacy"
     references: list[Any] = Field(default_factory=list)
     strategy_items: list[Any] = Field(default_factory=list)
+    assessment: AssessmentResponse | None = None
+    trend: AssessmentTrendResponse | None = None
     tokens_used: int = 0
     feedback: str = ""
     degraded: bool = False

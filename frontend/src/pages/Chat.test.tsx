@@ -214,7 +214,7 @@ describe("Chat 核心操作", () => {
       max_score: 100, level: '风险', level_color: '#f97316', dimensions: [], risk_alerts: [], alerts: [],
       suggestions: [], config_version: 'test', assessed_at: '2026-11-01T00:00:00' };
     vi.mocked(customers.assessment).mockResolvedValue(score);
-    const assessment = { ...answer(1, '综合评估正文'), scenario: 'assessment' };
+    const assessment = { ...answer(1, '综合评估正文'), scenario: 'assessment', assessment: score };
     const qa = { ...answer(2, ':::ai-text "先修复关键人关系，这是当前推进的主要依赖。"'), scenario: 'free_qa',
       strategy_items: [{ priority: 'recommended', title: '关键人工作坊', urgency: 'medium', reason: '关系是推进依赖',
         action: '邀请关键人', expected_outcome: '确认下一次沟通', reference: '', steps: ['邀请关键人'],

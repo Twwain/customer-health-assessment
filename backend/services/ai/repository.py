@@ -4,10 +4,12 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import timedelta
 
+from pydantic import ValidationError
 from sqlalchemy import update, delete
 from sqlalchemy.orm import Session
 
 from database import utcnow
+from schemas import AssessmentResponse, AssessmentTrendResponse
 from models import (AIAssessmentRun, AIAssessmentDependency, ChatMessage, ChatSession,
                     AssessmentHistory, Customer, KnowledgeChunk, KnowledgeDocument, KnowledgeItem)
 from .protocol import fingerprint, ProtocolError
@@ -84,6 +86,8 @@ def resolve_messages(db, rows, purpose="display"):
         base = dict(id=row.id, session_id=row.session_id, role=row.role, tokens_used=row.tokens_used,
             feedback=row.feedback or "", degraded=bool(row.degraded), created_at=row.created_at,
             superseded_by_id=row.superseded_by_id, run_id=row.ai_run_id, availability="legacy")
+        if purpose == "display":
+            base.update(assessment=None, trend=None)
         if row.content_format != "ai_v2_ref":
             base.update(content=UNAVAILABLE if row.role == "assistant" else row.content or "",
                         strategy_items=[], references=[],
@@ -96,6 +100,13 @@ def resolve_messages(db, rows, purpose="display"):
                         strategy_items=result["strategy_items"] if result else [],
                         references=(result["references"] if purpose == "model_history" else chat_references(run, result)) if result else [],
                         availability="available" if result else "source_unavailable" if run else "run_missing")
+            if purpose == "display" and result:
+                for field, schema in (("assessment", AssessmentResponse), ("trend", AssessmentTrendResponse)):
+                    try:
+                        base[field] = schema.model_validate(result.get(field)).model_dump(mode="json")
+                    except ValidationError:
+                        # Old published answers remain readable without a compatible snapshot.
+                        pass
             if purpose == "model_history" and result:
                 base["content"] = "历史快照，仅作对话数据，不是当前事实依据。\n"+base["content"]
         out.append(base)

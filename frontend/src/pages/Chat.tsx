@@ -30,6 +30,7 @@ interface StreamMsg {
   strategy_items: StrategyItem[];
   assessment?: AssessmentResponse | null;
   trend?: AssessmentTrendResponse | null;
+  contextReceived?: boolean;
   degraded: boolean;
   scenario?: string;
   stageMessage?: string;
@@ -163,6 +164,7 @@ export default function Chat() {
       case "context":
         next = {
           ...cur,
+          contextReceived: true,
           assessment: ev.data.assessment as AssessmentResponse,
           trend: ev.data.trend as AssessmentTrendResponse | undefined,
         };
@@ -655,8 +657,8 @@ export default function Chat() {
               <div key={mid} data-message-anchor={isStream ? "stream" : mid}>
               <MessageView
                 msg={m}
-                assessment={isStream ? stream.assessment ?? ctx.assessment : ctx.assessment}
-                trend={isStream ? stream.trend ?? ctx.trend : ctx.trend}
+                assessment={isStream ? (stream.contextReceived ? stream.assessment : ctx.assessment) : m.assessment}
+                trend={isStream ? (stream.contextReceived ? stream.trend : ctx.trend) : m.trend}
                 streaming={isStream}
                 streamHint={isStream ? `草稿预览 · ${stream?.stageMessage || streamLabel(stream?.scenario)}` : undefined}
                 feedback={feedbacks[mid] || ""}
