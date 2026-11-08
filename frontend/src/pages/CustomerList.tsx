@@ -155,6 +155,7 @@ export default function CustomerList() {
         .then((t) => setTrends((p) => ({ ...p, [r.customer.id]: t })))
         .catch(() => {});
       setFactorDrawer(null);
+      await evalCustomer(r.customer);
     } catch (e) {
       notify(
         `${basicSaved ? "基本信息已保存；" : ""}保存失败：` +
